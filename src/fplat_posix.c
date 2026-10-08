@@ -870,4 +870,10 @@ int plat_cpu_count(void) {
   return n > 0 ? (int)n : 1;
 }
 
+/* Linux/BSD/macOS: square corners for now (needs per-platform window work). */
+int plat_window_corners(bool round, int radius_px, u32 border_rgb, bool maximized) {
+  FM_UNUSED(round); FM_UNUSED(radius_px); FM_UNUSED(border_rgb); FM_UNUSED(maximized);
+  return 0;
+}
+
 #endif

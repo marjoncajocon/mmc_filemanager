@@ -3,6 +3,7 @@
 #include "fapp.h"
 #include "fconf.h"
 #include "fui.h"
+#include "fplat.h"
 
 #define NODRAG_MAX 24
 
@@ -181,10 +182,42 @@ void title_buttons(FmRect *in) {
 }
 #endif
 
-void title_outline(void) {
-  if (!g_custom) return;
+/* ---- window corners and outline ----------------------------------------- */
+
+#define CORNER_RADIUS 10                /* dp, close to macOS windows */
+
+static int g_corner_mode;               /* plat_window_corners() result */
 #if !defined(FM_MOBILE) && !defined(FM_WEB)
-  if (SDL_GetWindowFlags(app.win) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN)) return;
+static u32 g_corner_key[5];             /* what it was applied for */
 #endif
-  gfx_rrect_line(FM_RECT(0, 0, ui.w, ui.h), 0, FM_MAX(1.0f, DP(1)), T.border);
+
+static void update_corners(bool custom, bool maxed) {
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+  int ww, wh;
+  SDL_GetWindowSize(app.win, &ww, &wh);
+  u32 rgb = ((u32)T.border.r << 16) | ((u32)T.border.g << 8) | T.border.b;
+  int rad = (int)(DP(CORNER_RADIUS) + 0.5f);
+  u32 key[5] = { (u32)custom | ((u32)maxed << 1), (u32)ww, (u32)wh, rgb, (u32)rad };
+  if (!memcmp(key, g_corner_key, sizeof key)) return;
+  bool first = g_corner_key[1] == 0;
+  memcpy(g_corner_key, key, sizeof key);
+  if (!custom && first) return;         /* the OS frame was never touched */
+  g_corner_mode = plat_window_corners(custom, rad, rgb, maxed);
+#else
+  FM_UNUSED(custom);
+  FM_UNUSED(maxed);
+#endif
+}
+
+void title_outline(void) {
+  bool maxed = false;
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+  if (!app.win) return;
+  maxed = (SDL_GetWindowFlags(app.win) & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN)) != 0;
+#endif
+  update_corners(g_custom, maxed);
+  if (!g_custom || maxed) return;
+  if (g_corner_mode == 1) return;       /* Windows 11 draws the edge itself */
+  float rad = g_corner_mode == 2 ? DP(CORNER_RADIUS) : 0;
+  gfx_rrect_line(FM_RECT(0, 0, ui.w, ui.h), rad, FM_MAX(1.0f, DP(1)), T.border);
 }

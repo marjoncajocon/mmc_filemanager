@@ -108,6 +108,12 @@ u64  plat_now_ms(void);                          /* monotonic */
 i64  plat_time_unix(void);
 int  plat_cpu_count(void);
 
+/* Rounded corners for the borderless app window. Returns 1 when the system
+** compositor rounds it (Windows 11: smooth, with the native border in
+** border_rgb), 2 when it is clipped to a rounded region (older Windows; the
+** app draws its own outline), 0 when nothing was done. */
+int plat_window_corners(bool round, int radius_px, u32 border_rgb, bool maximized);
+
 /* Storage permission (Android 11+: all-files access). Desktop: always true. */
 bool plat_storage_granted(void);
 void plat_storage_request(void);

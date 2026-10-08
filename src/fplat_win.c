@@ -505,4 +505,75 @@ int plat_cpu_count(void) {
 bool plat_storage_granted(void) { return true; }
 void plat_storage_request(void) {}
 
+/* ---- rounded window corners ---------------------------------------------- */
+
+/* SDL tags every window it creates with this property; our process has one. */
+static BOOL CALLBACK find_sdl_window(HWND h, LPARAM out) {
+  if (GetPropW(h, L"SDL_WindowData")) {
+    *(HWND *)out = h;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static HWND sdl_hwnd(void) {
+  HWND h = NULL;
+  EnumThreadWindows(GetCurrentThreadId(), find_sdl_window, (LPARAM)&h);
+  return h;
+}
+
+/* dwmapi is loaded at run time so the exe still starts where it is missing,
+** and every attribute below is simply refused by Windows before 11. */
+typedef HRESULT (WINAPI *DwmSetAttrFn)(HWND, DWORD, LPCVOID, DWORD);
+
+static DwmSetAttrFn dwm_set_attr(void) {
+  static int tried;
+  static DwmSetAttrFn fn;
+  if (!tried) {
+    tried = 1;
+    HMODULE m = LoadLibraryW(L"dwmapi.dll");
+    if (m) fn = (DwmSetAttrFn)(void (*)(void))GetProcAddress(m, "DwmSetWindowAttribute");
+  }
+  return fn;
+}
+
+enum { DWMWA_CORNER = 33, DWMWA_BORDER = 34 };          /* Windows 11 (build 22000) */
+enum { CORNER_DEFAULT = 0, CORNER_NONE = 1, CORNER_ROUND = 2 };
+
+int plat_window_corners(bool round, int radius_px, u32 border_rgb, bool maximized) {
+  HWND h = sdl_hwnd();
+  if (!h) return 0;
+  DwmSetAttrFn set = dwm_set_attr();
+  /* MMCFM_CORNERS=region tests the pre-Windows-11 path on a new system */
+  const char *force = getenv("MMCFM_CORNERS");
+  if (force && !strcmp(force, "region")) set = NULL;
+  if (set) {
+    DWORD pref = round ? CORNER_ROUND : CORNER_NONE;
+    if (SUCCEEDED(set(h, DWMWA_CORNER, &pref, sizeof pref))) {
+      /* the compositor rounds, anti-aliases and shadows; it also draws the
+      ** 1px edge, which we colour like the theme (0xFFFFFFFE = no border) */
+      COLORREF c = round ? RGB((border_rgb >> 16) & 255, (border_rgb >> 8) & 255, border_rgb & 255)
+                         : (COLORREF)0xFFFFFFFF;          /* DWMWA_COLOR_DEFAULT */
+      set(h, DWMWA_BORDER, &c, sizeof c);
+      SetWindowRgn(h, NULL, TRUE);
+      return 1;
+    }
+  }
+  /* Windows 7 / 8 / 10: clip the window to a rounded region (no AA). */
+  if (!round || maximized) {
+    SetWindowRgn(h, NULL, TRUE);
+    return 0;
+  }
+  RECT r;
+  if (!GetWindowRect(h, &r)) return 0;
+  int d = radius_px * 2;
+  HRGN rgn = CreateRoundRectRgn(0, 0, r.right - r.left + 1, r.bottom - r.top + 1, d, d);
+  if (!rgn) return 0;
+  if (!SetWindowRgn(h, rgn, TRUE)) {     /* the window owns rgn on success */
+    DeleteObject(rgn);
+    return 0;
+  }
+  return 2;
+}
+
 #endif
