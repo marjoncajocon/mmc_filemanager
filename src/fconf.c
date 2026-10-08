@@ -21,8 +21,9 @@ FmConf conf;
 
 void conf_defaults(void) {
   memset(&conf, 0, sizeof conf);
+  conf.theme = 0;
   conf.dark = true;
-  conf.accent = 0;
+  conf.accent = -1;
   conf.zoom = 1.0f;
   conf.touch = -1;
   conf.layout = LAYOUT_AUTO;
@@ -95,8 +96,9 @@ static float to_float(const char *v, float lo, float hi, float def) {
 static void set_key(const char *k, const char *raw) {
   char v[FM_PATH_MAX];
   unesc(raw, v, sizeof v);
-  if (!strcmp(k, "dark")) conf.dark = to_bool(v);
-  else if (!strcmp(k, "accent")) conf.accent = to_int(v, 0, UI_ACCENTS - 1, 0);
+  if (!strcmp(k, "theme")) conf.theme = to_int(v, 0, THEME_COUNT - 1, 0);
+  else if (!strcmp(k, "dark")) conf.dark = to_bool(v);
+  else if (!strcmp(k, "accent")) conf.accent = to_int(v, -1, UI_ACCENTS - 1, -1);
   else if (!strcmp(k, "zoom")) conf.zoom = to_float(v, 0.75f, 2.0f, 1.0f);
   else if (!strcmp(k, "touch")) conf.touch = to_int(v, -1, 1, -1);
   else if (!strcmp(k, "layout")) conf.layout = to_int(v, LAYOUT_AUTO, LAYOUT_SINGLE, LAYOUT_AUTO);
@@ -157,7 +159,8 @@ void conf_load(void) {
     set_key(line, eq + 1);
   }
   fclose(f);
-  if (conf.accent < 0 || conf.accent >= UI_ACCENTS) conf.accent = 0;
+  if (conf.accent < -1 || conf.accent >= UI_ACCENTS) conf.accent = -1;
+  if (conf.theme < 0 || conf.theme >= THEME_COUNT) conf.theme = 0;
 }
 
 static void put(FILE *f, const char *k, const char *v) {
@@ -179,6 +182,7 @@ void conf_save(void) {
     return;
   }
   fprintf(f, "# MMC File Manager %s settings\n", FM_VERSION);
+  put_i(f, "theme", conf.theme);
   put_i(f, "dark", conf.dark);
   put_i(f, "accent", conf.accent);
   put_f(f, "zoom", conf.zoom);

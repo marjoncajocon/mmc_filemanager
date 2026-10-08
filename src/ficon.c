@@ -7,6 +7,7 @@
 **     stay legible from 14 px menu icons to 64 px empty-state art.
 */
 #include "ficon.h"
+#include "fui.h"
 #include <math.h>
 
 #define PI_F 3.14159265f
@@ -458,15 +459,15 @@ void icon_draw(FmIcon ic, FmRect r, FmColor c) {
 
 FmColor icon_type_color(int t) {
   switch (t) {
-    case FT_DIR: case FT_UP: return FM_HEX(0xF2B53C);
-    case FT_IMAGE: case FT_GIF: case FT_SVG: return FM_HEX(0x2EB67D);
-    case FT_AUDIO: return FM_HEX(0xE0559B);
-    case FT_VIDEO: return FM_HEX(0xEF5350);
-    case FT_ARCHIVE: return FM_HEX(0xB07A3C);
-    case FT_TEXT: return FM_HEX(0x7C8AA5);
-    case FT_CODE: return FM_HEX(0x26A6C9);
-    case FT_PDF: return FM_HEX(0xE53935);
-    case FT_DOC: return FM_HEX(0x3B7DDD);
+    case FT_DIR: case FT_UP: return T.types[TC_FOLDER];
+    case FT_IMAGE: case FT_GIF: case FT_SVG: return T.types[TC_IMAGE];
+    case FT_AUDIO: return T.types[TC_AUDIO];
+    case FT_VIDEO: return T.types[TC_VIDEO];
+    case FT_ARCHIVE: return T.types[TC_ARCHIVE];
+    case FT_TEXT: return T.types[TC_TEXT];
+    case FT_CODE: return T.types[TC_CODE];
+    case FT_PDF: return T.types[TC_PDF];
+    case FT_DOC: return T.types[TC_DOC];
     case FT_SHEET: return FM_HEX(0x1E9E57);
     case FT_SLIDE: return FM_HEX(0xF07B26);
     case FT_APK: return FM_HEX(0x7CB342);

@@ -56,6 +56,9 @@ void gfx_rrect4(FmRect r, float tl, float tr, float br, float bl, FmColor c);
 void gfx_rrect_vgrad(FmRect r, float radius, FmColor top, FmColor bottom);
 void gfx_rrect_line(FmRect r, float radius, float thick, FmColor c);
 void gfx_shadow(FmRect r, float radius, float blur, FmColor c);   /* soft drop shadow */
+/* How gfx_shadow draws: 0 soft, 1 nothing, 2 a solid copy offset by dx,dy
+** (design px, scaled with the blur size). Set by the theme. */
+void gfx_shadow_style(int kind, float dx, float dy);
 void gfx_circle(float cx, float cy, float radius, FmColor c);
 void gfx_ring(float cx, float cy, float radius, float thick, FmColor c);
 /* Arc from a0 to a1 (radians, 0 = right, clockwise on screen). */

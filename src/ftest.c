@@ -99,6 +99,7 @@ static const TestArea kAreas[] = {
   { "7z-rar", test_archives2 },
   { "fs", test_fs },
   { "media", test_media },
+  { "themes", test_themes },
 };
 
 int test_run_all(void) {

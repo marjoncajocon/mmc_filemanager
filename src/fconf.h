@@ -16,8 +16,9 @@ enum { LAYOUT_AUTO = 0, LAYOUT_SIDE, LAYOUT_STACK, LAYOUT_SINGLE };
 enum { VIEW_LIST = 0, VIEW_GRID };
 
 typedef struct FmConf {
-  bool dark;
-  int accent;                 /* index into kAccents */
+  int theme;                  /* built-in theme, 0 .. THEME_COUNT-1 */
+  bool dark;                  /* preferred mode when the theme has both */
+  int accent;                 /* index into kAccents, -1 = the theme's own */
   float zoom;                 /* UI zoom, 0.75 .. 2.0 */
   int touch;                  /* -1 auto, 0 off, 1 on */
   int layout;                 /* LAYOUT_* */

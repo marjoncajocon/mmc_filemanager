@@ -365,7 +365,23 @@ void gfx_rrect_line(FmRect r, float radius, float thick, FmColor c) {
   ring_strip(p2, c, p3, z, n);
 }
 
+static int g_shadow_kind;
+static float g_shadow_dx, g_shadow_dy;
+
+void gfx_shadow_style(int kind, float dx, float dy) {
+  g_shadow_kind = kind;
+  g_shadow_dx = dx;
+  g_shadow_dy = dy;
+}
+
 void gfx_shadow(FmRect r, float radius, float blur, FmColor c) {
+  if (g_shadow_kind == 1) return;
+  if (g_shadow_kind == 2) {
+    /* hard offset shadow; call sites pass blur ~ DP(14), so blur/14 ~ one dp */
+    float k = blur / 14.0f;
+    if (c.a) gfx_rrect(FM_RECT(r.x + g_shadow_dx * k, r.y + g_shadow_dy * k, r.w, r.h), radius, c);
+    return;
+  }
   if (c.a == 0 || culled(r.x - blur, r.y - blur, r.w + 2 * blur, r.h + 2 * blur)) return;
   int segs = corner_segs(radius + blur);
   float in[2 * 4 * 13], mid[2 * 4 * 13], out[2 * 4 * 13];

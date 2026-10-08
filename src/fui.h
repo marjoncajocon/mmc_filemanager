@@ -20,6 +20,7 @@
 #include "fgfx.h"
 #include "ffont.h"
 #include "ficon.h"
+#include "ftheme.h"
 
 /* ---- theme -------------------------------------------------------------- */
 
@@ -36,12 +37,27 @@ typedef struct FmTheme {
   FmColor hover, press;         /* overlays */
   FmColor danger, success, warn;
   FmColor shadow, scrim;
+  /* style from the theme table (ftheme.c); sizes are design px at 100% */
+  int theme;                    /* index into the built-in themes */
+  bool bg_grad;                 /* bg -> bg_mid -> bg2 vertical gradient */
+  FmColor bg_mid, bg2;
+  float bg_mid_at;
+  FmColor sel_text;             /* alpha 0: selected rows keep text colours */
+  FmColor panel_border;         /* alpha 0: no outline */
+  float panel_border_w;
+  int shadow_kind;              /* SHADOW_* */
+  float radius, row_radius, row_h, font_k;
+  FmColor types[TC_COUNT];      /* file-type icon colours */
 } FmTheme;
 
 extern FmTheme T;
 #define UI_ACCENTS 8
 extern const FmColor kAccents[UI_ACCENTS];
-void theme_apply(bool dark, int accent);
+/* accent < 0 uses the theme's own accent; a missing mode falls back to the
+** theme's other one (T.dark tells which was used). Defined in ftheme.c. */
+void theme_apply(int theme, bool dark, int accent);
+/* Full-window background, including the gradient themes. */
+void theme_draw_bg(FmRect r);
 
 /* ---- metrics ------------------------------------------------------------ */
 

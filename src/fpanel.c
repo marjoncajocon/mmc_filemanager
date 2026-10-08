@@ -877,7 +877,7 @@ static void item_input(RowCtx *c, int pos, int f) {
 }
 
 static void row_bg(FmRect r, bool sel, bool cursor, bool active, int f) {
-  float rad = DP(10);
+  float rad = FM_MIN(DP(T.row_radius), r.h * 0.5f);
   if (sel) gfx_rrect(r, rad, T.sel);
   else if (f & UI_HELD) gfx_rrect(r, rad, T.press);
   else if (f & UI_HOVER) gfx_rrect(r, rad, T.hover);
@@ -887,7 +887,7 @@ static void row_bg(FmRect r, bool sel, bool cursor, bool active, int f) {
 
 static void draw_list(RowCtx *c, FmRect body, float shift_y) {
   FmPanel *p = c->p;
-  float rh = FM_MAX(ui.m.row_h, DP(ui.touch_mode ? 60 : 44));
+  float rh = FM_MAX(ui.m.row_h, DP(ui.touch_mode ? FM_MAX(T.row_h * 1.15f, 52) : T.row_h));
   p->row_h = rh;
   p->cols = 1;
   p->tile_h = 0;
@@ -904,6 +904,7 @@ static void draw_list(RowCtx *c, FmRect body, float shift_y) {
   gfx_clip_push(body);
   float fs = ui.m.font, fss = ui.m.font_small;
   float lh = font_line_h(fs), lhs = font_line_h(fss);
+  bool one_line = rh < lh + lhs + DP(6);
   for (int i = first; i <= last; i++) {
     FmEntry *e = &p->list.items[p->view[i]];
     FmRect row = { body.x + DP(6), body.y + top_pad + (float)i * rh - p->scroll.y + shift_y,
@@ -921,24 +922,34 @@ static void draw_list(RowCtx *c, FmRect body, float shift_y) {
     draw_icon(p, e, FM_RECT(x, row.y + (rh - is) * 0.5f, is, is));
     x += is + DP(12);
     FmColor name_c = (e->flags & FM_ST_HIDDEN) ? T.text2 : T.text;
+    FmColor sub_c = T.text2;
+    if (e->selected && T.sel_text.a) { name_c = T.sel_text; sub_c = col_alpha(T.sel_text, 0.75f); }
     float right = row.x + row.w - DP(10);
     char sec[96];
     if (wide) {
       char a[32], b[32];
       float dx = right - colw_date;
       float ty = row.y + (rh - lhs) * 0.5f;
-      if (e->mtime) font_draw(FONT_REGULAR, fss, dx, ty, fm_fmt_time(e->mtime, b, sizeof b), -1, T.text2);
+      if (e->mtime) font_draw(FONT_REGULAR, fss, dx, ty, fm_fmt_time(e->mtime, b, sizeof b), -1, sub_c);
       const char *sz = (e->flags & FM_ST_DIR) ? "Folder" : fm_fmt_size(e->size, a, sizeof a);
       float sw = font_width(FONT_REGULAR, fss, sz, -1);
-      font_draw(FONT_REGULAR, fss, dx - DP(16) - sw, ty, sz, -1, T.text2);
+      font_draw(FONT_REGULAR, fss, dx - DP(16) - sw, ty, sz, -1, sub_c);
       font_draw_mid_ellipsis(FONT_REGULAR, fs, x, row.y + (rh - lh) * 0.5f, e->name,
                              dx - colw_size - DP(16) - x, name_c);
+    } else if (one_line) {
+      /* dense themes: no room for a second line, so the size goes right */
+      char a[32];
+      const char *sz = (e->flags & FM_ST_DIR) ? "" : fm_fmt_size(e->size, a, sizeof a);
+      float sw = *sz ? font_width(FONT_REGULAR, fss, sz, -1) : 0;
+      if (*sz) font_draw(FONT_REGULAR, fss, right - sw, row.y + (rh - lhs) * 0.5f, sz, -1, sub_c);
+      font_draw_mid_ellipsis(FONT_REGULAR, fs, x, row.y + (rh - lh) * 0.5f, e->name,
+                             right - x - sw - (*sz ? DP(12) : 0), name_c);
     } else {
       float gap = DP(1);
       float y0 = row.y + (rh - lh - lhs - gap) * 0.5f;
       font_draw_mid_ellipsis(FONT_REGULAR, fs, x, y0, e->name, right - x, name_c);
       secondary_text(e, sec, sizeof sec, true);
-      font_draw_ellipsis(FONT_REGULAR, fss, x, y0 + lh + gap, sec, right - x, T.text2);
+      font_draw_ellipsis(FONT_REGULAR, fss, x, y0 + lh + gap, sec, right - x, sub_c);
     }
   }
   gfx_clip_pop();
@@ -987,6 +998,7 @@ static void draw_grid(RowCtx *c, FmRect body, float shift_y) {
       }
       float ty = box.y + is + DP(6);
       FmColor nc = (e->flags & FM_ST_HIDDEN) ? T.text2 : T.text;
+      if (e->selected && T.sel_text.a) nc = T.sel_text;
       float nw = font_width(FONT_REGULAR, fs, e->name, -1);
       float maxw = cell.w - DP(10);
       if (nw <= maxw)
@@ -1339,6 +1351,7 @@ void panel_frame(FmPanel *p, FmRect r, bool active) {
   FmColor hbg = col_mix(T.surface2, T.accent, (T.dark ? 0.10f : 0.07f) * t);
   gfx_rrect4(hdr, rad, rad, 0, 0, hbg);
   ui_divider(r.x, r.x + r.w, hdr.y + hdr.h - 1);
+  if (T.panel_border.a) gfx_rrect_line(r, rad, DP(T.panel_border_w), T.panel_border);
 
   /* a press anywhere on the card makes it active */
   if (ui_input_ok() && ui.pressed && rect_has(r, ui.press_x, ui.press_y)) app_panel_activate(p->idx);

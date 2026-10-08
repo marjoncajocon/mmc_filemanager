@@ -379,10 +379,16 @@ case "$TARGET" in
       EMCC="$(ls "$EMSDK"/upstream/emscripten/emcc 2>/dev/null | head -1)"
     fi
     [ -n "$EMCC" ] || die "emcc not found (activate emsdk or set EMSDK)"
+    # emcc needs python 3.10+; prefer the one emsdk ships over an older system python
+    if [ -z "${EMSDK_PYTHON:-}" ]; then
+      for py in "$EMSDK"/python/*/python.exe "$EMSDK"/python/*/bin/python3; do
+        [ -x "$py" ] && { export EMSDK_PYTHON="$py"; break; }
+      done
+    fi
     [ "$CMD" = sdl ] && { echo "web uses emscripten's SDL2 port; nothing to build"; exit 0; }
     CC="$EMCC"
     CFLAGS="-std=c11 $OPT $WARN -sUSE_SDL=2 -DFM_NO_ASM"
-    VCFLAGS="-std=c11 $OPT -w -sUSE_SDL=2"
+    VCFLAGS="-std=c11 $OPT -w -sUSE_SDL=2 -D_POSIX_C_SOURCE=200809L"   # bzip2 uses fdopen
     SDL_LINK="static"
     LDFLAGS="-sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=33554432 -lidbfs.js --shell-file web/index.html"
     OUT="$OUTDIR/index.html"

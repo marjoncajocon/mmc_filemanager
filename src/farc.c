@@ -351,7 +351,7 @@ struct FmArcSink {
   struct { Deferred *items; int count, cap; } later;
 };
 
-#define LINK_MAX 4096
+#define ARC_LINK_MAX 4096
 
 #ifdef FM_WIN
 static bool win_reserved(const char *c, size_t n) {
@@ -466,7 +466,7 @@ FmErr sink_begin(FmArcSink *s, int index, bool *skip) {
 #ifdef FM_POSIX
   if (e->is_link && !s->one) {
     s->link_mode = true;
-    s->link = (char *)fm_alloc(LINK_MAX + 1);
+    s->link = (char *)fm_alloc(ARC_LINK_MAX + 1);
     s->link_len = 0;
     *skip = false;
     return FM_OK;
@@ -485,7 +485,7 @@ FmErr sink_begin(FmArcSink *s, int index, bool *skip) {
 FmErr sink_write(FmArcSink *s, const void *data, size_t n) {
   if (s->cancelled) return FM_ERR_CANCEL;
   if (s->link_mode) {
-    if (s->link_len + n > LINK_MAX) return FM_ERR_FORMAT;
+    if (s->link_len + n > ARC_LINK_MAX) return FM_ERR_FORMAT;
     memcpy(s->link + s->link_len, data, n);
     s->link_len += n;
   } else {

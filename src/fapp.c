@@ -1067,6 +1067,70 @@ static int dlg_buttons(FmRect c, const char *const *labels, int n, bool danger) 
 
 static float field_h(void) { return DP(ui.touch_mode ? 48 : 40); }
 
+/* ---- theme picker ------------------------------------------------------- */
+
+static FmColor argb_col(u32 c) {
+  return FM_RGBA((c >> 16) & 255, (c >> 8) & 255, c & 255, (c >> 24) & 255);
+}
+
+static FmColor theme_accent_of(int theme, bool dark) {
+  return argb_col(theme_variant(theme, dark)->accent);
+}
+
+#define THEME_CARD_H 64
+
+static int theme_grid_cols(float w) { return FM_MAX(2, (int)(w / DP(150))); }
+
+static float theme_grid_h(float w) {
+  int cols = theme_grid_cols(w);
+  int rows = (THEME_COUNT + cols - 1) / cols;
+  return (float)rows * DP(THEME_CARD_H + 8) - DP(8);
+}
+
+/* A grid of small previews, each painted in its theme's own colours. */
+static void theme_grid(FmRect *r, u32 base, float h) {
+  FmRect g = rect_cut_top(r, h);
+  int cols = theme_grid_cols(g.w);
+  float gap = DP(8), cw = (g.w - gap * (float)(cols - 1)) / (float)cols, ch = DP(THEME_CARD_H);
+  for (int t = 0; t < THEME_COUNT; t++) {
+    FmRect c = { g.x + (float)(t % cols) * (cw + gap), g.y + (float)(t / cols) * (ch + gap), cw, ch };
+    if (!gfx_visible(c)) continue;
+    bool cur = t == conf.theme;
+    const FmThemeVariant *v = theme_variant(t, cur ? T.dark : conf.dark);
+    int f = ui_hit(ui_idn(base, (u32)t), c);
+    FmColor panel = argb_col(v->panel), tx = argb_col(v->text | 0xFF000000u);
+    float rad = DP(10);
+    if (v->grad.top) gfx_rrect_vgrad(c, rad, argb_col(v->grad.top), argb_col(v->grad.bottom));
+    else gfx_rrect(c, rad, argb_col(v->bg));
+    /* two mini panels with a selected row, like the real screen */
+    FmRect in = rect_inset(c, DP(7));
+    FmRect lbl = rect_cut_bottom(&in, font_line_h(ui.m.font_small));
+    rect_cut_bottom(&in, DP(3));
+    float pw = (in.w - DP(4)) * 0.5f;
+    for (int i = 0; i < 2; i++) {
+      FmRect pr = { in.x + (float)i * (pw + DP(4)), in.y, pw, in.h };
+      gfx_rrect(pr, DP(4), panel);
+      if (v->border >> 24) gfx_rrect_line(pr, DP(4), DP(1), argb_col(v->border));
+      FmRect row = { pr.x + DP(3), pr.y + DP(4), pr.w - DP(6), DP(5) };
+      gfx_rrect(row, DP(2), i == 0 ? argb_col(v->sel | 0x60000000u) : col_alpha(tx, 0.18f));
+      row.y += DP(8);
+      gfx_rrect(row, DP(2), col_alpha(tx, 0.18f));
+    }
+    gfx_circle(in.x + in.w - DP(6), in.y + in.h - DP(6), DP(4), argb_col(v->accent));
+    font_draw_ellipsis(cur ? FONT_BOLD : FONT_REGULAR, ui.m.font_small, lbl.x, lbl.y,
+                       theme_info(t)->name, lbl.w, tx);
+    if (cur) gfx_rrect_line(rect_inset(c, -DP(3)), rad + DP(3), DP(2), T.accent);
+    else if (f & UI_HOVER) gfx_rrect_line(rect_inset(c, -DP(2)), rad + DP(2), DP(1.5f), T.border);
+    if ((f & UI_CLICK) && !cur) {
+      conf.theme = t;
+      if (!theme_has_mode(t, conf.dark)) conf.dark = !conf.dark;
+      conf.accent = -1;            /* a new theme brings its own accent */
+      theme_apply(conf.theme, conf.dark, conf.accent);
+      conf_dirty();
+    }
+  }
+}
+
 static void small_label(FmRect *c, const char *s) {
   FmRect r = rect_cut_top(c, font_line_h(ui.m.font_small) + DP(6));
   font_draw(FONT_BOLD, ui.m.font_small, r.x + DP(2), r.y, s, -1, T.text2);
@@ -1725,7 +1789,9 @@ static void dlg_settings(void) {
   rect_cut_bottom(&c, DP(10));
   float rh = DP(ui.touch_mode ? 50 : 42), sl = font_line_h(ui.m.font_small) + DP(14);
   float seg_h = DP(ui.touch_mode ? 40 : 34);
-  float content = sl * 4 + (seg_h + DP(10)) * 3 + DP(46) + rh * 2 + rh * 5 + DP(40) + DP(90);
+  float grid_h = theme_grid_h(c.w - DP(6));
+  float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 2 + rh * 5 +
+                  DP(40) + DP(90);
   u32 sid = ui_id("dlg.settings.scroll");
   ui_scroll(&D.scroll, sid, c, content);
   gfx_clip_push(c);
@@ -1733,32 +1799,46 @@ static void dlg_settings(void) {
   u32 base = ui_id("dlg.settings.w");
   int k = 0;
 
+  small_label(&r, "THEME");
+  theme_grid(&r, ui_idn(base, 300), grid_h);
+  rect_cut_top(&r, DP(10));
   small_label(&r, "APPEARANCE");
   {
-    static const char *const kTheme[] = { "Dark", "Light" };
-    int t = conf.dark ? 0 : 1;
+    static const char *const kMode[] = { "Dark", "Light" };
+    int t = T.dark ? 0 : 1;
     FmRect sg = rect_cut_top(&r, seg_h);
-    if (ui_segmented(ui_idn(base, (u32)k++), sg, kTheme, 2, &t)) {
-      conf.dark = t == 0;
-      theme_apply(conf.dark, conf.accent);
-      conf_dirty();
+    if (theme_has_both(conf.theme)) {
+      if (ui_segmented(ui_idn(base, (u32)k), sg, kMode, 2, &t)) {
+        conf.dark = t == 0;
+        theme_apply(conf.theme, conf.dark, conf.accent);
+        conf_dirty();
+      }
+    } else {
+      font_draw(FONT_REGULAR, ui.m.font_small, sg.x + DP(2),
+                sg.y + (sg.h - font_line_h(ui.m.font_small)) * 0.5f,
+                T.dark ? "This theme is dark only" : "This theme is light only", -1, T.text2);
     }
+    k++;
     rect_cut_top(&r, DP(10));
+    /* accent: the theme's own first, then the fixed swatches */
     FmRect ar = rect_cut_top(&r, DP(36));
-    float cs = DP(28);
-    for (int i = 0; i < UI_ACCENTS; i++) {
-      FmRect b = { ar.x + DP(6) + (float)i * (cs + DP(12)), ar.y + (ar.h - cs) * 0.5f, cs, cs };
-      int f = ui_hit(ui_idn(base, 100 + (u32)i), rect_inset(b, -DP(4)));
-      gfx_circle(b.x + cs * 0.5f, b.y + cs * 0.5f, cs * 0.5f, kAccents[i]);
+    float cs = DP(28), step = FM_MIN(cs + DP(12), (ar.w - DP(12)) / (float)(UI_ACCENTS + 1));
+    for (int i = -1; i < UI_ACCENTS; i++) {
+      FmRect b = { ar.x + DP(6) + (float)(i + 1) * step, ar.y + (ar.h - cs) * 0.5f, cs, cs };
+      int f = ui_hit(ui_idn(base, 100 + (u32)(i + 1)), rect_inset(b, -DP(4)));
+      FmColor col = i < 0 ? theme_accent_of(conf.theme, T.dark) : kAccents[i];
+      float cx = b.x + cs * 0.5f, cy = b.y + cs * 0.5f;
+      gfx_circle(cx, cy, cs * 0.5f, col);
+      if (i < 0 && i != conf.accent) gfx_ring(cx, cy, cs * 0.5f - DP(5), DP(2), col_alpha(T.surface, 0.8f));
       if (i == conf.accent) {
-        gfx_ring(b.x + cs * 0.5f, b.y + cs * 0.5f, cs * 0.5f + DP(4), DP(2), kAccents[i]);
-        icon_draw(IC_CHECK, rect_inset(b, DP(6)), FM_HEX(0xFFFFFF));
+        gfx_ring(cx, cy, cs * 0.5f + DP(4), DP(2), col);
+        icon_draw(IC_CHECK, rect_inset(b, DP(6)), i < 0 ? T.on_accent : FM_HEX(0xFFFFFF));
       } else if (f & UI_HOVER) {
-        gfx_ring(b.x + cs * 0.5f, b.y + cs * 0.5f, cs * 0.5f + DP(3), DP(1.5f), T.border);
+        gfx_ring(cx, cy, cs * 0.5f + DP(3), DP(1.5f), T.border);
       }
       if (f & UI_CLICK) {
         conf.accent = i;
-        theme_apply(conf.dark, conf.accent);
+        theme_apply(conf.theme, conf.dark, conf.accent);
         conf_dirty();
       }
     }
@@ -1914,12 +1994,14 @@ static void draw_top(FmRect r) {
   /* right side buttons */
   FmRect b = rect_center(rect_cut_right(&in, bs), bs, bs);
   if (ui_icon_btn(ui_idn(base, 2), b, IC_SETTINGS, T.text2, "Settings")) open_settings();
-  b = rect_center(rect_cut_right(&in, bs), bs, bs);
-  if (ui_icon_btn(ui_idn(base, 3), b, conf.dark ? IC_SUN : IC_MOON, T.text2,
-                  conf.dark ? "Light theme" : "Dark theme")) {
-    conf.dark = !conf.dark;
-    theme_apply(conf.dark, conf.accent);
-    conf_dirty();
+  if (theme_has_both(conf.theme)) {
+    b = rect_center(rect_cut_right(&in, bs), bs, bs);
+    if (ui_icon_btn(ui_idn(base, 3), b, T.dark ? IC_SUN : IC_MOON, T.text2,
+                    T.dark ? "Light mode" : "Dark mode")) {
+      conf.dark = !T.dark;
+      theme_apply(conf.theme, conf.dark, conf.accent);
+      conf_dirty();
+    }
   }
   if (!g_L.sidebar) {
     b = rect_center(rect_cut_right(&in, bs), bs, bs);
@@ -2598,11 +2680,17 @@ void app_init(void) {
   else conf_load();
   if (arg_flag("--light")) conf.dark = false;
   if (arg_flag("--dark")) conf.dark = true;
+  const char *th = arg_value("--theme");
+  if (th && theme_find(th) >= 0) {
+    conf.theme = theme_find(th);
+    if (!theme_has_both(conf.theme) && !arg_flag("--light") && !arg_flag("--dark"))
+      conf.dark = theme_variant(conf.theme, true)->dark;
+  }
   if (arg_flag("--grid")) conf.view[0] = conf.view[1] = VIEW_GRID;
   const char *lay = arg_value("--layout");
   if (lay) conf.layout = !strcmp(lay, "side") ? LAYOUT_SIDE : !strcmp(lay, "stack") ? LAYOUT_STACK :
                          !strcmp(lay, "single") ? LAYOUT_SINGLE : LAYOUT_AUTO;
-  theme_apply(conf.dark, conf.accent);
+  theme_apply(conf.theme, conf.dark, conf.accent);
   ui.zoom = conf.zoom;
   apply_touch();
   thumb_init();
@@ -2720,6 +2808,7 @@ void app_frame(void) {
   layout_compute(&g_L, g_single_tab, g_sidebar_open, jh, audio_mini_active());
   if (g_L.mode == LAYOUT_SINGLE && g_active != g_single_tab) g_single_tab = g_active;
 
+  theme_draw_bg(FM_RECT(0, 0, ui.w, ui.h));
   draw_top(g_L.top);
   if (g_L.sidebar) draw_sidebar(g_L.side);
   if (g_L.mode == LAYOUT_SINGLE) draw_tabs(g_L.tabs);

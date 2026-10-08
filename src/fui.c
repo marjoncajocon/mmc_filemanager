@@ -28,50 +28,11 @@ const FmColor kAccents[UI_ACCENTS] = {
   { 0xEF, 0x44, 0x44, 255 },   /* red */
 };
 
-void theme_apply(bool dark, int accent) {
-  FmColor a = kAccents[(unsigned)accent % UI_ACCENTS];
-  T.dark = dark;
-  if (dark) {
-    T.bg = FM_HEX(0x0F1115);
-    T.surface = FM_HEX(0x171A20);
-    T.surface2 = FM_HEX(0x1F232B);
-    T.surface3 = FM_HEX(0x2A2F39);
-    T.border = FM_HEX(0x2C313B);
-    T.divider = FM_RGBA(255, 255, 255, 18);
-    T.text = FM_HEX(0xE8EAF0);
-    T.text2 = FM_HEX(0x9EA5B3);
-    T.text3 = FM_HEX(0x5D6472);
-    T.hover = FM_RGBA(255, 255, 255, 14);
-    T.press = FM_RGBA(255, 255, 255, 26);
-    T.shadow = FM_RGBA(0, 0, 0, 120);
-    T.scrim = FM_RGBA(0, 0, 0, 140);
-    T.danger = FM_HEX(0xF2555A);
-    T.success = FM_HEX(0x3DD68C);
-    T.warn = FM_HEX(0xF5B841);
-  } else {
-    T.bg = FM_HEX(0xEEF1F6);
-    T.surface = FM_HEX(0xFFFFFF);
-    T.surface2 = FM_HEX(0xF4F6FA);
-    T.surface3 = FM_HEX(0xE6EAF1);
-    T.border = FM_HEX(0xDCE1E9);
-    T.divider = FM_RGBA(0, 0, 0, 16);
-    T.text = FM_HEX(0x161A22);
-    T.text2 = FM_HEX(0x5B6372);
-    T.text3 = FM_HEX(0xA3AAB6);
-    T.hover = FM_RGBA(0, 0, 0, 10);
-    T.press = FM_RGBA(0, 0, 0, 20);
-    T.shadow = FM_RGBA(20, 30, 50, 40);
-    T.scrim = FM_RGBA(10, 14, 22, 90);
-    T.danger = FM_HEX(0xE5383B);
-    T.success = FM_HEX(0x1FA463);
-    T.warn = FM_HEX(0xD99000);
-  }
-  T.accent = a;
-  T.on_accent = FM_HEX(0xFFFFFF);
-  T.accent_soft = col_alpha(a, dark ? 0.20f : 0.13f);
-  T.sel = col_alpha(a, dark ? 0.24f : 0.15f);
-  T.sel_line = col_alpha(a, 0.85f);
-  ui_redraw();
+void theme_draw_bg(FmRect r) {
+  if (!T.bg_grad) return;          /* the clear colour already is the bg */
+  float m = r.h * T.bg_mid_at;
+  gfx_rrect_vgrad(FM_RECT(r.x, r.y, r.w, m), 0, T.bg, T.bg_mid);
+  gfx_rrect_vgrad(FM_RECT(r.x, r.y + m, r.w, r.h - m), 0, T.bg_mid, T.bg2);
 }
 
 /* ---- setup -------------------------------------------------------------- */
@@ -129,15 +90,18 @@ void ui_update_scale(void) {
   ui.portrait = ph > pw;
   FmMetrics *m = &ui.m;
   bool t = ui.touch_mode;
-  m->font = DP(t ? 15 : 13.5f);
-  m->font_small = DP(t ? 12.5f : 11.5f);
+  /* the theme scales text and rows; touch keeps finger-sized minimums */
+  float fk = T.font_k > 0 ? FM_CLAMP(T.font_k, 0.9f, 1.15f) : 1.0f;
+  float rk = T.row_h > 0 ? FM_CLAMP(T.row_h / 44.0f, 0.6f, 1.2f) : 1.0f;
+  m->font = DP((t ? 15 : 13.5f) * fk);
+  m->font_small = DP((t ? 12.5f : 11.5f) * fk);
   m->font_title = DP(t ? 18 : 16);
   m->font_big = DP(t ? 24 : 22);
-  m->row_h = DP(t ? 56 : 38);
+  m->row_h = DP(t ? FM_MAX(56 * rk, 48) : 38 * rk);
   m->bar_h = DP(t ? 56 : 44);
   m->icon = DP(t ? 24 : 20);
   m->pad = DP(t ? 14 : 12);
-  m->radius = DP(14);
+  m->radius = DP(T.radius > 0 || T.row_h > 0 ? T.radius : 14);
   m->hit = DP(t ? 44 : 32);
   font_reset();
   ui_redraw();
