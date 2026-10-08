@@ -23,5 +23,7 @@ int test_archives2(const char *tmp);  /* ftest_arc2.c: 7z and rar */
 int test_media(const char *tmp);      /* ftest_media.c: decoders on generated data */
 int test_fs(const char *tmp);         /* ftest_fs.c: copy/move/delete engine, vfs */
 int test_themes(const char *tmp);     /* ftest_theme.c: every theme readable */
+int test_viz(const char *tmp);        /* ftest_viz.c: visualizer bands, smoothing, presets, conf */
+int test_library(const char *tmp);    /* ftest_lib.c: media library scan, favorites, persistence */
 
 #endif

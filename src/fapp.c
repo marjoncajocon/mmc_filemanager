@@ -21,6 +21,7 @@
 #include "fthumb.h"
 #include "ftitle.h"
 #include "farc.h"
+#include "flib.h"
 
 /* ---- state -------------------------------------------------------------- */
 
@@ -270,6 +271,7 @@ static void build_places(void) {
     { PLACE_MUSIC, IC_MUSIC, "Music" }, { PLACE_VIDEOS, IC_VIDEO, "Videos" },
   };
   char path[FM_PATH_MAX];
+  place_add(IC_LIBRARY, "Media library", "", 1);   /* flib: empty path = the library view */
   for (int i = 0; i < FM_COUNT(kPl); i++)
     if (plat_place(kPl[i].p, path, sizeof path) && plat_is_dir(path))
       place_add(kPl[i].ic, kPl[i].label, path, 1);
@@ -287,9 +289,23 @@ static void build_places(void) {
   g_places_dirty = false;
 }
 
+/* ---- media library (flib) ------------------------------------------------- */
+
+/* Opens over the panels; the active folder is offered as a library folder. */
+static void open_library(int section) {
+  lib_ui_open(section, panel_is_local(P()) ? P()->list.loc.path : NULL);
+}
+
+/* "Show in folder" from the library: back to the panels, file selected. */
+static void lib_reveal(const char *path) {
+  lib_ui_close();
+  panel_go_path(P(), path);
+}
+
 static void go_place(int i, int panel) {
   if (i < 0 || i >= g_nplaces) return;
   FmPanel *p = &g_p[panel];
+  if (!g_places[i].path[0]) { open_library(LIB_SEC_SONGS); return; }   /* flib */
   if (!plat_is_dir(g_places[i].path)) {
     ui_toast("%s is not available", g_places[i].label);
     return;
@@ -303,6 +319,7 @@ static void go_place(int i, int panel) {
 
 void app_open(const char *path, const char *const *siblings, int n, int index) {
   FmType t = fm_type_from_name(path);
+  if (t == FT_AUDIO || t == FT_VIDEO) lib_note_played(path);   /* flib: recently played */
   const FmViewer *v = view_for(t, path);
   if (v && v->open && v->open(path, siblings, n, index)) {
     app.viewer = v;
@@ -770,10 +787,10 @@ void app_panel_password(FmPanel *p, const FmLoc *loc, bool retry) {
 enum {
   CM_OPEN = 1, CM_OPEN_SYSTEM, CM_COPY_TO, CM_MOVE_TO, CM_COPY, CM_CUT, CM_PASTE, CM_RENAME,
   CM_DELETE, CM_COMPRESS, CM_EXTRACT, CM_PROPS, CM_COPY_PATH, CM_BOOKMARK, CM_SHOW,
-  CM_SELECT_ALL,
+  CM_SELECT_ALL, CM_LIB_FOLDER, CM_LIB_FAV,
   PM_SORT_NAME = 40, PM_SORT_SIZE, PM_SORT_DATE, PM_SORT_TYPE, PM_DESC, PM_DIRS_FIRST, PM_LIST,
   PM_GRID, PM_HIDDEN, PM_NEWDIR, PM_NEWFILE, PM_PASTE, PM_SELECT_ALL, PM_REFRESH, PM_PROPS,
-  PM_SEARCH, PM_MIRROR, PM_PATH, PM_SELECT_MODE,
+  PM_SEARCH, PM_MIRROR, PM_PATH, PM_SELECT_MODE, PM_LIBRARY,
   JM_PAUSE = 80, JM_CANCEL
 };
 
@@ -827,6 +844,19 @@ void app_panel_context(FmPanel *p, float x, float y) {
     item(m, &n, CM_BOOKMARK, conf_is_bookmark(path) ? IC_STAR_FILL : IC_STAR,
          conf_is_bookmark(path) ? "Remove bookmark" : "Bookmark", NULL, 0);
   }
+  /* flib: folders become library sources, media files favorites */
+  if (one && ce && !arc) {
+    char lp[FM_PATH_MAX];
+    vfs_entry_path(&p->list, ce, lp, sizeof lp);
+    if (ce->flags & FM_ST_DIR)
+      item(m, &n, CM_LIB_FOLDER, IC_LIBRARY, lib_has_folder(lp) ? "Remove from media library" :
+           "Add to media library", NULL, 0);
+    else if (lib_is_media(lp))
+      item(m, &n, CM_LIB_FAV, lib_is_fav(lp) ? IC_HEART_FILL : IC_HEART,
+           lib_is_fav(lp) ? "Remove from favorites" : "Add to favorites", NULL, 0);
+  } else if (!arc && ce && !(ce->flags & FM_ST_DIR) && lib_is_media(ce->name)) {
+    item(m, &n, CM_LIB_FAV, IC_HEART, "Add to favorites", NULL, 0);
+  }
   if (!arc) item(m, &n, CM_COPY_PATH, IC_COPY, "Copy path", NULL, 0);
   if (!arc && one) item(m, &n, CM_SHOW, IC_FOLDER_OPEN, "Show in system file manager", NULL, 0);
   item(m, &n, CM_PROPS, IC_INFO, "Properties", "Alt+Enter", 0);
@@ -857,6 +887,7 @@ void app_panel_menu(FmPanel *p, float x, float y) {
   if (ui.touch_mode)
     item(m, &n, PM_SELECT_MODE, IC_CHECK, "Select items", NULL, p->select_mode ? UI_MI_CHECKED : 0);
   item(m, &n, PM_SEARCH, IC_SEARCH, "Filter", "Ctrl+F", 0);
+  item(m, &n, PM_LIBRARY, IC_LIBRARY, "Media library", NULL, 0);   /* flib */
   sep(m, &n);
   item(m, &n, PM_MIRROR, IC_SWAP, "Same folder in other panel", NULL, 0);
   item(m, &n, PM_PATH, IC_RENAME, "Go to path", "Ctrl+L", 0);
@@ -928,6 +959,27 @@ static void ctx_action(int id) {
         if (!plat_share(path)) ui_toast("Not available on this system");
       }
       break;
+    case CM_LIB_FOLDER:   /* flib */
+      if (ce) {
+        entry_path(p, ce, path, sizeof path);
+        bool on = !lib_has_folder(path);
+        lib_folder_set(path, on);
+        ui_toast(on ? "Added to the media library" : "Removed from the media library");
+      }
+      break;
+    case CM_LIB_FAV:      /* flib: every selected media file follows the one under the cursor */
+      if (ce) {
+        entry_path(p, ce, path, sizeof path);
+        bool on = p->nsel > 1 || !lib_is_fav(path);
+        int ns = 0;
+        char **sel = panel_selected_paths(p, &ns);
+        for (int i = 0; i < ns; i++)
+          if (lib_is_media(sel[i])) lib_fav_set(sel[i], on);
+        if (ns == 0) lib_fav_set(path, on);
+        panel_free_paths(sel, ns);
+        ui_toast(on ? "Added to favorites" : "Removed from favorites");
+      }
+      break;
     default: break;
   }
 }
@@ -978,6 +1030,7 @@ static void pmenu_action(int id) {
       if (!p->select_mode) panel_select_all(p, false);
       break;
     case PM_SEARCH: panel_open_search(p); break;
+    case PM_LIBRARY: open_library(-1); break;   /* flib */
     case PM_MIRROR: {
       FmLoc l = p->list.loc;
       panel_go(&g_p[1 - p->idx], &l, true);
@@ -2529,7 +2582,7 @@ static bool arg_flag(const char *name) {
 /* A plain path argument ("mmcfm ~/Downloads", "Open with"): opens in the left panel. */
 static const char *arg_positional(void) {
   static const char *const kVal[] = { "--shot", "--size", "--frames", "--left", "--right",
-                                      "--demo-dialog", "--layout" };
+                                      "--demo-dialog", "--layout", "--demo-library" };
   for (int i = 1; i < app.argc; i++) {
     const char *a = app.argv[i];
     bool val = false;
@@ -2710,6 +2763,8 @@ void app_init(void) {
   ui.zoom = conf.zoom;
   apply_touch();
   thumb_init();
+  lib_init(g_shot);                    /* flib: --shot runs never save */
+  lib_ui_set_reveal(lib_reveal);
   if (!g_shot) restore_window();
   title_apply();
 
@@ -2731,6 +2786,9 @@ void app_init(void) {
   if (arg_flag("--demo-job")) ops_demo();
   g_demo_dialog = arg_value("--demo-dialog");
   g_demo_frames = 0;
+  /* flib: --demo-library SECTION shows the library of the --left folder */
+  const char *dl = arg_value("--demo-library");
+  if (dl) lib_demo(g_p[0].list.loc.path, FM_MAX(0, lib_ui_section(dl)));
   ui_redraw();
 }
 
@@ -2751,6 +2809,7 @@ void app_shutdown(void) {
   clip_free();
   panel_free(&g_p[0]);
   panel_free(&g_p[1]);
+  lib_shutdown();                      /* flib */
   thumb_shutdown();
 }
 
@@ -2804,6 +2863,7 @@ void app_event(const SDL_Event *e) {
 
 void app_frame(void) {
   thumb_pump();
+  lib_pump();                          /* flib: scan results, saving */
   FmJob *fj;
   while ((fj = ops_take_finished()) != NULL) job_finished(fj);
   conf_flush(false);
@@ -2817,6 +2877,13 @@ void app_frame(void) {
     if (app.viewer && (ui_key(SDLK_ESCAPE, 0) || ui_key(SDLK_AC_BACK, 0))) app_close_viewer();
     ui_pop_layer(prev);
     draw_dialogs();
+    return;
+  }
+  /* flib: the media library takes the window, under the viewers */
+  if (lib_ui_is_open()) {
+    lib_ui_frame(FM_RECT(0, 0, ui.w, ui.h));
+    draw_dialogs();
+    title_outline();
     return;
   }
 

@@ -419,6 +419,83 @@ static void test_text(const char *tmp) {
   txt_index_close(&ix);
 }
 
+/* MMCFM_VIDEO_SAMPLES=<folder>: decode every file there with whatever
+** backend takes it (pl_mpeg, FFmpeg, Media Foundation, MediaCodec) and check
+** frames, audio, seeking and thumbnails. Off by default: the samples are
+** made with an external encoder, not shipped. */
+static void test_video_samples(void) {
+  const char *dir = getenv("MMCFM_VIDEO_SAMPLES");
+  if (!dir || !*dir) return;
+  FmErr err;
+  FmDir *d = plat_dir_open(dir, &err);
+  TEST_CHECK(d != NULL);
+  if (!d) return;
+  const char *name;
+  FmStat st;
+  int files = 0, played = 0;
+  while (plat_dir_next(d, &name, &st)) {
+    if (st.flags & FM_ST_DIR) continue;
+    char path[FM_PATH_MAX];
+    fm_path_join(path, sizeof path, dir, name);
+    files++;
+    u64 t0 = plat_now_ms();
+    FmVid *v = vid_open(path, 0, &err);
+    if (!v) {
+      /* without FFmpeg some containers (FLV, RealMedia ...) have no OS
+      ** decoder at all; the viewer then offers the system player */
+      bool expected = !ff_available();
+      printf("  %-22s %s (err %d)\n", name, expected ? "needs FFmpeg" : "cannot open", (int)err);
+      if (!expected) g_test_fail++;
+      else files--;
+      continue;
+    }
+    FmVidInfo info = *vid_info(v);       /* copied: vid_close frees it */
+    const FmVidInfo *in = &info;
+    int vframes = 0, ablocks = 0, ev, guard = 0, w = 0, h = 0;
+    double last_t = -1, apcm = 0;
+    bool mono_t = true, planes_ok = true;
+    FmVidFrame vf;
+    FmVidPcm pc;
+    while ((ev = vid_decode(v, &vf, &pc)) > 0 && guard++ < 5000 && vframes < 60) {
+      if (ev == VID_EV_VIDEO) {
+        if (!vframes) { w = vf.w; h = vf.h; }
+        if (vf.t + 0.001 < last_t) mono_t = false;
+        last_t = vf.t;
+        if (!vf.plane[0] || !vf.plane[1] || !vf.plane[2] || vf.stride[0] < vf.w || vf.stride[1] < vf.w / 2)
+          planes_ok = false;
+        vframes++;
+      } else {
+        ablocks++;
+        apcm += pc.frames;
+        if (pc.channels < 1 || pc.channels > 2 || pc.rate <= 0) planes_ok = false;
+      }
+    }
+    bool seek_ok = !in->has_video || in->duration < 1 || vid_seek(v, in->duration * 0.5);
+    int after = 0;
+    if (seek_ok && in->has_video) {
+      guard = 0;
+      while ((ev = vid_decode(v, &vf, &pc)) > 0 && guard++ < 2000)
+        if (ev == VID_EV_VIDEO) { after = 1; break; }
+    }
+    vid_close(v);
+    FmImage th;
+    bool thumb_ok = !in->has_video || vid_thumb(path, 256, &th) == FM_OK;
+    if (in->has_video && thumb_ok) img_free(&th);
+    bool ok = (!in->has_video || (vframes > 0 && w > 0 && h > 0)) && (!in->has_audio || ablocks > 0) &&
+              planes_ok && mono_t && seek_ok && (!in->has_video || after) && thumb_ok;
+    printf("  %-22s %-4s %-17s %-6s/%-6s %4dx%-4d v%-3d a%-4d %5.1fs %s%s%s%s (%d ms)\n", name,
+           ok ? "ok" : "FAIL", in->backend, in->vcodec[0] ? in->vcodec : "-",
+           in->acodec[0] ? in->acodec : "-", w, h, vframes, ablocks, in->duration, mono_t ? "" : " time!",
+           planes_ok ? "" : " planes!", !seek_ok ? " seek-call!" : (!in->has_video || after) ? "" : " no-frame-after-seek!",
+           thumb_ok ? "" : " thumb!", (int)(plat_now_ms() - t0));
+    if (!ok) g_test_fail++;
+    else played++;
+    (void)apcm;
+  }
+  plat_dir_close(d);
+  printf("  video samples: %d of %d played\n", played, files);
+}
+
 int test_media(const char *tmp) {
   int before = g_test_fail;
   test_wav(tmp);
@@ -428,6 +505,7 @@ int test_media(const char *tmp) {
   test_svg(tmp);
   test_id3();
   test_video(tmp);
+  test_video_samples();
   test_text(tmp);
   return g_test_fail - before;
 }

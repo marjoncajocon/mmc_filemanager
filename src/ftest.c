@@ -100,6 +100,8 @@ static const TestArea kAreas[] = {
   { "fs", test_fs },
   { "media", test_media },
   { "themes", test_themes },
+  { "viz", test_viz },
+  { "library", test_library },
 };
 
 int test_run_all(void) {

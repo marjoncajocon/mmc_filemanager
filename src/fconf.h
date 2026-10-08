@@ -15,6 +15,32 @@ enum { SORT_NAME = 0, SORT_SIZE, SORT_DATE, SORT_TYPE };
 enum { LAYOUT_AUTO = 0, LAYOUT_SIDE, LAYOUT_STACK, LAYOUT_SINGLE };
 enum { VIEW_LIST = 0, VIEW_GRID };
 
+/* Music visualizer knobs (styles, limits and presets live in fviz.h). */
+typedef struct FmVizConf {
+  int style;                  /* VIZ_* */
+  int bands;                  /* VIZ_MIN_BANDS .. VIZ_MAX_BANDS */
+  float gain;                 /* sensitivity, 0.25 .. 4 */
+  float attack, decay;        /* 0 .. 1: how fast bars rise and fall */
+  float width;                /* bar width / pitch, 0.15 .. 1 */
+  float round;                /* corner roundness 0 .. 1 */
+  int color;                  /* VIZ_COL_* */
+  int color2;                 /* second colour: kAccents index, -1 = auto */
+  bool peaks, mirror, log_scale;
+  bool custom;                /* knobs were tuned by hand (in the saved slot: slot is in use) */
+} FmVizConf;
+
+/* Equalizer (presets and DSP in feq.h). Bands: 31 Hz .. 16 kHz, octaves. */
+#define EQ_BANDS 10
+typedef struct FmEqConf {
+  bool on;
+  int preset;                 /* EQ_* preset, EQ_CUSTOM = the user's curve */
+  float band[EQ_BANDS];       /* dB, -12 .. 12: what plays */
+  float custom[EQ_BANDS];     /* the user's own curve (Custom chip) */
+  float preamp;               /* dB, -12 .. 12 */
+  float width;                /* stereo width 0 .. 2, 1 = as recorded */
+  float balance;              /* -1 left .. 1 right */
+} FmEqConf;
+
 typedef struct FmConf {
   int theme;                  /* built-in theme, 0 .. THEME_COUNT-1 */
   bool dark;                  /* preferred mode when the theme has both */
@@ -41,6 +67,9 @@ typedef struct FmConf {
   bool win_max;
   bool system_title;          /* OS window frame instead of the themed title bar */
   float volume;               /* audio player 0..1 */
+  FmVizConf viz;              /* the visualizer as shown */
+  FmVizConf viz_saved;        /* the user's own custom setup ("Custom" chip) */
+  FmEqConf eq;                /* equalizer for the music and video players */
 } FmConf;
 
 extern FmConf conf;

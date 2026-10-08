@@ -23,6 +23,7 @@
 **     demuxer delivers them; the caller does the clocking.
 */
 #include "fdec_vid.h"
+#include "fdec_vid_int.h"
 #include "fplat.h"
 #include "fsdl.h"
 
@@ -455,7 +456,30 @@ struct FmVid {
   double skip_until;
   float *pcm;
   int pcm_cap;
+  /* OS backend (Media Foundation / MediaCodec) */
+  const FmVidBackend *os;
+  void *os_st;
+  /* seek fallback for streams without an index (MPEG-TS with sparse key
+  ** frames): if a seek runs into the end with no picture, restart at 0 and
+  ** drop everything before the target */
+  double seek_t;
+  bool seek_watch;
+  double drop_until;
 };
+
+#define SEEK_REPLAY_MAX 120.0           /* seconds decoded forward at most */
+
+void vid_nv12_split(const u8 *uv, int uv_stride, int cw, int ch, u8 *u, int ustride, u8 *v,
+                    int vstride) {
+  for (int y = 0; y < ch; y++) {
+    const u8 *s = uv + (size_t)y * uv_stride;
+    u8 *du = u + (size_t)y * ustride, *dv = v + (size_t)y * vstride;
+    for (int x = 0; x < cw; x++) {
+      du[x] = s[2 * x];
+      dv[x] = s[2 * x + 1];
+    }
+  }
+}
 
 const FmVidInfo *vid_info(const FmVid *v) { return &v->info; }
 
@@ -472,13 +496,20 @@ static float *pcm_buf(FmVid *v, int frames, int ch) {
 /* ---- pl_mpeg backend -------------------------------------------------------- */
 
 bool vid_is_mpeg1(const char *path) {
-  u8 b[16];
+  enum { HEAD = 64 * 1024 };
   FILE *f = fm_fopen(path, "rb");
   if (!f) return false;
-  size_t n = fread(b, 1, sizeof b, f);
+  u8 *b = (u8 *)fm_alloc(HEAD);
+  size_t n = fread(b, 1, HEAD, f);
   fclose(f);
   /* MPEG-1 pack header: 00 00 01 BA then '0010' marker bits */
-  return n >= 5 && b[0] == 0 && b[1] == 0 && b[2] == 1 && b[3] == 0xBA && (b[4] & 0xF0) == 0x20;
+  bool ok = n >= 5 && b[0] == 0 && b[1] == 0 && b[2] == 1 && b[3] == 0xBA && (b[4] & 0xF0) == 0x20;
+  /* ... but the video inside may still be MPEG-2 (a sequence extension,
+  ** 00 00 01 B5, follows its sequence header); pl_mpeg cannot decode that */
+  for (size_t i = 0; ok && i + 4 <= n; i++)
+    if (b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1 && b[i + 3] == 0xB5) ok = false;
+  fm_free(b);
+  return ok;
 }
 
 static void pl_video_cb(plm_t *p, plm_frame_t *frame, void *user) {
@@ -845,31 +876,76 @@ FmVid *vid_open(const char *path, int flags, FmErr *err) {
   if (v->plm) { plm_destroy(v->plm); v->plm = NULL; }
   memset(&v->info, 0, sizeof v->info);
   v->info.sar = 1.0;
+  *err = FM_ERR_UNSUPPORTED;
 #ifdef FM_FFMPEG
   if (ff_open(v, path)) { *err = FM_OK; return v; }
   ff_close(v);
-  *err = ff.major ? FM_ERR_FORMAT : FM_ERR_UNSUPPORTED;
-#else
-  *err = FM_ERR_UNSUPPORTED;
+  memset(&v->info, 0, sizeof v->info);
+  v->info.sar = 1.0;
+  if (ff.major) *err = FM_ERR_FORMAT;
+#endif
+#ifdef FM_VID_OS
+  /* the decoders the OS ships: most phone/camera/web formats */
+  v->os_st = FM_VID_OS_BACKEND.open(path, flags, &v->info);
+  if (v->os_st) {
+    v->os = &FM_VID_OS_BACKEND;
+    if (!v->info.sar) v->info.sar = 1.0;
+    *err = FM_OK;
+    return v;
+  }
+  if (*err == FM_ERR_UNSUPPORTED) *err = FM_ERR_FORMAT;
 #endif
   fm_free(v);
   return NULL;
 }
 
-int vid_decode(FmVid *v, FmVidFrame *vf, FmVidPcm *pc) {
+static int backend_decode(FmVid *v, FmVidFrame *vf, FmVidPcm *pc) {
   if (v->plm) return pl_decode(v, vf, pc);
 #ifdef FM_FFMPEG
   if (v->fmt) return ff_decode(v, vf, pc);
 #endif
+  if (v->os) return v->os->decode(v->os_st, vf, pc);
+  return VID_EV_ERROR;
+}
+
+static bool backend_seek(FmVid *v, double t);
+
+int vid_decode(FmVid *v, FmVidFrame *vf, FmVidPcm *pc) {
+  for (int guard = 0; guard < 100000; guard++) {
+    int ev = backend_decode(v, vf, pc);
+    if (v->seek_watch) {
+      if (ev == VID_EV_VIDEO) v->seek_watch = false;
+      else if (ev == VID_EV_END && v->info.has_video && v->seek_t > 0.5 && v->seek_t <= SEEK_REPLAY_MAX) {
+        v->seek_watch = false;
+        if (!backend_seek(v, 0)) return ev;
+        v->drop_until = v->seek_t;
+        continue;
+      }
+    }
+    if (v->drop_until > 0) {
+      double t = ev == VID_EV_VIDEO ? vf->t : ev == VID_EV_AUDIO ? pc->t : 1e300;
+      if ((ev == VID_EV_VIDEO || ev == VID_EV_AUDIO) && t < v->drop_until - 0.02) continue;
+      if (ev == VID_EV_VIDEO || ev <= 0) v->drop_until = 0;
+    }
+    return ev;
+  }
   return VID_EV_ERROR;
 }
 
 bool vid_seek(FmVid *v, double t) {
   if (t < 0) t = 0;
+  v->drop_until = 0;
+  v->seek_t = t;
+  v->seek_watch = true;
+  return backend_seek(v, t);
+}
+
+static bool backend_seek(FmVid *v, double t) {
   if (v->plm) return pl_seek(v, t);
 #ifdef FM_FFMPEG
   if (v->fmt) return ff_seek(v, t);
 #endif
+  if (v->os) return v->os->seek(v->os_st, t);
   return false;
 }
 
@@ -879,6 +955,7 @@ void vid_close(FmVid *v) {
 #ifdef FM_FFMPEG
   if (v->fmt || v->pkt || v->frm) ff_close(v);
 #endif
+  if (v->os) v->os->close(v->os_st);
   fm_free(v->pcm);
   fm_free(v);
 }

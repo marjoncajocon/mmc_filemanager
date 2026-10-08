@@ -152,4 +152,27 @@ int plat_android_volumes(FmVolume *out, int max) {
 bool plat_open_external(const char *path) { return call_bool_str("fmOpenFile", path); }
 bool plat_share(const char *path) { return call_bool_str("fmShare", path); }
 
+/* ---- SDL's HIDDeviceManager natives -------------------------------------- */
+
+/* SDL is built without HIDAPI (no game controllers in a file manager, and it
+** would pull in C++), but SDLActivity.onCreate still constructs
+** HIDDeviceManager, which calls these natives. Without them the app dies at
+** start with UnsatisfiedLinkError. USB/Bluetooth scanning only starts when
+** native HIDAPI asks for it, so empty bodies are complete. */
+#define HID_FN(name) JNIEXPORT void JNICALL Java_org_libsdl_app_HIDDeviceManager_##name
+
+HID_FN(HIDDeviceRegisterCallback)(JNIEnv *e, jobject o) { (void)e; (void)o; }
+HID_FN(HIDDeviceReleaseCallback)(JNIEnv *e, jobject o) { (void)e; (void)o; }
+HID_FN(HIDDeviceConnected)(JNIEnv *e, jobject o, jint id, jstring ident, jint vendor, jint product,
+                           jstring serial, jint release, jstring maker, jstring prod, jint iface,
+                           jint iclass, jint isub, jint iproto) {
+  (void)e; (void)o; (void)id; (void)ident; (void)vendor; (void)product; (void)serial; (void)release;
+  (void)maker; (void)prod; (void)iface; (void)iclass; (void)isub; (void)iproto;
+}
+HID_FN(HIDDeviceOpenPending)(JNIEnv *e, jobject o, jint id) { (void)e; (void)o; (void)id; }
+HID_FN(HIDDeviceOpenResult)(JNIEnv *e, jobject o, jint id, jboolean ok) { (void)e; (void)o; (void)id; (void)ok; }
+HID_FN(HIDDeviceDisconnected)(JNIEnv *e, jobject o, jint id) { (void)e; (void)o; (void)id; }
+HID_FN(HIDDeviceInputReport)(JNIEnv *e, jobject o, jint id, jbyteArray r) { (void)e; (void)o; (void)id; (void)r; }
+HID_FN(HIDDeviceFeatureReport)(JNIEnv *e, jobject o, jint id, jbyteArray r) { (void)e; (void)o; (void)id; (void)r; }
+
 #endif

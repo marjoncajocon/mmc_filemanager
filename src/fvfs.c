@@ -68,6 +68,16 @@ void loc_title(const FmLoc *loc, char *out, size_t cap) {
     fm_strlcpy(out, loc->path, cap);
     return;
   }
+#ifdef FM_ANDROID
+  /* storage roots read as "0" or "1A2B-3C4D"; name them like the volumes list */
+  {
+    const char *p = loc->path;
+    size_t n = strlen(p);
+    while (n > 1 && p[n - 1] == '/') n--;
+    if (n == 19 && !strncmp(p, "/storage/emulated/0", 19)) { fm_strlcpy(out, "Internal storage", cap); return; }
+    if (n == 18 && !strncmp(p, "/storage/", 9) && p[13] == '-') { fm_strlcpy(out, "SD card", cap); return; }
+  }
+#endif
   fm_strlcpy(out, fm_path_base(loc->path), cap);
 }
 

@@ -16,19 +16,26 @@
 **     second through a timer, not every frame.
 **   - Tags and the cover are read by the decoder thread when a track is
 **     opened; the cover is downscaled there and uploaded on the main thread.
-**   - The spectrum is a 256-point FFT of what is being heard, computed on
-**     the main thread only while the full player is visible and playing.
+**   - The visualizer (fviz.c) gets the last 1024 samples heard; its FFT
+**     runs on the main thread only while the full player is visible, and
+**     redrawing stops once the bars have fallen after a pause. With the
+**     visualizer off, the player refreshes a few times a second instead of
+**     every frame.
+**   - The equalizer (feq.c) runs in the callback on what is about to play,
+**     so changes are heard at once; its filters are redesigned on the main
+**     thread only when the settings change.
 */
 #include "fview_int.h"
+#include "flib.h"
 #include "fplat.h"
 #include "fconf.h"
 #include "fdec_aud.h"
 #include "fdec_img.h"
+#include "fviz.h"
+#include "feq.h"
 
 #define RING_SEC 0.75
 #define CHUNK 2048
-#define VIZ_N 256
-#define BANDS 28
 #define COVER_PX 512
 
 enum { REQ_NONE = 0, REQ_PLAY, REQ_SEEK };
@@ -82,10 +89,12 @@ static struct {
   TrackMeta meta[3];
   int fail_streak;
   char error[160];
-  /* visualizer */
-  float viz[VIZ_N];
+  /* visualizer: written by the callback, copied out on the main thread */
+  float viz[VIZ_FFT];
   int viz_pos;
-  float bands[BANDS];
+  float viz_snap[VIZ_FFT];
+  bool viz_open;              /* settings panel shown */
+  FmEq eq;                    /* equalizer state (callback, under mx) */
   /* main thread */
   SDL_Texture *cover_tex;
   int cover_idx;
@@ -169,11 +178,16 @@ static void SDLCALL audio_cb(void *u, Uint8 *stream, int len) {
   float vol = P.volume * P.volume;          /* perceptual curve */
   for (int i = 0; i < n; i++) {
     u32 at = (u32)((P.r_read + (u64)i) % P.ring_frames);
-    float l = P.ring[at * 2], r = P.ring[at * 2 + 1];
+    out[i * 2] = P.ring[at * 2];
+    out[i * 2 + 1] = P.ring[at * 2 + 1];
+  }
+  eq_process(&P.eq, out, n);
+  for (int i = 0; i < n; i++) {
+    float l = out[i * 2], r = out[i * 2 + 1];
     out[i * 2] = l * vol;
     out[i * 2 + 1] = r * vol;
     P.viz[P.viz_pos] = (l + r) * 0.5f;
-    P.viz_pos = (P.viz_pos + 1) % VIZ_N;
+    P.viz_pos = (P.viz_pos + 1) % VIZ_FFT;
   }
   if (n < frames) memset(out + n * 2, 0, sizeof(float) * 2 * (size_t)(frames - n));
   u64 end = P.r_read + (u64)n;
@@ -552,6 +566,7 @@ static bool aud_view_open(const char *path, const char *const *list, int n, int 
   make_order(index);
   for (int i = 0; i < 3; i++) P.meta[i].idx = -1;
   P.cover_idx = -1;
+  viz_reset();
   P.heard = index;
   P.mx = SDL_CreateMutex();
   P.cv = SDL_CreateCond();
@@ -559,6 +574,7 @@ static bool aud_view_open(const char *path, const char *const *list, int n, int 
   P.viewer_open = true;
   view_chrome_poke(&P.chrome);
   if (!P.mx || !P.cv || !device_open()) return true;     /* the player shows the error */
+  eq_follow(&P.eq, P.rate, P.mx);
   P.thr = fm_thread_create(decoder, "audio", NULL);
   request_play(index);
   SDL_PauseAudioDevice(P.dev, 0);
@@ -623,72 +639,45 @@ static void now_playing(NowPlaying *np) {
 
 /* ---- visualizer --------------------------------------------------------------------- */
 
-static void fft(float *re, float *im, int n) {
-  for (int i = 1, j = 0; i < n; i++) {
-    int bit = n >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
-    if (i < j) { float t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
-  }
-  for (int len = 2; len <= n; len <<= 1) {
-    float ang = -6.2831853f / (float)len;
-    float wr = cosf(ang), wi = sinf(ang);
-    for (int i = 0; i < n; i += len) {
-      float cr = 1, ci = 0;
-      for (int k = 0; k < len / 2; k++) {
-        int a = i + k, b = i + k + len / 2;
-        float xr = re[b] * cr - im[b] * ci, xi = re[b] * ci + im[b] * cr;
-        re[b] = re[a] - xr; im[b] = im[a] - xi;
-        re[a] += xr; im[a] += xi;
-        float nr = cr * wr - ci * wi;
-        ci = cr * wi + ci * wr;
-        cr = nr;
-      }
-    }
-  }
-}
-
-/* Updates P.bands; returns true while bars are still moving. */
-static bool viz_update(bool playing) {
-  float re[VIZ_N], im[VIZ_N];
-  lock();
-  for (int i = 0; i < VIZ_N; i++) re[i] = P.viz[(P.viz_pos + i) % VIZ_N];
-  unlock();
-  bool moving = false;
+/* Feeds fviz the samples being heard; returns true while it still moves. */
+static bool viz_feed(bool playing) {
   if (playing) {
-    for (int i = 0; i < VIZ_N; i++) {
-      float w = 0.5f - 0.5f * cosf(6.2831853f * i / (VIZ_N - 1));
-      re[i] *= w;
-      im[i] = 0;
-    }
-    fft(re, im, VIZ_N);
+    lock();
+    for (int i = 0; i < VIZ_FFT; i++) P.viz_snap[i] = P.viz[(P.viz_pos + i) % VIZ_FFT];
+    unlock();
   }
-  for (int b = 0; b < BANDS; b++) {
-    float target = 0;
-    if (playing) {
-      /* log-spaced bins 1..127 */
-      int lo = (int)(powf(127.0f, (float)b / BANDS)), hi = (int)(powf(127.0f, (float)(b + 1) / BANDS));
-      if (hi <= lo) hi = lo + 1;
-      float m = 0;
-      for (int k = lo; k < hi && k < VIZ_N / 2; k++) m = FM_MAX(m, sqrtf(re[k] * re[k] + im[k] * im[k]));
-      float db = 20.0f * log10f(m + 1e-6f);
-      target = FM_CLAMP((db + 10.0f) / 40.0f, 0.0f, 1.0f);
-    }
-    float k = target > P.bands[b] ? 0.55f : 0.12f;
-    P.bands[b] += (target - P.bands[b]) * k;
-    if (P.bands[b] > 0.004f) moving = true;
-    else P.bands[b] = 0;
-  }
-  return moving;
+  return viz_update(&conf.viz, playing ? P.viz_snap : NULL, P.rate, ui.dt);
 }
 
-static void draw_viz(FmRect r, FmColor c) {
-  float bw = r.w / BANDS;
-  for (int b = 0; b < BANDS; b++) {
-    float h = FM_MAX(DP(2), r.h * P.bands[b]);
-    FmRect bar = { r.x + b * bw + bw * 0.18f, r.y + r.h - h, bw * 0.64f, h };
-    gfx_rrect(bar, FM_MIN(bar.w * 0.5f, DP(2)), col_alpha(c, 0.35f + 0.65f * P.bands[b]));
+static void viz_tap(void) {
+  viz_cycle(&conf.viz, &conf.viz_saved);
+  ui_toast("Visualizer: %s%s", viz_style_name(conf.viz.style), conf.viz.custom ? " (custom)" : "");
+}
+
+/* --demo-audio FILE [--demo-viz N] [--demo-viz-panel] [--demo-eq N]: opens the
+** player (or the video viewer) with a style, the panel or an equalizer preset,
+** for screenshots. Checked from audio_mini_active, which the app asks every
+** frame, so the hook needs no code in fapp.c. */
+static void demo_hook(void) {
+  static bool done;
+  if (done) return;
+  done = true;
+  const char *file = NULL;
+  bool panel = false;
+  for (int i = 1; i < app.argc; i++) {
+    if (!strcmp(app.argv[i], "--demo-audio") && i + 1 < app.argc) file = app.argv[i + 1];
+    if (!strcmp(app.argv[i], "--demo-viz") && i + 1 < app.argc) viz_preset(&conf.viz, atoi(app.argv[i + 1]));
+    if (!strcmp(app.argv[i], "--demo-viz-panel")) panel = true;
+    if (!strcmp(app.argv[i], "--demo-eq") && i + 1 < app.argc) {
+      eq_preset(&conf.eq, atoi(app.argv[i + 1]));
+      conf.eq.on = true;
+      viz_panel_tab(1);
+      panel = true;
+    }
   }
+  if (!file) return;
+  app_open(file, NULL, 0, 0);
+  P.viz_open = panel;
 }
 
 /* ---- drawing pieces ----------------------------------------------------------------- */
@@ -859,7 +848,7 @@ static void info_card(NowPlaying *np) {
 
 /* ---- the full player ------------------------------------------------------------------ */
 
-enum { AM_OPEN = 1, AM_SHARE, AM_INFO, AM_STOP };
+enum { AM_OPEN = 1, AM_SHARE, AM_INFO, AM_STOP, AM_VIZ, AM_EQ };
 
 static void aud_view_frame(FmRect area) {
   gfx_rect(area, T.bg);
@@ -867,6 +856,7 @@ static void aud_view_frame(FmRect area) {
   NowPlaying np;
   now_playing(&np);
   bool playing = P.dev && !P.paused && !np.ended;
+  if (P.dev) eq_follow(&P.eq, P.rate, P.mx);
 
   /* keys */
   if (ui_key(SDLK_SPACE, 0) || ui_key(SDLK_AUDIOPLAY, 0) || ui_key(SDLK_k, 0)) set_paused(playing);
@@ -882,7 +872,7 @@ static void aud_view_frame(FmRect area) {
   if (P.n > 1) fm_snprintf(sub, sizeof sub, "%d / %d", np.idx + 1, P.n);
   else sub[0] = 0;
   FmRect act;
-  if (view_topbar(area, VIEW_BAR_THEME, 1.0f, "Now playing", sub, wide ? 1 : 2, &act)) {
+  if (view_topbar(area, VIEW_BAR_THEME, 1.0f, "Now playing", sub, wide || P.n < 2 ? 2 : 3, &act)) {
     app_close_viewer();
     return;
   }
@@ -890,6 +880,8 @@ static void aud_view_frame(FmRect area) {
   if (view_bar_btn(&act, ui_id("aud.more"), IC_MORE, "More", VIEW_BAR_THEME, 1, false)) {
     FmMenuItem items[] = {
       { AM_INFO, IC_INFO, "Track info", NULL, 0 },
+      { AM_VIZ, IC_EQUALIZER, "Visualizer", NULL, 0 },
+      { AM_EQ, IC_EQUALIZER, "Equalizer", NULL, 0 },
       { AM_SHARE, IC_SHARE, "Share", NULL, 0 },
       { AM_OPEN, IC_OPEN_WITH, "Open with system app", NULL, 0 },
       { 0, IC_NONE, NULL, NULL, UI_MI_SEP },
@@ -897,12 +889,32 @@ static void aud_view_frame(FmRect area) {
     };
     ui_menu_open(mid, act.x + act.w, area.y + ui.m.bar_h, items, FM_COUNT(items));
   }
-  if (!wide && P.n > 1 && view_bar_btn(&act, ui_id("aud.listbtn"), IC_LIST, "Playlist", VIEW_BAR_THEME, 1, P.show_list))
+  if (!wide && P.n > 1 && view_bar_btn(&act, ui_id("aud.listbtn"), IC_LIST, "Playlist", VIEW_BAR_THEME, 1, P.show_list)) {
     P.show_list = !P.show_list;
-  switch (ui_menu_result(mid)) {
+    P.viz_open = false;
+  }
+  /* favorite: the media library's heart for the track being heard */
+  if (np.idx >= 0) {
+    bool fav = lib_is_fav(P.paths[np.idx]);
+    if (view_bar_btn(&act, ui_id("aud.favbtn"), fav ? IC_HEART_FILL : IC_HEART,
+                     fav ? "Remove from favorites" : "Add to favorites", VIEW_BAR_THEME, 1, fav))
+      lib_fav_toggle(P.paths[np.idx]);
+  }
+  if (view_bar_btn(&act, ui_id("aud.vizbtn"), IC_EQUALIZER, "Visualizer & equalizer", VIEW_BAR_THEME, 1,
+                   P.viz_open)) {
+    P.viz_open = !P.viz_open;
+    P.show_list = false;
+  }
+  int mres = ui_menu_result(mid);
+  switch (mres) {
     case AM_OPEN: set_paused(true); plat_open_external(P.paths[np.idx]); break;
     case AM_SHARE: plat_share(P.paths[np.idx]); break;
     case AM_INFO: P.info_open = true; break;
+    case AM_VIZ: case AM_EQ:
+      P.viz_open = true;
+      P.show_list = false;
+      viz_panel_tab(mres == AM_EQ);
+      break;
     case AM_STOP: audio_stop(); app_close_viewer(); return;
     default: break;
   }
@@ -922,10 +934,17 @@ static void aud_view_frame(FmRect area) {
   }
   body = rect_inset(body, DP(ui.touch_mode ? 20 : 24));
   FmRect left = body, right = { 0, 0, 0, 0 };
-  if (wide && P.n > 1) {
+  /* wide: the visualizer settings take the right column (over the playlist),
+  ** so the player stays in view as a live preview; narrow: the cover area */
+  bool side = wide && (P.n > 1 || P.viz_open);
+  if (side) {
     right = rect_cut_right(&left, FM_MIN(DP(420), body.w * 0.45f));
     rect_cut_right(&left, DP(24));
   }
+  bool panel_left = P.viz_open && !side;
+  bool list_left = !panel_left && P.show_list && !wide && P.n > 1;
+  int style = conf.viz.style;
+  bool ring = viz_around_cover(style) && !panel_left && !list_left;
 
   /* control stack from the bottom */
   float ch = DP(ui.touch_mode ? 84 : 72);
@@ -934,23 +953,43 @@ static void aud_view_frame(FmRect area) {
   FmRect ctl = rect_cut_bottom(&left, ch);
   FmRect times = rect_cut_bottom(&left, DP(22));
   FmRect seek = rect_cut_bottom(&left, DP(24));
-  rect_cut_bottom(&left, DP(6));
-  FmRect vizr = rect_cut_bottom(&left, DP(36));
-  rect_cut_bottom(&left, DP(8));
-  float th = font_line_h(ui.m.font_big), ah = font_line_h(ui.m.font);
-  FmRect titles = rect_cut_bottom(&left, th + ah + DP(10));
   rect_cut_bottom(&left, DP(10));
+  float th = font_line_h(ui.m.font_big), ah = font_line_h(ui.m.font);
+  /* a ring needs room round the cover (phone landscape has none): use the strip */
+  if (ring && FM_MIN(left.w, left.h - th - ah - DP(20)) < DP(150)) ring = false;
+  /* the strip grows with the room; ring styles and "off" give it to the cover */
+  float vh = 0;
+  if (style != VIZ_OFF && !ring) vh = FM_CLAMP((left.h - th - ah) * 0.2f, DP(44), DP(120));
+  /* the panel over the cover gets the titles' room too, and the strip shrinks */
+  if (panel_left) vh = FM_MIN(vh, DP(64));
+  FmRect vizr = rect_cut_bottom(&left, vh);
+  if (vh > 0) rect_cut_bottom(&left, DP(8));
+  FmRect titles = rect_cut_bottom(&left, panel_left ? 0 : th + ah + DP(10));
+  rect_cut_bottom(&left, panel_left ? 0 : DP(10));
 
-  if (P.show_list && !wide && P.n > 1) {
+  /* visualizer state first: the cover may bounce with the beat */
+  bool live = style != VIZ_OFF || P.viz_open;
+  bool moving = live && viz_feed(playing);
+  if (panel_left) {
+    if (!viz_panel(rect_center(left, FM_MIN(left.w, DP(560)), left.h))) P.viz_open = false;
+  } else if (list_left) {
     gfx_rrect(left, ui.m.radius, T.surface);
     playlist(rect_inset(left, DP(6)), np.idx);
   } else {
     float cs = FM_MIN(left.w, left.h);
-    cs = FM_MIN(cs, DP(420));
-    if (cs > DP(48)) cover_card(rect_center(left, cs, cs), np.idx, DP(20));
+    cs = FM_MIN(cs, DP(ring ? 480 : 420));
+    FmRect sq = rect_center(left, cs, cs);
+    if (ring && cs > DP(96)) {
+      float in = cs * 0.6f * (style == VIZ_PULSE ? 1.0f + 0.04f * viz_beat() : 1.0f);
+      viz_draw(&conf.viz, sq, in * 0.5f);
+      cover_card(rect_center(sq, in, in), np.idx, in * 0.5f);
+      if (ui_hit(ui_id("aud.vizring"), sq) & UI_CLICK) viz_tap();
+    } else if (cs > DP(48)) {
+      cover_card(sq, np.idx, DP(20));
+    }
   }
   /* title and artist */
-  {
+  if (!panel_left) {
     float tw = font_width(FONT_BOLD, ui.m.font_big, np.title, -1);
     float tx = titles.x + FM_MAX(0.0f, (titles.w - tw) * 0.5f);
     font_draw_ellipsis(FONT_BOLD, ui.m.font_big, tx, titles.y, np.title, titles.w, T.text);
@@ -959,9 +998,14 @@ static void aud_view_frame(FmRect area) {
     float ax = titles.x + FM_MAX(0.0f, (titles.w - aw) * 0.5f);
     font_draw_ellipsis(FONT_REGULAR, ui.m.font, ax, titles.y + th + DP(4), a, titles.w, T.text2);
   }
-  /* visualizer */
-  bool moving = viz_update(playing);
-  draw_viz(rect_center(vizr, FM_MIN(vizr.w, DP(420)), vizr.h), T.accent);
+  /* visualizer strip; a tap cycles the styles */
+  if (vh > 0) {
+    FmRect vr = rect_center(vizr, FM_MIN(vizr.w, DP(560)), vizr.h);
+    viz_draw(&conf.viz, vr, 0);
+    int f = ui_hit(ui_id("aud.viz"), vr);
+    if (f & UI_CLICK) viz_tap();
+    if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
+  }
   /* seek + times */
   FmRect sr = rect_center(seek, FM_MIN(seek.w, DP(560)), seek.h);
   seek_bar(sr, &np);
@@ -981,7 +1025,9 @@ static void aud_view_frame(FmRect area) {
   controls(ctl, playing);
   volume_row(vol);
 
-  if (wide && P.n > 1) {
+  if (side && P.viz_open) {
+    if (!viz_panel(right)) P.viz_open = false;
+  } else if (side) {
     gfx_rrect(right, ui.m.radius, T.surface);
     FmRect hdr = rect_cut_top(&right, DP(44));
     char hb[48];
@@ -991,19 +1037,27 @@ static void aud_view_frame(FmRect area) {
   }
 
   if (P.info_open) info_card(&np);
-  if (playing || moving || P.seek_drag) ui_animate();
+  if ((live && (playing || moving)) || P.seek_drag) ui_animate();
+  else if (playing) view_wake_in(250);        /* no visualizer: just the clock */
   if (np.ended && P.dev && !P.paused) { P.paused = true; SDL_PauseAudioDevice(P.dev, 1); }
-  if (view_key_back()) app_close_viewer();
+  if (view_key_back()) {
+    if (P.viz_open) P.viz_open = false;
+    else app_close_viewer();
+  }
 }
 
 /* ---- mini player ---------------------------------------------------------------------- */
 
-bool audio_mini_active(void) { return P.active && !P.viewer_open && P.dev; }
+bool audio_mini_active(void) {
+  demo_hook();
+  return P.active && !P.viewer_open && P.dev;
+}
 
 void audio_mini_draw(FmRect r) {
   if (!audio_mini_active()) return;
   NowPlaying np;
   now_playing(&np);
+  eq_follow(&P.eq, P.rate, P.mx);
   if (np.ended && !P.paused) { P.paused = true; SDL_PauseAudioDevice(P.dev, 1); }
   bool playing = !P.paused && !np.ended;
   gfx_rect(r, T.surface2);

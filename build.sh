@@ -17,6 +17,11 @@
 #                  at run time from the SDL2.dll this script builds itself)
 #   --jobs=N       parallel compiles (default 4)
 #   --no-asm       build without the inline-asm fast paths
+#   --with-ffmpeg=DIR  copy FFmpeg 4-8 shared libraries (and their licence) from DIR
+#                  into dist/, so every video format plays; desktop zig builds only.
+#                  Without it video uses the OS decoders (Media Foundation on Windows,
+#                  MediaCodec on Android) or an FFmpeg already on the system. Use an
+#                  LGPL build: a GPL one makes the shipped bundle GPL.
 #
 # Commands:
 #   clean          remove build/ and dist/
@@ -54,6 +59,7 @@ CCKIND="zig"
 JOBS="${JOBS:-4}"
 USE_ASM=1
 CMD="build"
+FFMPEG_DIR=""
 for a in "$@"; do
   case "$a" in
     debug|release) MODE="$a" ;;
@@ -61,6 +67,7 @@ for a in "$@"; do
     --cc=*) CCKIND="${a#--cc=}" ;;
     --jobs=*) JOBS="${a#--jobs=}" ;;
     --no-asm) USE_ASM=0 ;;
+    --with-ffmpeg=*) FFMPEG_DIR="${a#--with-ffmpeg=}" ;;
     win-x64|win-arm64|linux-x64|linux-arm64|macos-x64|macos-arm64|freebsd-x64|android|web)
       TARGET="$a" ;;
     -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -395,6 +402,55 @@ case "$TARGET" in
     ;;
 esac
 
+# ---- bundled FFmpeg (--with-ffmpeg=DIR) -------------------------------------------
+
+# Copies the libraries fdec_vid.c loads (it looks next to the exe, in lib/ on
+# Linux/BSD and in Contents/Frameworks on macOS) plus FFmpeg's licence.
+copy_ffmpeg() {
+  case "$TARGET" in
+    android|web) die "--with-ffmpeg: not used on $TARGET (it uses the OS decoders)" ;;
+  esac
+  [ "$CCKIND" = tcc ] && die "--with-ffmpeg: the tcc build is 32-bit and never loads FFmpeg"
+  [ -d "$FFMPEG_DIR" ] || die "--with-ffmpeg: no folder '$FFMPEG_DIR'"
+  local dest pats src n=0
+  case "$TARGET" in
+    win-*)   dest="$OUTDIR"; pats="avformat-*.dll avcodec-*.dll avutil-*.dll swscale-*.dll swresample-*.dll" ;;
+    macos-*) dest="$BUNDLE/Contents/Frameworks"
+             pats="libavformat.*.dylib libavcodec.*.dylib libavutil.*.dylib libswscale.*.dylib libswresample.*.dylib" ;;
+    *)       dest="$OUTDIR/lib"; pats="libavformat.so.* libavcodec.so.* libavutil.so.* libswscale.so.* libswresample.so.*" ;;
+  esac
+  mkdir -p "$dest"
+  for sub in bin lib .; do
+    [ -d "$FFMPEG_DIR/$sub" ] || continue
+    for p in $pats; do
+      for src in "$FFMPEG_DIR/$sub"/$p; do
+        [ -f "$src" ] || continue
+        cp -L "$src" "$dest/" && n=$((n + 1))
+      done
+    done
+    [ $n -gt 0 ] && break
+  done
+  [ $n -gt 0 ] || die "--with-ffmpeg: no FFmpeg shared libraries in '$FFMPEG_DIR' (bin/, lib/ or the folder itself)"
+  local lic=""
+  for f in "$FFMPEG_DIR"/LICENSE* "$FFMPEG_DIR"/COPYING* "$FFMPEG_DIR"/../LICENSE*; do
+    [ -f "$f" ] && { lic="$f"; break; }
+  done
+  if [ -n "$lic" ]; then
+    cp "$lic" "$OUTDIR/FFMPEG-LICENSE.txt"
+    grep -qi "GNU GENERAL PUBLIC LICENSE" "$lic" && ! grep -qi "LESSER" "$lic" &&
+      echo "  warning: this FFmpeg build is GPL; the bundle you ship becomes GPL (use an LGPL build)" >&2
+  else
+    echo "  warning: no FFmpeg licence file found in '$FFMPEG_DIR'; ship one with the bundle" >&2
+  fi
+  cat > "$OUTDIR/FFMPEG-NOTICE.txt" <<'EOF'
+This package includes FFmpeg (https://ffmpeg.org) as separate shared libraries,
+loaded at run time and replaceable with any compatible build. FFmpeg is licensed
+under the LGPL v2.1 or later (see FFMPEG-LICENSE.txt); its source code is at
+https://ffmpeg.org/download.html and https://git.ffmpeg.org/ffmpeg.git
+EOF
+  echo "  ffmpeg: $n libraries -> ${dest#./}"
+}
+
 # ---- compile + link (one ABI or one desktop target) -------------------------------
 
 # compile_all <cc> <cflags> <vendor cflags> <objdir>  -> sets OBJS
@@ -497,6 +553,7 @@ EOF
     web)
       ;;
   esac
+  [ -n "$FFMPEG_DIR" ] && copy_ffmpeg
   echo "built $OUT"
 
   if [ "$CMD" = run ] || [ "$CMD" = selftest ]; then
@@ -518,7 +575,10 @@ fi
 
 if [ "$CMD" = selftest ]; then die "selftest runs on desktop targets only"; fi
 
-APKDIR="build/android-$MODE/apk"
+# BUILD_TAG keeps parallel Android builds apart, as on desktop
+ATAG="${BUILD_TAG:+-$BUILD_TAG}"
+if [ -n "$ATAG" ]; then OUTDIR="$OUTDIR$ATAG"; OUT="$OUTDIR/$APP.apk"; fi
+APKDIR="build/android-$MODE$ATAG/apk"
 rm -rf "$APKDIR"
 mkdir -p "$APKDIR/lib"
 for ABI in $ABIS; do
@@ -533,7 +593,7 @@ for ABI in $ABIS; do
   CC="$CLANG --target=$CTRIPLE"
   ACFLAGS="-std=c11 $OPT $WARN -fPIC -ffunction-sections -fdata-sections -I$SDL_PREFIX/include/SDL2"
   AVFLAGS="-std=c11 $OPT -w -fPIC -ffunction-sections -fdata-sections"
-  compile_all "$CC" "$ACFLAGS" "$AVFLAGS" "build/android-$ABI-$MODE"
+  compile_all "$CC" "$ACFLAGS" "$AVFLAGS" "build/android-$ABI-$MODE$ATAG"
   mkdir -p "$APKDIR/lib/$ABI"
   echo "  ld  lib/$ABI/libmain.so"
   # shellcheck disable=SC2086
@@ -546,7 +606,7 @@ done
 
 # Java: SDL's activity classes (from the vendored source) + FmActivity.
 sdl_source
-JOUT="build/android-$MODE/java"
+JOUT="build/android-$MODE$ATAG/java"
 rm -rf "$JOUT"; mkdir -p "$JOUT/classes" "$JOUT/dex"
 JAVA_SRCS="$(ls "$SDL_SRC"/android-project/app/src/main/java/org/libsdl/app/*.java) $(find android/java -name '*.java')"
 WJ=""; for j in $JAVA_SRCS; do WJ="$WJ $(W "$j")"; done
@@ -565,7 +625,7 @@ D8="$BT/d8"; [ -f "$D8.bat" ] && D8="$D8.bat"
 cp "$JOUT/dex/classes.dex" "$APKDIR/"
 
 # Resources + manifest.
-RES="build/android-$MODE/res"
+RES="build/android-$MODE$ATAG/res"
 rm -rf "$RES"; mkdir -p "$RES"
 echo "  aapt2"
 "$BT/aapt2$EXE" compile --dir "$(W android/res)" -o "$(W "$RES/res.zip")"
@@ -575,10 +635,11 @@ echo "  aapt2"
   --version-code $APP_VERSION_CODE --version-name $APP_VERSION \
   "$(W "$RES/res.zip")"
 
-# Add dex + native libraries. Native libraries are stored uncompressed so the
-# loader can map them straight from the APK (extractNativeLibs=false).
+# Add dex + native libraries, both stored uncompressed: native libraries so the
+# loader can map them straight from the APK (extractNativeLibs=false), the dex
+# because it loads a little faster and does not depend on the zip deflater.
 cp "$RES/base.apk" "$RES/unaligned.apk"
-( cd "$APKDIR" && zip -q -0 -r "../../../$RES/unaligned.apk" lib && zip -q "../../../$RES/unaligned.apk" classes.dex )
+( cd "$APKDIR" && zip -q -0 -r "../../../$RES/unaligned.apk" lib classes.dex )
 mkdir -p "$OUTDIR"
 "$BT/zipalign$EXE" -f -P 16 4 "$(W "$RES/unaligned.apk")" "$(W "$RES/aligned.apk")"
 

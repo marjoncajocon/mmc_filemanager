@@ -100,6 +100,30 @@ static void star(bool filled) {
   }
 }
 
+/* The classic parametric heart. Each half is convex, so the fill is two
+** convex shapes that overlap a little at the middle (no seam). */
+static void heart_pt(float t, float *u, float *v) {
+  float s = sinf(t);
+  float y = 13.0f * cosf(t) - 5.0f * cosf(2 * t) - 2.0f * cosf(3 * t) - cosf(4 * t);
+  *u = 12.0f + 16.0f * s * s * s * 0.56f;
+  *v = 11.2f - (y + 2.5f) * 0.56f;
+}
+
+static void heart(bool filled) {
+  float pts[56];
+  for (int i = 0; i < 28; i++) heart_pt((float)i * 2.0f * PI_F / 28.0f, &pts[2 * i], &pts[2 * i + 1]);
+  if (filled)
+    for (int side = 0; side < 2; side++) {
+      float half[32];
+      for (int i = 0; i <= 14; i++) {
+        heart_pt(((float)side + (float)i / 14.0f) * PI_F, &half[2 * i], &half[2 * i + 1]);
+        if (i == 0 || i == 14) half[2 * i] += side ? 0.4f : -0.4f;
+      }
+      CONVEX(15, half);
+    }
+  P(28, pts, true);
+}
+
 static void gear(void) {
   RING(12, 12, 3);
   for (int i = 0; i < 8; i++) {
@@ -451,6 +475,23 @@ void icon_draw(FmIcon ic, FmRect r, FmColor c) {
       break;
     case IC_KEY:
       RING(8, 12, 4); L(12, 12, 21, 12); L(18, 12, 18, 15.5f); L(15, 12, 15, 14.5f);
+      break;
+    case IC_EQUALIZER:    /* three faders: the visualizer settings */
+      L(6, 4, 6, 20); L(12, 4, 12, 20); L(18, 4, 18, 20);
+      DOT(6, 14, 2.6f); DOT(12, 8, 2.6f); DOT(18, 16, 2.6f);
+      break;
+    /* media library */
+    case IC_HEART: heart(false); break;
+    case IC_HEART_FILL: heart(true); break;
+    case IC_LIBRARY:    /* a stack of albums with a note on top */
+      POLY(false, 3, 8, 3, 21, 16, 21);
+      RR(7, 3, 14, 14, 2.5f);
+      L(15.5f, 6.5f, 15.5f, 12.5f); L(15.5f, 6.5f, 18, 7.5f);
+      DOT(13.6f, 12.8f, 2.0f);
+      break;
+    case IC_PERSON:     /* artists */
+      RING(12, 8, 4);
+      ARC(12, 22, 8, 200, 340);
       break;
   }
 }

@@ -14,11 +14,21 @@
 **     no colour conversion on the CPU. Late frames are dropped.
 **   - Controls auto-hide while playing; the screen saver is held off only
 **     while playing, and fullscreen is undone when the viewer closes.
+**   - Visualizer (fviz.c, the music player's styles and settings): audio-only
+**     files show it instead of a picture, videos can overlay it. The audio
+**     callback keeps the last samples it hands to the device (what is heard,
+**     not what is decoded ahead) in a fixed ring, only while a visualizer is
+**     shown; the analysis runs on the main thread like in the music player.
+**   - The equalizer (feq.c, shared with the music player) runs in the
+**     callback on the converted audio, before the visualizer copy.
 */
 #include "fview_int.h"
+#include "flib.h"
 #include "fplat.h"
 #include "fconf.h"
 #include "fdec_vid.h"
+#include "fviz.h"
+#include "feq.h"
 
 #define QN 3
 #define AUDIO_AHEAD 1.0      /* seconds of decoded audio kept queued */
@@ -83,6 +93,14 @@ static struct {
   u64 skip_flash_t;
   bool info_open;
   u64 vol_shown_until;
+  /* visualizer */
+  bool viz_on;             /* the callback keeps samples (lock) */
+  float viz[VIZ_FFT];
+  int viz_pos;
+  float viz_snap[VIZ_FFT];
+  bool viz_overlay;        /* over the picture (toolbar toggle) */
+  bool viz_panel;          /* settings shown */
+  FmEq eq;                 /* equalizer state (callback, under mx) */
 } V;
 
 /* ---- audio callback ------------------------------------------------------------- */
@@ -94,9 +112,17 @@ static void SDLCALL vid_audio_cb(void *u, Uint8 *stream, int len) {
   if (got < 0) got = 0;
   if (got < len) memset(stream + got, 0, (size_t)(len - got));
   int frames = got / (int)(sizeof(float) * 2);
+  eq_process(&V.eq, (float *)stream, frames);
   if (frames > 0) {
     V.out_frames += (u64)frames;
     V.last_audio_ms = SDL_GetTicks64();
+  }
+  if (V.viz_on) {
+    const float *in = (const float *)stream;
+    for (int i = 0; i < frames; i++) {
+      V.viz[V.viz_pos] = (in[i * 2] + in[i * 2 + 1]) * 0.5f;
+      V.viz_pos = (V.viz_pos + 1) % VIZ_FFT;
+    }
   }
   float vol = V.volume * V.volume;
   SDL_UnlockMutex(V.mx);
@@ -283,6 +309,7 @@ static void start_playback(void) {
         SDL_LockMutex(V.mx);
         V.ast = SDL_NewAudioStream(AUDIO_F32SYS, (Uint8)V.info.channels, V.info.rate, AUDIO_F32SYS, 2, V.dev_rate);
         SDL_UnlockMutex(V.mx);
+        eq_follow(&V.eq, V.dev_rate, V.mx);
         if (V.ast) SDL_PauseAudioDevice(V.dev, 0);
       }
     }
@@ -332,6 +359,11 @@ static bool vid_view_open(const char *path, const char *const *list, int n, int 
   if (V.mx && V.cv) V.thr = fm_thread_create(worker, "video", NULL);
   if (!V.thr) { V.state = VS_ERROR; V.err = FM_ERR_NOMEM; }
   view_chrome_poke(&V.chrome);
+  /* screenshots: --demo-audio FILE --demo-viz-overlay / --demo-viz-panel / --demo-eq N */
+  for (int i = 1; i < app.argc; i++) {
+    if (!strcmp(app.argv[i], "--demo-viz-overlay")) V.viz_overlay = true;
+    if (!strcmp(app.argv[i], "--demo-viz-panel") || !strcmp(app.argv[i], "--demo-eq")) V.viz_panel = true;
+  }
   return true;
 }
 
@@ -423,7 +455,56 @@ static void vid_seek_bar(FmRect r) {
   if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
 }
 
-enum { VM_OPEN = 1, VM_SHARE, VM_INFO };
+enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ };
+
+/* ---- visualizer ----------------------------------------------------------------- */
+
+/* Feeds fviz the samples being heard; returns true while it still moves. */
+static bool viz_feed(bool show, bool playing) {
+  SDL_LockMutex(V.mx);
+  V.viz_on = show && V.dev;
+  if (V.viz_on && playing)
+    for (int i = 0; i < VIZ_FFT; i++) V.viz_snap[i] = V.viz[(V.viz_pos + i) % VIZ_FFT];
+  SDL_UnlockMutex(V.mx);
+  if (!show || !V.dev) return false;
+  return viz_update(&conf.viz, playing ? V.viz_snap : NULL, V.dev_rate, ui.dt);
+}
+
+/* Audio-only file: the visualizer fills the space between the bars, and
+** moves aside (left or up) for the settings panel. */
+static void viz_alone(FmRect area, FmRect panel) {
+  FmRect c = area;
+  rect_cut_top(&c, ui.m.bar_h + DP(16));
+  rect_cut_bottom(&c, DP(ui.touch_mode ? 128 : 104));
+  if (V.viz_panel && panel.x > c.x + DP(40)) c.w = panel.x - c.x;
+  else if (V.viz_panel) c.h = FM_MAX(0.0f, panel.y - c.y);
+  c = rect_inset2(c, DP(24), 0);
+  if (c.w < DP(40) || c.h < DP(40)) return;
+  if (viz_around_cover(conf.viz.style)) {
+    float s = FM_MIN(c.w, c.h) * 0.92f;
+    viz_draw_media(&conf.viz, rect_center(c, s, s), 0, 1.0f);
+  } else {
+    viz_draw_media(&conf.viz, rect_center(c, FM_MIN(c.w, DP(760)), FM_MIN(c.h * 0.5f, DP(260))), 0, 1.0f);
+  }
+}
+
+/* Over the picture: the lower part of the frame, half transparent. */
+static void viz_overlay(FmRect pic) {
+  float h = FM_CLAMP(pic.h * 0.28f, DP(48), DP(200));
+  FmRect r = rect_inset2(FM_RECT(pic.x, pic.y + pic.h - h - DP(12), pic.w, h), DP(16), 0);
+  if (viz_around_cover(conf.viz.style)) r = rect_center(r, h, h);
+  viz_draw_media(&conf.viz, r, -1, 0.7f);
+}
+
+/* Where the settings panel goes: right column when wide, else the lower part. */
+static FmRect viz_panel_rect(FmRect area) {
+  FmRect r = area;
+  rect_cut_top(&r, ui.m.bar_h + DP(8));
+  rect_cut_bottom(&r, DP(ui.touch_mode ? 120 : 96));
+  if (!ui.portrait && area.w >= DP(720)) r = rect_cut_right(&r, FM_MIN(DP(420), r.w * 0.45f));
+  else r = rect_cut_bottom(&r, r.h * 0.66f);
+  return rect_inset(r, DP(12));
+}
 
 static void vid_view_frame(FmRect area) {
   gfx_rect(area, VIEW_BG);
@@ -449,7 +530,20 @@ static void vid_view_frame(FmRect area) {
   }
   bool playing = ready && !V.paused && !V.ended;
   screensaver(playing);
-  float chrome = view_chrome(&V.chrome, ui_id("vid.chrome"), playing && !V.seek_drag);
+  float chrome = view_chrome(&V.chrome, ui_id("vid.chrome"), playing && !V.seek_drag && !V.viz_panel);
+
+  /* audio-only, or the picture never came: the visualizer takes its place */
+  bool no_pic = false;
+  if (ready && V.info.has_video && !V.have_frame && V.dev) {
+    SDL_LockMutex(V.mx);
+    no_pic = V.out_frames > (u64)V.dev_rate * 3 / 2;
+    SDL_UnlockMutex(V.mx);
+  }
+  bool audio_only = ready && V.info.has_audio && V.dev && (!V.info.has_video || no_pic);
+  bool viz_shown = conf.viz.style != VIZ_OFF && (audio_only || (V.viz_overlay && V.have_frame));
+  bool viz_moving = ready && viz_feed(viz_shown || V.viz_panel, playing);
+  if (ready && V.dev) eq_follow(&V.eq, V.dev_rate, V.mx);
+  FmRect vpanel = viz_panel_rect(area);
 
   /* picture, letterboxed with the pixel aspect */
   FmRect pic = area;
@@ -460,18 +554,24 @@ static void vid_view_frame(FmRect area) {
     float w = (float)(dw * sc), h = (float)(dh * sc);
     pic = FM_RECT(area.x + (area.w - w) * 0.5f, area.y + (area.h - h) * 0.5f, w, h);
     gfx_tex(V.tex, NULL, pic, FM_HEX(0xFFFFFF));
-  } else if (state == VS_OPENING || (ready && V.info.has_video && !V.have_frame)) {
+    if (viz_shown) viz_overlay(pic);
+  } else if (state == VS_OPENING || (ready && V.info.has_video && !V.have_frame && !audio_only)) {
     ui_spinner(rect_center(area, DP(40), DP(40)), VIEW_FG2);
+  } else if (ready && viz_shown) {
+    viz_alone(area, vpanel);
   } else if (ready && !V.info.has_video) {
     float is = DP(96);
     icon_draw(IC_MUSIC, rect_center(area, is, is), VIEW_FG2);
   }
   if (state == VS_ERROR) {
-    bool need_ff = V.err == FM_ERR_UNSUPPORTED;
-    view_message(area, IC_VIDEO, need_ff ? "This video needs FFmpeg" : "Cannot play this video",
-                 need_ff ? "Only MPEG-1 is built in. Install FFmpeg 4 to 8 (or put its libraries next to the "
-                           "app) to play this format, or open it with the system player."
-                         : "The file could not be decoded.",
+    /* the system decoders (Media Foundation / MediaCodec) cover the common
+    ** formats; FFmpeg is the way to the rest (FLV, RealMedia, odd codecs) */
+    bool need_ff = (V.err == FM_ERR_UNSUPPORTED || V.err == FM_ERR_FORMAT) && !ff_available();
+    view_message(area, IC_VIDEO, need_ff ? "This format needs FFmpeg" : "Cannot play this video",
+                 need_ff ? "Your system's decoders cannot play it. Put the FFmpeg 4 to 8 libraries next to the "
+                           "app (or use a build made with --with-ffmpeg), or open it with the system player."
+                         : "The file could not be decoded. It may be damaged, or use a codec that is not "
+                           "installed.",
                  VIEW_FG, VIEW_FG2);
     float bw = DP(240), bh = DP(ui.touch_mode ? 46 : 38);
     if (ui_button(ui_id("vid.ext"), FM_RECT(area.x + (area.w - bw) * 0.5f, area.y + area.h * 0.5f + DP(120), bw, bh),
@@ -487,6 +587,10 @@ static void vid_view_frame(FmRect area) {
     if (ui_key(SDLK_UP, 0)) set_volume(V.volume + 0.05f);
     if (ui_key(SDLK_DOWN, 0)) set_volume(V.volume - 0.05f);
     if (ui_key(SDLK_m, 0)) set_volume(V.volume > 0 ? 0 : 0.8f);
+    if (ui_key(SDLK_v, 0)) {
+      viz_cycle(&conf.viz, &conf.viz_saved);
+      ui_toast("Visualizer: %s", viz_style_name(conf.viz.style));
+    }
   }
   if (ui_key(SDLK_f, 0) || ui_key(SDLK_F11, 0)) toggle_fullscreen();
 
@@ -495,7 +599,7 @@ static void vid_view_frame(FmRect area) {
   u32 vid = ui_id("vid.area");
   FmRect hv = area;
   if (chrome > 0.5f) { rect_cut_top(&hv, ui.m.bar_h); rect_cut_bottom(&hv, DP(ui.touch_mode ? 120 : 96)); }
-  int f = ui_hit(vid, hv);
+  int f = V.viz_panel && rect_has(vpanel, ui.mx, ui.my) ? 0 : ui_hit(vid, hv);
   bool touchish = ui.from_touch || ui.touch_mode;
   if ((f & UI_DCLICK) && ready) {
     V.tap_pending = false;
@@ -544,13 +648,15 @@ static void vid_view_frame(FmRect area) {
   sub[0] = 0;
   if (ready && V.tw > 0) fm_snprintf(sub, sizeof sub, "%d \xC3\x97 %d  \xC2\xB7  %s", V.tw, V.th, V.info.backend);
   FmRect act;
-  if (view_topbar(area, VIEW_BAR_MEDIA, chrome, V.title, sub, 2, &act)) { app_close_viewer(); return; }
+  if (view_topbar(area, VIEW_BAR_MEDIA, chrome, V.title, sub, 3, &act)) { app_close_viewer(); return; }
   u32 mid = ui_id("vid.menu");
   if (view_bar_btn(&act, ui_id("vid.more"), IC_MORE, "More", VIEW_BAR_MEDIA, chrome, false)) {
     FmMenuItem items[] = {
       { VM_INFO, IC_INFO, "Video info", NULL, ready ? 0 : UI_MI_DISABLED },
       { VM_SHARE, IC_SHARE, "Share", NULL, 0 },
       { VM_OPEN, IC_OPEN_WITH, "Open with system player", NULL, 0 },
+      { VM_VIZ, IC_EQUALIZER, "Visualizer settings", NULL, V.info.has_audio ? 0 : UI_MI_DISABLED },
+      { VM_EQ, IC_EQUALIZER, "Equalizer", NULL, V.info.has_audio ? 0 : UI_MI_DISABLED },
     };
     ui_menu_open(mid, act.x + act.w, area.y + ui.m.bar_h, items, FM_COUNT(items));
   }
@@ -558,10 +664,27 @@ static void vid_view_frame(FmRect area) {
   if (view_bar_btn(&act, ui_id("vid.fs"), IC_FULLSCREEN, "Fullscreen (F)", VIEW_BAR_MEDIA, chrome, V.fullscreen_set))
     toggle_fullscreen();
 #endif
+  /* favorite: the media library's heart */
+  {
+    bool fav = lib_is_fav(V.path);
+    if (view_bar_btn(&act, ui_id("vid.favbtn"), fav ? IC_HEART_FILL : IC_HEART,
+                     fav ? "Remove from favorites" : "Add to favorites", VIEW_BAR_MEDIA, chrome, fav))
+      lib_fav_toggle(V.path);
+  }
+  /* visualizer: an overlay toggle over pictures, the settings for audio only */
+  if (ready && V.dev && !audio_only &&
+      view_bar_btn(&act, ui_id("vid.vizbtn"), IC_EQUALIZER, "Visualizer overlay (V cycles)", VIEW_BAR_MEDIA, chrome,
+                   V.viz_overlay))
+    V.viz_overlay = !V.viz_overlay;
+  if (ready && audio_only &&
+      view_bar_btn(&act, ui_id("vid.vizset"), IC_EQUALIZER, "Visualizer", VIEW_BAR_MEDIA, chrome, V.viz_panel))
+    V.viz_panel = !V.viz_panel;
   switch (ui_menu_result(mid)) {
     case VM_INFO: V.info_open = true; break;
     case VM_SHARE: plat_share(V.path); break;
     case VM_OPEN: set_paused(true); plat_open_external(V.path); break;
+    case VM_VIZ: V.viz_panel = true; viz_panel_tab(0); break;
+    case VM_EQ: V.viz_panel = true; viz_panel_tab(1); break;
     default: break;
   }
 
@@ -617,10 +740,15 @@ static void vid_view_frame(FmRect area) {
     font_draw_center(FONT_BOLD, ui.m.font_small, r, vb, VIEW_FG);
     view_wake_in((u32)(V.vol_shown_until - ui.now) + 10);
   }
+  if (V.viz_panel && ready) {
+    ui_hit(ui_id("vid.vizpanel"), vpanel);      /* taps on the card stay on it */
+    if (!viz_panel(vpanel)) V.viz_panel = false;
+  }
   if (V.info_open && ready) info_card();
 
-  if (playing) ui_animate();
+  if (playing || viz_moving) ui_animate();
   if (view_key_back()) {
+    if (V.viz_panel) { V.viz_panel = false; return; }
 #ifndef FM_MOBILE
     if (app.win && (SDL_GetWindowFlags(app.win) & SDL_WINDOW_FULLSCREEN_DESKTOP) == SDL_WINDOW_FULLSCREEN_DESKTOP) {
       toggle_fullscreen();

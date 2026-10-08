@@ -14,6 +14,8 @@
 #include "fconf.h"
 #include "fplat.h"
 #include "fui.h"
+#include "fviz.h"
+#include "feq.h"
 
 FmConf conf;
 
@@ -39,6 +41,9 @@ void conf_defaults(void) {
   conf.win_x = conf.win_y = -1;
   conf.win_w = conf.win_h = 0;
   conf.volume = 0.8f;
+  viz_preset(&conf.viz, VIZ_PILLS);
+  viz_preset(&conf.viz_saved, VIZ_PILLS);
+  eq_defaults(&conf.eq);
 }
 
 /* ---- escaping ----------------------------------------------------------- */
@@ -93,6 +98,37 @@ static float to_float(const char *v, float lo, float hi, float def) {
   return (float)FM_CLAMP(d, (double)lo, (double)hi);
 }
 
+/* Visualizer knobs: "viz_*" is the live setup, "vizc_*" the saved custom one. */
+static void set_viz(FmVizConf *z, const char *k, const char *v) {
+  if (!strcmp(k, "style")) z->style = to_int(v, 0, VIZ_STYLES - 1, VIZ_PILLS);
+  else if (!strcmp(k, "bands")) z->bands = to_int(v, VIZ_MIN_BANDS, VIZ_MAX_BANDS, 32);
+  else if (!strcmp(k, "gain")) z->gain = to_float(v, 0.25f, 4.0f, 1.0f);
+  else if (!strcmp(k, "attack")) z->attack = to_float(v, 0.0f, 1.0f, 0.7f);
+  else if (!strcmp(k, "decay")) z->decay = to_float(v, 0.0f, 1.0f, 0.45f);
+  else if (!strcmp(k, "width")) z->width = to_float(v, 0.15f, 1.0f, 0.7f);
+  else if (!strcmp(k, "round")) z->round = to_float(v, 0.0f, 1.0f, 0.35f);
+  else if (!strcmp(k, "color")) z->color = to_int(v, 0, VIZ_COLS - 1, VIZ_COL_ACCENT);
+  else if (!strcmp(k, "color2")) z->color2 = to_int(v, -1, UI_ACCENTS - 1, -1);
+  else if (!strcmp(k, "peaks")) z->peaks = to_bool(v);
+  else if (!strcmp(k, "mirror")) z->mirror = to_bool(v);
+  else if (!strcmp(k, "log")) z->log_scale = to_bool(v);
+  else if (!strcmp(k, "custom")) z->custom = to_bool(v);
+}
+
+/* Equalizer: "eq_b3" is band 3 as heard, "eq_c3" band 3 of the custom curve. */
+static void set_eq(const char *k, const char *v) {
+  FmEqConf *q = &conf.eq;
+  if (!strcmp(k, "on")) q->on = to_bool(v);
+  else if (!strcmp(k, "preset")) q->preset = to_int(v, 0, EQ_PRESETS - 1, EQ_FLAT);
+  else if (!strcmp(k, "preamp")) q->preamp = to_float(v, -EQ_MAX_DB, EQ_MAX_DB, 0.0f);
+  else if (!strcmp(k, "width")) q->width = to_float(v, 0.0f, 2.0f, 1.0f);
+  else if (!strcmp(k, "balance")) q->balance = to_float(v, -1.0f, 1.0f, 0.0f);
+  else if ((k[0] == 'b' || k[0] == 'c') && k[1] >= '0' && k[1] <= '9' && !k[2]) {
+    float *a = k[0] == 'b' ? q->band : q->custom;
+    a[k[1] - '0'] = to_float(v, -EQ_MAX_DB, EQ_MAX_DB, 0.0f);
+  }
+}
+
 static void set_key(const char *k, const char *raw) {
   char v[FM_PATH_MAX];
   unesc(raw, v, sizeof v);
@@ -124,6 +160,9 @@ static void set_key(const char *k, const char *raw) {
   else if (!strcmp(k, "win_h")) conf.win_h = to_int(v, 0, 32000, 0);
   else if (!strcmp(k, "win_max")) conf.win_max = to_bool(v);
   else if (!strcmp(k, "volume")) conf.volume = to_float(v, 0.0f, 1.0f, 0.8f);
+  else if (!strncmp(k, "viz_", 4)) set_viz(&conf.viz, k + 4, v);
+  else if (!strncmp(k, "vizc_", 5)) set_viz(&conf.viz_saved, k + 5, v);
+  else if (!strncmp(k, "eq_", 3)) set_eq(k + 3, v);
   else if (!strcmp(k, "bookmark")) {
     if (v[0] && conf.nbookmarks < CONF_BOOKMARKS && !conf_is_bookmark(v))
       fm_strlcpy(conf.bookmarks[conf.nbookmarks++], v, FM_PATH_MAX);
@@ -162,6 +201,9 @@ void conf_load(void) {
   fclose(f);
   if (conf.accent < -1 || conf.accent >= UI_ACCENTS) conf.accent = -1;
   if (conf.theme < 0 || conf.theme >= THEME_COUNT) conf.theme = 0;
+  viz_sanitize(&conf.viz);
+  viz_sanitize(&conf.viz_saved);
+  eq_sanitize(&conf.eq);
 }
 
 static void put(FILE *f, const char *k, const char *v) {
@@ -172,6 +214,38 @@ static void put(FILE *f, const char *k, const char *v) {
 
 static void put_i(FILE *f, const char *k, int v) { fprintf(f, "%s=%d\n", k, v); }
 static void put_f(FILE *f, const char *k, float v) { fprintf(f, "%s=%.3f\n", k, (double)v); }
+
+static void put_eq(FILE *f, const FmEqConf *q) {
+  char k[16];
+  put_i(f, "eq_on", q->on);
+  put_i(f, "eq_preset", q->preset);
+  put_f(f, "eq_preamp", q->preamp);
+  put_f(f, "eq_width", q->width);
+  put_f(f, "eq_balance", q->balance);
+  for (int i = 0; i < EQ_BANDS; i++) {
+    fm_snprintf(k, sizeof k, "eq_b%d", i); put_f(f, k, q->band[i]);
+  }
+  for (int i = 0; i < EQ_BANDS; i++) {
+    fm_snprintf(k, sizeof k, "eq_c%d", i); put_f(f, k, q->custom[i]);
+  }
+}
+
+static void put_viz(FILE *f, const char *pre, const FmVizConf *z) {
+  char k[32];
+  fm_snprintf(k, sizeof k, "%sstyle", pre); put_i(f, k, z->style);
+  fm_snprintf(k, sizeof k, "%sbands", pre); put_i(f, k, z->bands);
+  fm_snprintf(k, sizeof k, "%sgain", pre); put_f(f, k, z->gain);
+  fm_snprintf(k, sizeof k, "%sattack", pre); put_f(f, k, z->attack);
+  fm_snprintf(k, sizeof k, "%sdecay", pre); put_f(f, k, z->decay);
+  fm_snprintf(k, sizeof k, "%swidth", pre); put_f(f, k, z->width);
+  fm_snprintf(k, sizeof k, "%sround", pre); put_f(f, k, z->round);
+  fm_snprintf(k, sizeof k, "%scolor", pre); put_i(f, k, z->color);
+  fm_snprintf(k, sizeof k, "%scolor2", pre); put_i(f, k, z->color2);
+  fm_snprintf(k, sizeof k, "%speaks", pre); put_i(f, k, z->peaks);
+  fm_snprintf(k, sizeof k, "%smirror", pre); put_i(f, k, z->mirror);
+  fm_snprintf(k, sizeof k, "%slog", pre); put_i(f, k, z->log_scale);
+  fm_snprintf(k, sizeof k, "%scustom", pre); put_i(f, k, z->custom);
+}
 
 void conf_save(void) {
   char path[FM_PATH_MAX], tmp[FM_PATH_MAX];
@@ -211,6 +285,9 @@ void conf_save(void) {
   put_i(f, "win_h", conf.win_h);
   put_i(f, "win_max", conf.win_max);
   put_f(f, "volume", conf.volume);
+  put_viz(f, "viz_", &conf.viz);
+  put_viz(f, "vizc_", &conf.viz_saved);
+  put_eq(f, &conf.eq);
   for (int i = 0; i < conf.nbookmarks; i++) put(f, "bookmark", conf.bookmarks[i]);
   for (int i = 0; i < conf.nhistory; i++) put(f, "history", conf.history[i]);
   bool ok = !ferror(f);
