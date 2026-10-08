@@ -48,7 +48,15 @@ static int task_main(void *u) {
       t->err = psrc_fetch(&t->conf, &t->item, t->kind == PT_DOWNLOAD ? t->dir : NULL, t->out, sizeof t->out, fetch_cb, t,
                           t->errtext, sizeof t->errtext, &t->cancel);
       if (t->err == FM_OK && t->kind == PT_FETCH && t->max_px > 0 && !t->cancel) {
-        t->err = img_load(t->out, t->max_px, t->max_px, &t->img, NULL, &t->cancel);
+        int edge = t->max_px;
+        FmImgInfo fi;
+        /* a pixel budget as well (zoomed in: the largest picture we keep) */
+        if (t->max_pixels && img_info(t->out, &fi) && fi.w > 0 && fi.h > 0 &&
+            (double)fi.w * (double)fi.h > (double)t->max_pixels) {
+          double k = sqrt((double)t->max_pixels / ((double)fi.w * (double)fi.h));
+          edge = FM_MIN(edge, FM_MAX(64, (int)((double)FM_MAX(fi.w, fi.h) * k)));
+        }
+        t->err = img_load(t->out, edge, edge, &t->img, &t->info, &t->cancel);
         if (t->err != FM_OK && t->err != FM_ERR_CANCEL)
           fm_strlcpy(t->errtext, "The full picture is in a format this app cannot show", sizeof t->errtext);
       }

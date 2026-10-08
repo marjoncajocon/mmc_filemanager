@@ -45,6 +45,7 @@
 **     "--", so a pasted "--exec ..." cannot become an option.
 */
 #include "fvsrc_int.h"
+#include "fvsrc_generic.h"
 #include "fproc.h"
 #include "fplat.h"
 #include "fsdl.h"
@@ -633,9 +634,9 @@ static bool sf_decodable(const SFmt *f, const FmVsrcConf *c, bool downloaded) {
   if (c->have_ffmpeg_libs) return true;
   /* the built-in VP9+Opus WebM decoder, or Media Foundation */
   bool vp9 = f->vc == VC_VP9 && f->webm && !f->hdr;
-  bool mp4 = c->os_mp4 && f->mp4 && (!f->frag || downloaded) && (f->vc == VC_H264 || f->vc == VC_OTHER);
-  if (!f->video) return f->ac == AC_OPUS && f->webm;
-  if (f->ac == AC_NONE) return vp9 || (mp4 && downloaded);
+  bool mp4 = c->os_mp4 && f->mp4 && (!f->frag || downloaded || c->os_dash) && (f->vc == VC_H264 || f->vc == VC_OTHER);
+  if (!f->video) return (f->ac == AC_OPUS && f->webm) || (c->os_dash && f->ac == AC_AAC && f->mp4);
+  if (f->ac == AC_NONE) return vp9 || (mp4 && (downloaded || c->os_dash));
   return (vp9 && (f->ac == AC_OPUS || f->ac == AC_VORBIS)) ||
          (mp4 && (f->ac == AC_AAC || f->ac == AC_OTHER));
 }
@@ -682,14 +683,14 @@ static void sf_read(const FmJsonNode *n, const FmVsrcConf *c, double dur, SFmt *
 
 /* bigger is better */
 static double sf_codec_rank(const SFmt *f, const FmVsrcConf *c) {
-  if (c->have_ffmpeg_libs)        /* H.264/AAC: the most compatible and cheapest to decode */
+  if (c->have_ffmpeg_libs || c->os_dash)   /* H.264/AAC: the most compatible and cheapest to decode */
     return f->vc == VC_H264 ? 4 : f->vc == VC_VP9 ? 3 : f->vc == VC_AV1 ? 2 : 1;
   return f->vc == VC_VP9 ? 4 : f->vc == VC_H264 ? 3 : 1;
 }
 
 static double sf_audio_rank(const SFmt *f, const FmVsrcConf *c) {
   double r = (f->stream_ok ? 1e7 : 0) + (f->drc ? 0 : 1e6) + (f->lang + 20) * 1e4;
-  if (c->have_ffmpeg_libs) r += f->ac == AC_AAC ? 2000 : f->ac == AC_OPUS ? 1000 : 0;
+  if (c->have_ffmpeg_libs || c->os_dash) r += f->ac == AC_AAC ? 2000 : f->ac == AC_OPUS ? 1000 : 0;
   else r += f->ac == AC_OPUS ? 2000 : 0;
   return r + FM_MIN(f->tbr, 999.0);
 }
@@ -1066,22 +1067,63 @@ static FmErr web_search(const FmVsrcConf *c, const char *query, const char *page
     fm_snprintf(t, sizeof t, "https://%s", url);
     fm_strlcpy(url, t, sizeof url);
   }
+  /* built in first (fvsrc_generic.c: media links, og:video, JSON-LD, <video>);
+  ** yt-dlp, when present, for what that does not find and for playlists */
+  bool ytdlp = c->ytdlp[0] && proc_available();
+  if (!page_token || !*page_token) {
+    FmVsrcItem it;
+    char gerr[256];
+    FmErr ge = vsrc_generic_probe(c, url, &it, gerr, sizeof gerr, cancel);
+    if (ge == FM_OK) {
+      FmVsrcItem *dst = vsrc_page_add(out);
+      if (dst) *dst = it;
+      return FM_OK;
+    }
+    if (ge == FM_ERR_CANCEL) return ge;
+    if (!ytdlp) {
+      fm_snprintf(out->error, sizeof out->error, "%s. yt-dlp (Settings) knows many more sites", gerr);
+      return ge;
+    }
+  }
   return vsrc_ytdlp_search(c, "web", NULL, url, page_token, out, cancel);
 }
 
 static FmErr web_resolve(const FmVsrcConf *c, const FmVsrcItem *item, FmVsrcStream *out, FmVsrcProgress cb,
                          void *user, char *err, size_t errcap, volatile int *cancel) {
+  bool ytdlp = c->ytdlp[0] && proc_available();
+  if (!c->force_cache) {
+    char gerr[256];
+    FmErr ge = vsrc_generic_resolve(c, item->page, out, gerr, sizeof gerr, cancel);
+    if (ge == FM_OK || ge == FM_ERR_CANCEL || !ytdlp) {
+      if (ge != FM_OK) fm_strlcpy(err, gerr, errcap);
+      return ge;
+    }
+    fm_log("web: built-in resolve failed (%s), trying yt-dlp", gerr);
+  }
   return vsrc_ytdlp_resolve("web", c, item, out, cb, user, err, errcap, cancel);
 }
 
 static FmErr web_download(const FmVsrcConf *c, const FmVsrcItem *item, const char *dir, char *out_path,
                           size_t cap, FmVsrcProgress cb, void *user, char *err, size_t errcap,
                           volatile int *cancel) {
-  return vsrc_ytdlp_download("web", c, item, dir, out_path, cap, cb, user, err, errcap, cancel);
+  if (c->ytdlp[0] && proc_available())
+    return vsrc_ytdlp_download("web", c, item, dir, out_path, cap, cb, user, err, errcap, cancel);
+  /* built in: a plain file saves as is; an HLS playlist would save only the playlist */
+  FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+  FmErr e = vsrc_generic_resolve(c, item->page, st, err, errcap, cancel);
+  if (e == FM_OK && (fm_stristr(st->video, ".m3u8") || (st->cur >= 0 && st->cur < st->nq && st->q[st->cur].cache_only))) {
+    fm_strlcpy(err, "This video is a live-style stream (HLS): saving it needs yt-dlp (Settings)", errcap);
+    e = FM_ERR_UNSUPPORTED;
+  }
+  if (e == FM_OK)
+    e = vsrc_save_stream(c, item, st, dir && *dir ? dir : c->download_dir, out_path, cap, cb, user, err, errcap,
+                         cancel);
+  fm_free(st);
+  return e;
 }
 
 const FmVsrc g_vsrc_web = {
-  "web", "Any site", IC_LINK, VSRC_SEARCH | VSRC_URL | VSRC_YTDLP,
+  "web", "Any site", IC_LINK, VSRC_SEARCH | VSRC_URL | VSRC_DIRECT,
   web_search, web_resolve, web_download, NULL,
-  "Paste a video page link from any of ~1800 sites yt-dlp supports",
+  "Paste a video page link: plays directly from most sites; yt-dlp (Settings) adds ~1800 more",
 };

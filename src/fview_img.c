@@ -776,6 +776,11 @@ static void info_card(Slot *s) {
 
 enum { IM_SHARE = 1, IM_OPEN, IM_INFO, IM_SLIDE };
 
+/* + and - with or without Ctrl or Shift ("+" is Shift+= on many layouts). */
+static bool zoom_key(SDL_Keycode k) {
+  return ui_key(k, 0) || ui_key(k, KMOD_SHIFT) || ui_key(k, KMOD_CTRL) || ui_key(k, KMOD_CTRL | KMOD_SHIFT);
+}
+
 static void img_frame(FmRect area) {
   gfx_rect(area, VIEW_BG);
   g.view_w = (int)area.w;
@@ -804,11 +809,11 @@ static void img_frame(FmRect area) {
   if (ui_key(SDLK_LEFT, 0) || ui_key(SDLK_PAGEUP, 0)) nav(-1, false);
   if (ui_key(SDLK_HOME, 0)) go_to(0, -g.view_w * 0.25f);
   if (ui_key(SDLK_END, 0)) go_to(g.n - 1, g.view_w * 0.25f);
-  if (ready && (ui_key(SDLK_EQUALS, 0) || ui_key(SDLK_PLUS, 0) || ui_key(SDLK_KP_PLUS, 0)))
+  if (ready && (zoom_key(SDLK_EQUALS) || zoom_key(SDLK_PLUS) || zoom_key(SDLK_KP_PLUS)))
     zoom_anim(v, FM_MIN(g.scale * 1.5f, max_scale(s, v)), v.x + v.w * 0.5f, v.y + v.h * 0.5f);
-  if (ready && (ui_key(SDLK_MINUS, 0) || ui_key(SDLK_KP_MINUS, 0)))
+  if (ready && (zoom_key(SDLK_MINUS) || zoom_key(SDLK_KP_MINUS)))
     zoom_anim(v, FM_MAX(g.scale / 1.5f, fit_scale(s, v)), v.x + v.w * 0.5f, v.y + v.h * 0.5f);
-  if (ready && ui_key(SDLK_0, 0)) zoom_anim(v, fit_scale(s, v), v.x + v.w * 0.5f, v.y + v.h * 0.5f);
+  if (ready && (ui_key(SDLK_0, 0) || ui_key(SDLK_0, KMOD_CTRL))) zoom_anim(v, fit_scale(s, v), v.x + v.w * 0.5f, v.y + v.h * 0.5f);
   if (ready && ui_key(SDLK_1, 0)) zoom_anim(v, 1.0f, v.x + v.w * 0.5f, v.y + v.h * 0.5f);
   bool rotate = ui_key(SDLK_r, 0);
   bool toggle_slide = ui_key(SDLK_SPACE, 0) || ui_key(SDLK_F5, 0);

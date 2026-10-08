@@ -639,8 +639,11 @@ static int cur_height(void) {
 
 static bool is_url(const char *s) { return strstr(s, "://") != NULL; }
 
-/* The stream broke: reconnect once (links expire), then the cache. false =
-** nothing left to try. */
+/* The stream broke: reconnect once (links expire). Never a silent download
+** of the whole video: on a phone that took minutes, storage and battery for
+** a video the user only meant to watch. The quality menu still offers
+** "downloads first" choices when the user asks for one. false = nothing
+** left to try. */
 static bool online_failed(const char *why) {
   VOnline *o = g_on;
   if (!o || o->thr || !o->src) return false;
@@ -649,11 +652,6 @@ static bool online_failed(const char *why) {
   if (!o->retried) {
     o->retried = true;
     return online_resolve(cur_height(), false, -1, "Reconnecting\xE2\x80\xA6");
-  }
-  if (!o->cached) {
-    o->cached = true;
-    ui_toast("Streaming failed; downloading into the cache first");
-    return online_resolve(cur_height(), true, -1, "Downloading\xE2\x80\xA6");
   }
   return false;
 }
@@ -688,19 +686,11 @@ static void on_pump(void) {
   } else {
     fm_strlcpy(o->fail, o->rerrtext[0] ? o->rerrtext : fm_err_str(o->rerr), sizeof o->fail);
     fm_log("stream: resolve failed: %s", o->fail);
-    /* a reconnect that failed goes on to the cache; the cache failing is the end */
-    bool next = false;
-    if (!o->rconf.force_cache && !o->cached) {
-      o->cached = true;
-      ui_toast("Streaming failed; downloading into the cache first");
-      next = online_resolve(o->rconf.max_height, true, o->want, "Downloading\xE2\x80\xA6");
-    }
-    if (!next) {
-      SDL_LockMutex(V.mx);
-      V.state = VS_ERROR;
-      V.err = o->rerr;
-      SDL_UnlockMutex(V.mx);
-    }
+    /* the end: the error screen says why (no automatic download, see online_failed) */
+    SDL_LockMutex(V.mx);
+    V.state = VS_ERROR;
+    V.err = o->rerr;
+    SDL_UnlockMutex(V.mx);
   }
   fm_free(r);
   ui_redraw();

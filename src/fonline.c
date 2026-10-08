@@ -121,9 +121,6 @@ static const FmVsrc *cur_src(void) { return vsrc_count() > 0 ? vsrc_at(FM_CLAMP(
 /* The box takes a page link instead of words ("Any site"). */
 static bool src_url_only(const FmVsrc *s) { return s && (s->flags & VSRC_URL); }
 
-/* The YouTube key setting applies to this source (it may search without one). */
-static bool wants_key(const FmVsrc *s) { return s && ((s->flags & VSRC_NEEDKEY) || !strcmp(s->key, "youtube")); }
-
 static void drop_task(OnTask *t) {
   if (!t) return;
   t->cancel = 1;
@@ -300,7 +297,7 @@ static int classify(const char *e, FmErr err) {
 /* What stops a search before it starts. */
 static int precheck(const FmVsrc *s) {
   const OnTools *tl = otools(false);
-  if (wants_key(s) && !conf.yt_api_key[0] && !tl->ytdlp) return E_NOKEY;
+  if ((s->flags & VSRC_NEEDKEY) && !conf.yt_api_key[0] && !tl->ytdlp) return E_NOKEY;
   if (src_url_only(s) && (s->flags & VSRC_YTDLP) && !tl->ytdlp) return E_NOYTDLP;
   return E_NONE;
 }
@@ -883,7 +880,7 @@ static float chip_w(FmIcon ic, const char *label, float max) {
 
 static void onboarding(FmRect body, const FmVsrc *s) {
   const OnTools *tl = otools(false);
-  bool nokey = wants_key(s) && !conf.yt_api_key[0];
+  bool nokey = (s->flags & VSRC_NEEDKEY) && !conf.yt_api_key[0];   /* YouTube searches without one */
   bool noyt = (s->flags & VSRC_YTDLP) && !tl->ytdlp;
   float cw = FM_MIN(body.w - DP(32), DP(560));
   float x = body.x + (body.w - cw) * 0.5f;

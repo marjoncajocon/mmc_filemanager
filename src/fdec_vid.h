@@ -67,6 +67,9 @@ FmErr  vid_thumb(const char *path, int max_px, FmImage *out);
 
 /* True when the file is an MPEG-1 program stream pl_mpeg can play. */
 bool   vid_is_mpeg1(const char *path);
+/* The system decoders stream http(s) MP4, including DASH fragments
+** (Media Foundation; MediaCodec on Android 9+). Decided at run time. */
+bool   vid_os_streams(void);
 
 /* FFmpeg loader: loads once (thread safe), true when usable. */
 bool   ff_available(void);

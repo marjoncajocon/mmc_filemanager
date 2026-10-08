@@ -22,7 +22,8 @@ public final class FmNet {
         public String type = "", error = "";
     }
 
-    public static Conn open(String url, String headers, String agent) {
+    /* body != null: a POST (redirects then turn into GETs, as browsers do) */
+    public static Conn open(String url, String headers, String agent, byte[] body) {
         Conn c = new Conn();
         try {
             for (int hop = 0; hop < 8; hop++) {
@@ -42,12 +43,20 @@ public final class FmNet {
                     }
                 }
                 if (range) h.setRequestProperty("Accept-Encoding", "identity");
+                if (body != null) {
+                    h.setDoOutput(true);
+                    h.setFixedLengthStreamingMode(body.length);
+                    java.io.OutputStream os = h.getOutputStream();
+                    os.write(body);
+                    os.close();
+                }
                 int st = h.getResponseCode();
                 if (st >= 300 && st < 400 && st != 304) {
                     String loc = h.getHeaderField("Location");
                     h.disconnect();
                     if (loc == null) { c.error = "redirect without a location"; return c; }
                     url = new URL(new URL(url), loc).toString();
+                    body = null;
                     continue;
                 }
                 c.h = h;

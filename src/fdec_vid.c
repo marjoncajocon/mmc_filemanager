@@ -884,6 +884,16 @@ static const char *g_vid_force;
 
 void vid_force_backend(const char *name) { g_vid_force = name; }
 
+bool vid_os_streams(void) {
+#if defined(FM_ANDROID)
+  return amc_can_stream();
+#elif defined(FM_VID_OS)
+  return true;
+#else
+  return false;
+#endif
+}
+
 static int backends_allowed(void) {
   const char *e = g_vid_force ? g_vid_force : getenv("MMCFM_VIDEO_BACKEND");
   if (!e || !*e) return BK_ALL;

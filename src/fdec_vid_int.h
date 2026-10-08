@@ -35,6 +35,7 @@ extern const FmVidBackend g_vid_mf;
 #  define FM_VID_OS 1
 extern const FmVidBackend g_vid_amc;
 #  define FM_VID_OS_BACKEND g_vid_amc
+bool amc_can_stream(void);           /* URLs need Android 9+ */
 #endif
 
 /* Built in everywhere: nestegg + libvpx (VP9) + libopus. */

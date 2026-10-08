@@ -38,6 +38,9 @@ FmErr net_get(const char *url, const char *headers, size_t max_bytes, FmNetResp 
 FmErr net_download(const char *url, const char *headers, const char *path, FmNetProgress cb, void *user,
                    FmNetResp *out, volatile int *cancel);
 void  net_resp_free(FmNetResp *r);
+/* POST with a body (headers should give its Content-Type); reply like net_get. */
+FmErr net_post(const char *url, const char *headers, const void *body, size_t len, size_t max_bytes, FmNetResp *out,
+               volatile int *cancel);
 
 /* Streaming GET: `head` runs once the response headers are in (status,
 ** length, ranges, icy fields), then `data` for every chunk as it arrives;

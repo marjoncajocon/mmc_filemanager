@@ -105,6 +105,8 @@ static const TestArea kAreas[] = {
   { "viz", test_viz },
   { "library", test_library },
   { "vsrc", test_vsrc },
+  { "hls", test_hls },
+  { "generic", test_generic },
   { "online-ui", test_online_ui },
   { "psrc", test_psrc },
   { "photo-ui", test_photo_ui },
@@ -119,9 +121,18 @@ int test_run_all(void) {
   fm_snprintf(sub, sizeof sub, "mmcfm-test-%llu", (unsigned long long)plat_now_ms());
   fm_path_join(base, sizeof base, base, sub);
   plat_mkdirs(base);
+  setvbuf(stdout, NULL, _IONBF, 0);            /* a crash still shows the area it hit */
   printf("mmcfm %s self test in %s\n", FM_VERSION, base);
+  /* MMCFM_TEST_ONLY=vsrc,net runs just those areas */
+  const char *only = getenv("MMCFM_TEST_ONLY");
   int total = 0;
   for (int i = 0; i < FM_COUNT(kAreas); i++) {
+    if (only && *only) {
+      const char *p = strstr(only, kAreas[i].name);
+      size_t n = strlen(kAreas[i].name);
+      if (!p || (p != only && p[-1] != ',') || (p[n] && p[n] != ',')) continue;
+    }
+    printf("     %s ...\n", kAreas[i].name);
     fm_path_join(dir, sizeof dir, base, kAreas[i].name);
     plat_mkdirs(dir);
     u64 t0 = plat_now_ms();

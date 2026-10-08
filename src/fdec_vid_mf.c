@@ -116,6 +116,7 @@ typedef struct NsBS {
   SDL_mutex *mx;
   SDL_cond *cv;
   bool quit;
+  bool busy;                 /* the reader thread is inside a read or its callback */
   /* queued reads, served strictly in order: Media Foundation does overlap
   ** them, and reading two at once interleaved the bytes (corrupt stream) */
   struct { BYTE *buf; ULONG cb; IMFAsyncResult *res; QWORD pos; } q[8];
@@ -283,6 +284,7 @@ static int bs_reader(void *u) {
     QWORD at = b->q[b->qhead].pos;
     b->qhead = (b->qhead + 1) % 8;
     b->qcount--;
+    b->busy = true;
     SDL_UnlockMutex(b->mx);
     IUnknown *u2 = NULL;
     ULONG got = read_at(b, at, buf, cb);
@@ -300,6 +302,8 @@ static int bs_reader(void *u) {
     mf.invoke(res);
     IMFAsyncResult_Release(res);
     SDL_LockMutex(b->mx);
+    b->busy = false;
+    SDL_CondBroadcast(b->cv);                 /* bs_quiesce may be waiting */
   }
   SDL_UnlockMutex(b->mx);
   return 0;
@@ -370,6 +374,17 @@ static IMFByteStreamVtbl g_bs_vtbl = {
   bs_beginread, bs_endread, bs_write, bs_beginwrite, bs_endwrite, bs_seek, bs_flush, bs_close
 };
 
+/* Before MFShutdown: a read still queued or running would invoke its
+** callback into a shut-down Media Foundation (crash in RtwqInvokeCallback;
+** likely with HLS, whose reads wait between segments). Abort the network
+** (pending reads return 0 at once) and wait until the reader is idle. */
+static void bs_quiesce(NsBS *b) {
+  ns_abort(b->ns);
+  SDL_LockMutex(b->mx);
+  for (int i = 0; i < 200 && (b->qcount || b->busy); i++) SDL_CondWaitTimeout(b->cv, b->mx, 25);
+  SDL_UnlockMutex(b->mx);
+}
+
 /* A byte stream for an http(s) URL, or NULL (err says why). */
 static IMFByteStream *net_bytestream(const char *url, char *err, size_t errcap) {
   if (!mf.create_reader_bs || !mf.create_async || !mf.invoke) return NULL;
@@ -433,6 +448,14 @@ typedef struct MfVid {
   int flags;
   double skip_until;
   bool can_seek;
+  /* URLs: our byte stream (a reference), and HLS playlists (fnetstream joins
+  ** the segments): Media Foundation sees no duration and cannot seek them,
+  ** so seeking reopens at "<url>#t=<s>" (fnetstream starts at that segment) */
+  NsBS *bs;
+  bool hls;
+  double hls_start;          /* the time byte 0 of this open plays at */
+  LONGLONG t_off;            /* added to timestamps: older TS restarts at 0 */
+  bool t_checked;
 } MfVid;
 
 #define NO_STREAM ((DWORD)-1)
@@ -600,7 +623,12 @@ static void real_indexes(MfVid *m) {
 static void mf_close(void *st) {
   MfVid *m = (MfVid *)st;
   if (!m) return;
+  if (m->bs) ns_abort(m->bs->ns);             /* the reader stops waiting on the network */
   sr(m->rd);
+  if (m->bs) {
+    bs_quiesce(m->bs);                        /* no callback may run after MFShutdown */
+    bs_release((IMFByteStream *)m->bs);
+  }
   if (m->started) mf.shutdown();
   if (m->com_init && m->com_thread == GetCurrentThreadId()) CoUninitialize();
   for (int i = 0; i < 3; i++) fm_free(m->plane[i]);
@@ -649,7 +677,8 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
   }
   m->rd = make_reader(url, bs, true);
   if (!m->rd) m->rd = make_reader(url, bs, false);
-  if (bs) IMFByteStream_Release(bs);          /* the reader keeps its own reference */
+  if (bs && m->rd) m->bs = BS(bs);            /* our reference, for mf_close */
+  else if (bs) IMFByteStream_Release(bs);     /* else the reader keeps its own */
   fm_free(url);
   if (!m->rd) { mf_close(m); return NULL; }
 
@@ -683,6 +712,11 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
       pv.vt == VT_UI8)
     info->duration = (double)pv.uhVal.QuadPart / 1e7;
   PropVariantClear(&pv);
+  if (m->bs && ns_is_hls(m->bs->ns)) {
+    m->hls = true;
+    m->hls_start = ns_hls_start(m->bs->ns);
+    if (info->duration <= 0) info->duration = ns_hls_duration(m->bs->ns);
+  }
 
   /* MPEG-TS sources report no seeking: mf_seek then reopens and skips */
   PropVariantInit(&pv);
@@ -873,6 +907,11 @@ static int mf_decode(void *st, FmVidFrame *vf, FmVidPcm *pc) {
       if (!is_v && !is_a) { m->vdone = m->adone = true; }
     }
     if (!s) continue;                    /* gap / tick / end */
+    if (m->hls && !m->t_checked) {       /* opened at #t=: older TS counts from 0 again */
+      m->t_checked = true;
+      if (m->hls_start > 5 && (double)t / 1e7 < m->hls_start - 5) m->t_off = (LONGLONG)(m->hls_start * 1e7);
+    }
+    t += m->t_off;
     if (m->skip_until > 0 && (double)t / 1e7 < m->skip_until - 0.02) { sr(s); continue; }
     if (is_v) m->skip_until = 0;         /* reached the target */
     bool got = false;
@@ -892,7 +931,9 @@ static bool mf_seek(void *st, double t) {
   PropVariantInit(&pv);
   pv.vt = VT_I8;
   pv.hVal.QuadPart = (LONGLONG)(t * 1e7);
-  HRESULT hr = m->can_seek ? IMFSourceReader_SetCurrentPosition(m->rd, &kTimeFormat100ns, &pv) : E_FAIL;
+  /* HLS never seeks in place: past the segments reached so far that reads
+  ** every one up to t (measured 16 s for 90 s of fMP4), a reopen ~1.5 s */
+  HRESULT hr = m->can_seek && !m->hls ? IMFSourceReader_SetCurrentPosition(m->rd, &kTimeFormat100ns, &pv) : E_FAIL;
   PropVariantClear(&pv);
   m->skip_until = 0;
   if (FAILED(hr)) {
@@ -900,14 +941,28 @@ static bool mf_seek(void *st, double t) {
     ** everything before t; decoding is fast, drawing is skipped */
     FmVidInfo tmp;
     memset(&tmp, 0, sizeof tmp);
-    MfVid *n = m->path ? (MfVid *)mf_open(m->path, m->flags, &tmp) : NULL;
+    char *at = NULL;
+    if (m->hls && m->path) {                  /* HLS: start at t's segment, not at 0 */
+      size_t n0 = strcspn(m->path, "#");
+      at = (char *)fm_alloc(n0 + 32);
+      memcpy(at, m->path, n0);
+      fm_snprintf(at + n0, 32, "#t=%.3f", t > 0 ? t : 0);
+    }
+    MfVid *n = m->path ? (MfVid *)mf_open(at ? at : m->path, m->flags, &tmp) : NULL;
+    fm_free(at);
     if (!n) return false;
     IMFSourceReader *old = m->rd;
     m->rd = n->rd;
     n->rd = old;
+    NsBS *ob = m->bs;                         /* the old stream closes with the old reader */
+    m->bs = n->bs;
+    n->bs = ob;
     m->vi = n->vi;
     m->ai = n->ai;
     m->pix = n->pix;
+    m->hls_start = n->hls_start;
+    m->t_off = 0;
+    m->t_checked = false;
     mf_close(n);
     m->skip_until = t;
   }

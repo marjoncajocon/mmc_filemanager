@@ -163,16 +163,31 @@ static FmErr yt_search(const FmVsrcConf *c, const char *query, const char *page_
 
   bool is_url = !strncmp(q, "https://", 8) || !strncmp(q, "http://", 7);
   bool ytdlp_token = page_token && !strncmp(page_token, "y:", 2);
-  if (is_url || ytdlp_token || !c->api_key_youtube[0]) {
-    if (ytdlp_usable(c))
-      return vsrc_ytdlp_search(c, "youtube", is_url ? NULL : "ytsearch", q, page_token, out, cancel);
-    if (is_url)
-      fm_strlcpy(out->error, "Opening a link needs yt-dlp: use \"Get yt-dlp\" in Settings",
-                 sizeof out->error);
-    else
-      fm_strlcpy(out->error, "Add a YouTube API key in Settings, or get yt-dlp there to search without one",
-                 sizeof out->error);
+  bool native_token = page_token && !strncmp(page_token, "i:", 2);
+  char vid[16];
+  if (is_url && vsrc_innertube_id(q, vid, sizeof vid)) {       /* one video: no helper needed */
+    FmVsrcItem it;
+    FmErr e = vsrc_innertube_item(vid, &it, out->error, sizeof out->error, cancel);
+    if (e == FM_OK) {
+      FmVsrcItem *dst = vsrc_page_add(out);
+      if (dst) *dst = it;
+      out->error[0] = 0;
+      return FM_OK;
+    }
+    if (e == FM_ERR_CANCEL || !ytdlp_usable(c)) return e;
+    out->error[0] = 0;
+  }
+  if (is_url || ytdlp_token) {
+    if (ytdlp_usable(c)) return vsrc_ytdlp_search(c, "youtube", is_url ? NULL : "ytsearch", q, page_token, out, cancel);
+    fm_strlcpy(out->error, "Opening playlists and channels needs yt-dlp: use \"Get yt-dlp\" in Settings",
+               sizeof out->error);
     return proc_available() ? FM_ERR_NOT_FOUND : FM_ERR_UNSUPPORTED;
+  }
+  if (native_token || !c->api_key_youtube[0]) {
+    FmErr e = vsrc_innertube_search(c, q, page_token, out, cancel);
+    if (e == FM_OK || e == FM_ERR_CANCEL || native_token || !ytdlp_usable(c)) return e;
+    out->error[0] = 0;                                         /* web search failed: yt-dlp */
+    return vsrc_ytdlp_search(c, "youtube", "ytsearch", q, NULL, out, cancel);
   }
 
   char url[2048];
@@ -184,11 +199,17 @@ static FmErr yt_search(const FmVsrcConf *c, const char *query, const char *page_
     const char *kind =
         vsrc_youtube_error((const char *)r.data, r.len, r.status, out->error, sizeof out->error);
     net_resp_free(&r);
-    if (!strcmp(kind, "quota") && ytdlp_usable(c) && !(page_token && *page_token)) {
+    if (!strcmp(kind, "quota") && !(page_token && *page_token)) {
+      /* the day's quota is spent: YouTube's web search, then yt-dlp */
       char keep[256];
       fm_strlcpy(keep, out->error, sizeof keep);
       out->error[0] = 0;
-      e = vsrc_ytdlp_search(c, "youtube", "ytsearch", q, NULL, out, cancel);
+      e = vsrc_innertube_search(c, q, NULL, out, cancel);
+      if (e != FM_OK && e != FM_ERR_CANCEL && ytdlp_usable(c)) {
+        vsrc_page_free(out);
+        out->error[0] = 0;
+        e = vsrc_ytdlp_search(c, "youtube", "ytsearch", q, NULL, out, cancel);
+      }
       if (e == FM_OK) return e;
       if (e != FM_ERR_CANCEL) fm_strlcpy(out->error, keep, sizeof out->error);
       return e;
@@ -222,19 +243,53 @@ static FmErr yt_search(const FmVsrcConf *c, const char *query, const char *page_
   return FM_OK;
 }
 
-static FmErr yt_resolve(const FmVsrcConf *c, const FmVsrcItem *item, FmVsrcStream *out, FmVsrcProgress cb,
-                        void *user, char *err, size_t errcap, volatile int *cancel) {
-  return vsrc_ytdlp_resolve("youtube", c, item, out, cb, user, err, errcap, cancel);
+/* The video id of an item (search results carry it; pasted links in page). */
+static bool item_id(const FmVsrcItem *item, char *out, size_t cap) {
+  return vsrc_innertube_id(item->id, out, cap) || vsrc_innertube_id(item->page, out, cap);
 }
 
+/* Built in first (fvsrc_innertube.c); yt-dlp when that fails and it is
+** there, and for the cache path (force_cache), which is yt-dlp's job. */
+static FmErr yt_resolve(const FmVsrcConf *c, const FmVsrcItem *item, FmVsrcStream *out, FmVsrcProgress cb,
+                        void *user, char *err, size_t errcap, volatile int *cancel) {
+  char vid[16];
+  FmErr e = FM_ERR_NOT_FOUND;
+  if (errcap) err[0] = 0;
+  if (!c->force_cache && item_id(item, vid, sizeof vid)) {
+    e = vsrc_innertube_resolve(c, vid, out, err, errcap, cancel);
+    if (e == FM_OK || e == FM_ERR_CANCEL) return e;
+    fm_log("youtube: built-in resolve failed: %s", err);
+  }
+  if (ytdlp_usable(c)) {
+    if (errcap) err[0] = 0;
+    return vsrc_ytdlp_resolve("youtube", c, item, out, cb, user, err, errcap, cancel);
+  }
+  if (c->force_cache) fm_strlcpy(err, "Downloading before playing needs yt-dlp (Settings)", errcap);
+  else if (!err[0]) fm_strlcpy(err, "Not a YouTube video", errcap);
+  return e == FM_ERR_NOT_FOUND && c->force_cache ? FM_ERR_UNSUPPORTED : e;
+}
+
+/* yt-dlp when it is there (it merges with ffmpeg); else the built-in
+** streams saved with vsrc_save_stream (video + sound as two files unless
+** ffmpeg is present to merge them). */
 static FmErr yt_download(const FmVsrcConf *c, const FmVsrcItem *item, const char *dir, char *out_path,
                          size_t cap, FmVsrcProgress cb, void *user, char *err, size_t errcap,
                          volatile int *cancel) {
-  return vsrc_ytdlp_download("youtube", c, item, dir, out_path, cap, cb, user, err, errcap, cancel);
+  if (ytdlp_usable(c)) return vsrc_ytdlp_download("youtube", c, item, dir, out_path, cap, cb, user, err, errcap, cancel);
+  char vid[16];
+  if (cap) out_path[0] = 0;
+  if (!item_id(item, vid, sizeof vid)) { fm_strlcpy(err, "Not a YouTube video", errcap); return FM_ERR_NOT_FOUND; }
+  FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+  FmErr e = vsrc_innertube_resolve(c, vid, st, err, errcap, cancel);
+  if (e == FM_OK)
+    e = vsrc_save_stream(c, item, st, dir && *dir ? dir : c->download_dir, out_path, cap, cb, user, err, errcap,
+                         cancel);
+  fm_free(st);
+  return e;
 }
 
 const FmVsrc g_vsrc_youtube = {
-  "youtube", "YouTube", IC_PLAY_BADGE, VSRC_SEARCH | VSRC_YTDLP,
+  "youtube", "YouTube", IC_PLAY_BADGE, VSRC_SEARCH | VSRC_DIRECT,
   yt_search, yt_resolve, yt_download, NULL,
-  "Search with a free API key (Settings) or with yt-dlp; plays through yt-dlp",
+  "Search and play, no key or helper needed. A free API key (Settings) makes search official",
 };

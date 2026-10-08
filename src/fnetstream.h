@@ -5,6 +5,13 @@
 ** request at a byte offset (when the server accepts ranges). Live radio
 ** (Icecast / SHOUTcast) works too: its interleaved metadata is removed from
 ** the audio and the current title is kept for "now playing".
+**
+** HLS (.m3u8) works too: the segments of the playlist are read as one
+** continuous MPEG-TS or fragmented MP4 file (content type video/mp2t or
+** video/mp4), live playlists included. A master playlist plays its best
+** variant up to 1080p (pass a variant's URL for another size), and a
+** "#t=SECONDS" fragment on a VOD playlist's URL starts the stream at the
+** segment holding that time (see fnetstream.c for seeking and limits).
 */
 #ifndef FNETSTREAM_H
 #define FNETSTREAM_H
@@ -32,6 +39,17 @@ bool   ns_seekable(const FmNetStream *s);
 void   ns_station(const FmNetStream *s, char *out, size_t cap);
 void   ns_now_playing(const FmNetStream *s, char *out, size_t cap);
 const char *ns_content_type(const FmNetStream *s);
+/* HLS: true for a playlist's segments; the time byte 0 plays at (a "#t="
+** open starts at a segment boundary at or before it); the playlist's length
+** in seconds (0 for live). Fixed once open. */
+bool   ns_is_hls(const FmNetStream *s);
+double ns_hls_start(const FmNetStream *s);
+double ns_hls_duration(const FmNetStream *s);
+/* From any thread: a blocked ns_read/ns_peek returns 0 now, later ones at
+** once, seeks fail; the network work stops. For owners that must finish
+** pending reads before tearing down (Media Foundation's async reads must
+** complete before MFShutdown). ns_close is still needed afterwards. */
+void   ns_abort(FmNetStream *s);
 void   ns_close(FmNetStream *s);
 /* stream: for an open stream reading url (the first one found): the next byte
 ** its reader gets, the end of the data buffered after it, and the size (-1

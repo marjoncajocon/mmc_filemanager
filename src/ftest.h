@@ -27,6 +27,8 @@ int test_net(const char *tmp);        /* ftest_net.c: json, processes, https (MM
 int test_viz(const char *tmp);        /* ftest_viz.c: visualizer bands, smoothing, presets, conf */
 int test_library(const char *tmp);    /* ftest_lib.c: media library scan, favorites, persistence */
 int test_vsrc(const char *tmp);       /* ftest_vsrc.c: online video sources (MMCFM_NET_TEST=1, MMCFM_YTDLP=path) */
+int test_hls(const char *tmp);        /* ftest_hls.c: HLS playlists, AES-128, Dailymotion (MMCFM_HLS_TEST, MMCFM_DM_TEST) */
+int test_generic(const char *tmp);    /* ftest_generic.c: native "Any site" page resolver (MMCFM_GENERIC_TEST=url) */
 int test_online_ui(const char *tmp);  /* ftest_online.c: online videos view: formatting, recent searches */
 int test_psrc(const char *tmp);       /* ftest_psrc.c: online photo sources (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
 int test_photo_ui(const char *tmp);   /* ftest_photo.c: online photos view: rows, albums file, recent searches */

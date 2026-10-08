@@ -12,10 +12,14 @@
 **     format keys are string literals because AMEDIAFORMAT_KEY_* are
 **     variables exported by the library.
 **   - The file is opened with open() and handed over as an fd, so plain
-**     paths work without a content URI. http(s) URLs (online videos) go to
-**     AMediaExtractor_setDataSource, which streams with the system's own HTTP
-**     stack and hardware decoders; it is looked up on its own, so a device
-**     without it still plays files (URLs then fall to the built-in decoder).
+**     paths work without a content URI.
+**   - http(s) URLs (online videos) are read through our own FmNetStream
+**     (bounded ring, chunked ranges, cancellable) handed to the extractor as
+**     an AMediaDataSource (Android 9+). Not AMediaExtractor_setDataSource(url):
+**     the system's HTTP source prefetches without limit and cannot be
+**     interrupted, which froze the player when it was closed mid-open. The
+**     data-source calls are looked up on their own, so older devices still
+**     play files; their URLs fall to the built-in decoder.
 **   - Video decodes to ByteBuffers (no Surface) in YUV420Flexible. Planar
 **     (19) output is handed out in place: the output buffer is held until
 **     the next decode call, so the Y plane is never copied. Semi-planar
@@ -36,6 +40,7 @@
 **     after such a seek csd-0..2 are queued again by hand.
 */
 #include "fdec_vid_int.h"
+#include "fnetstream.h"
 
 #ifdef FM_ANDROID
 
@@ -71,7 +76,23 @@
 #define AMC_FIELD(f) __typeof__(f) *f;
 static struct { AMC_FUNCS(AMC_FIELD) } nd;
 static bool g_nd_ok;
-static __typeof__(AMediaExtractor_setDataSource) *g_set_url;   /* optional: URLs */
+
+/* optional (Android 9+): reading URLs through FmNetStream. Typed by hand:
+** the headers make API 28 declarations unusable below minSdk 28. */
+#define AMC_DS_FUNCS(X) \
+  X(AMediaDataSource_new) X(AMediaDataSource_delete) X(AMediaDataSource_setUserdata) \
+  X(AMediaDataSource_setReadAt) X(AMediaDataSource_setGetSize) X(AMediaDataSource_setClose) \
+  X(AMediaExtractor_setDataSourceCustom)
+static struct {
+  AMediaDataSource *(*AMediaDataSource_new)(void);
+  void (*AMediaDataSource_delete)(AMediaDataSource *);
+  void (*AMediaDataSource_setUserdata)(AMediaDataSource *, void *);
+  void (*AMediaDataSource_setReadAt)(AMediaDataSource *, AMediaDataSourceReadAt);
+  void (*AMediaDataSource_setGetSize)(AMediaDataSource *, AMediaDataSourceGetSize);
+  void (*AMediaDataSource_setClose)(AMediaDataSource *, AMediaDataSourceClose);
+  media_status_t (*AMediaExtractor_setDataSourceCustom)(AMediaExtractor *, AMediaDataSource *);
+} ds;
+static bool g_ds_ok;
 static pthread_once_t g_nd_once = PTHREAD_ONCE_INIT;
 
 static void amc_load(void) {
@@ -82,7 +103,11 @@ static void amc_load(void) {
   AMC_FUNCS(AMC_SYM)
 #undef AMC_SYM
   if (!ok) { dlclose(h); memset(&nd, 0, sizeof nd); return; }
-  *(void **)&g_set_url = dlsym(h, "AMediaExtractor_setDataSource");
+  bool dok = true;
+#define AMC_DS_SYM(f) if (dok && !(*(void **)&ds.f = dlsym(h, #f))) dok = false;
+  AMC_DS_FUNCS(AMC_DS_SYM)
+#undef AMC_DS_SYM
+  g_ds_ok = dok;
   g_nd_ok = true;                      /* the library stays loaded for the process */
 }
 
@@ -105,8 +130,24 @@ typedef struct AmcTrack {
   bool in_eos, out_eos, got_out, got_fmt, dead;
 } AmcTrack;
 
+/* A URL as the extractor's data source. The extractor may call from its own
+** threads, so reads are serialised. */
+typedef struct AmcNet {
+  FmNetStream *ns;
+  pthread_mutex_t mx;
+} AmcNet;
+
 typedef struct Amc {
   int fd;
+  AmcNet *net;                         /* URLs: our stream reader */
+  AMediaDataSource *src;
+  /* HLS (fnetstream joins the segments): seeking swaps in an extractor that
+  ** reads from "<url>#t=<s>"; the codecs stay. Older TS counts from 0 again
+  ** after such a start, so its timestamps get hls_start added. */
+  char *url;
+  bool hls, t_checked;
+  double hls_start;
+  int64_t t_off_us;
   AMediaExtractor *ex;
   AmcTrack v, a;
   FmVidInfo *info;
@@ -128,6 +169,80 @@ typedef struct Amc {
 } Amc;
 
 static void amc_close(void *p);
+
+/* ---- network data source ---------------------------------------------------- */
+
+static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
+  AmcNet *n = (AmcNet *)u;
+  if (off < 0) return -1;
+  pthread_mutex_lock(&n->mx);
+  ssize_t got = 0;
+  i64 sz = ns_size(n->ns);
+  if (sz >= 0 && off >= sz) {
+    pthread_mutex_unlock(&n->mx);
+    return 0;                          /* end of stream */
+  }
+  if (ns_tell(n->ns) == (i64)off || ns_seek(n->ns, (i64)off)) {
+    size_t r;
+    while ((size_t)got < size && (r = ns_read(n->ns, (u8 *)buf + got, size - (size_t)got)) > 0) got += (ssize_t)r;
+  } else {
+    got = -1;
+  }
+  pthread_mutex_unlock(&n->mx);
+  return got;
+}
+
+static ssize_t net_get_size(void *u) {
+  i64 sz = ns_size(((AmcNet *)u)->ns);
+  return sz >= 0 ? (ssize_t)sz : -1;
+}
+
+static void net_ds_close(void *u) { FM_UNUSED(u); }   /* amc_close frees it */
+
+static void net_free(AmcNet *n) {
+  if (!n) return;
+  ns_close(n->ns);
+  pthread_mutex_destroy(&n->mx);
+  fm_free(n);
+}
+
+/* A new extractor reading url through FmNetStream; *net and *src get what
+** it reads from (freed by the caller after the extractor). NULL on failure. */
+static AMediaExtractor *net_extractor(const char *url, AmcNet **net, AMediaDataSource **src) {
+  *net = NULL;
+  *src = NULL;
+  char why[160];
+  FmNetStream *ns = ns_open(url, NULL, why, sizeof why);
+  if (!ns) { fm_log("video: %s", why); return NULL; }
+  AmcNet *n = (AmcNet *)fm_calloc(1, sizeof *n);
+  n->ns = ns;
+  pthread_mutex_init(&n->mx, NULL);
+  AMediaExtractor *ex = nd.AMediaExtractor_new();
+  AMediaDataSource *ds_ = ex ? ds.AMediaDataSource_new() : NULL;
+  media_status_t ms = AMEDIA_ERROR_UNKNOWN;
+  if (ds_) {
+    ds.AMediaDataSource_setUserdata(ds_, n);
+    ds.AMediaDataSource_setReadAt(ds_, net_read_at);
+    ds.AMediaDataSource_setGetSize(ds_, net_get_size);
+    ds.AMediaDataSource_setClose(ds_, net_ds_close);
+    ms = ds.AMediaExtractor_setDataSourceCustom(ex, ds_);
+  }
+  if (ms != AMEDIA_OK) {
+    fm_log("video: MediaCodec could not read the stream (%d)", (int)ms);
+    if (ex) nd.AMediaExtractor_delete(ex);
+    if (ds_) ds.AMediaDataSource_delete(ds_);
+    net_free(n);
+    return NULL;
+  }
+  *net = n;
+  *src = ds_;
+  return ex;
+}
+
+bool amc_can_stream(void) {
+  pthread_once(&g_nd_once, amc_load);
+  return g_nd_ok && g_ds_ok;
+}
 
 /* ---- helpers -------------------------------------------------------------- */
 
@@ -196,7 +311,7 @@ static void *amc_open(const char *path, int flags, FmVidInfo *in) {
   pthread_once(&g_nd_once, amc_load);
   if (!g_nd_ok) return NULL;
   bool url = !fm_strnicmp(path, "http://", 7) || !fm_strnicmp(path, "https://", 8);
-  if (url && !g_set_url) return NULL;
+  if (url && !g_ds_ok) return NULL;
   int fd = -1;
   struct stat st;
   if (!url) {
@@ -211,9 +326,19 @@ static void *amc_open(const char *path, int flags, FmVidInfo *in) {
   s->info = in;
   s->ex = nd.AMediaExtractor_new();
   media_status_t ms = AMEDIA_ERROR_UNKNOWN;
-  if (s->ex) ms = url ? g_set_url(s->ex, path) : nd.AMediaExtractor_setDataSourceFd(s->ex, fd, 0, (off64_t)st.st_size);
+  if (s->ex && url) {
+    nd.AMediaExtractor_delete(s->ex);
+    s->ex = net_extractor(path, &s->net, &s->src);
+    if (s->ex) {
+      ms = AMEDIA_OK;
+      s->url = fm_strdup(path);
+      s->hls = ns_is_hls(s->net->ns);
+      s->hls_start = ns_hls_start(s->net->ns);
+    }
+  } else if (s->ex) {
+    ms = nd.AMediaExtractor_setDataSourceFd(s->ex, fd, 0, (off64_t)st.st_size);
+  }
   if (ms != AMEDIA_OK) {
-    if (url) fm_log("video: MediaCodec could not open the stream (%d)", (int)ms);
     amc_close(s);
     return NULL;
   }
@@ -264,6 +389,7 @@ static void *amc_open(const char *path, int flags, FmVidInfo *in) {
   in->sar = sar_w > 0 && sar_h > 0 ? (double)sar_w / sar_h : 1.0;
   if (in->sar < 0.1 || in->sar > 10) in->sar = 1.0;
   in->duration = dur > 0 ? (double)dur / 1e6 : 0;
+  if (s->hls && in->duration <= 0) in->duration = ns_hls_duration(s->net->ns);
   fm_strlcpy(in->backend, "MediaCodec", sizeof in->backend);
   s->a_rate = in->rate;
   s->a_ch = ach;
@@ -277,7 +403,11 @@ static void amc_close(void *p) {
   release_held(s);
   track_close(&s->v);
   track_close(&s->a);
+  if (s->net) ns_abort(s->net->ns);    /* a read blocked between segments returns now */
   if (s->ex) nd.AMediaExtractor_delete(s->ex);
+  if (s->src) ds.AMediaDataSource_delete(s->src);
+  net_free(s->net);                    /* after the extractor: it reads until deleted */
+  fm_free(s->url);
   if (s->fd >= 0) close(s->fd);
   fm_free(s->uv);
   fm_free(s->pcm);
@@ -345,6 +475,11 @@ static bool feed(Amc *s) {
       u8 *buf = nd.AMediaCodec_getInputBuffer(t->codec, (size_t)bi, &cap);
       ssize_t n = buf && cap ? nd.AMediaExtractor_readSampleData(s->ex, buf, cap) : -1;
       int64_t us = nd.AMediaExtractor_getSampleTime(s->ex);
+      if (s->hls && !s->t_checked && us >= 0) {
+        s->t_checked = true;
+        if (s->hls_start > 5 && (double)us / 1e6 < s->hls_start - 5) s->t_off_us = (int64_t)(s->hls_start * 1e6);
+      }
+      if (us >= 0) us += s->t_off_us;
       /* an oversized or unreadable sample is skipped, its buffer goes back empty */
       if (nd.AMediaCodec_queueInputBuffer(t->codec, (size_t)bi, 0, n > 0 ? (size_t)n : 0,
                                           us > 0 ? (uint64_t)us : 0, 0) != AMEDIA_OK)
@@ -647,9 +782,48 @@ static void track_flush(AmcTrack *t) {
   t->in_eos = t->out_eos = false;
 }
 
+/* HLS: a new extractor that starts at t's segment, same tracks, same codecs. */
+static bool hls_reopen(Amc *s, double t) {
+  size_t n0 = strcspn(s->url, "#");
+  char *at = (char *)fm_alloc(n0 + 32);
+  memcpy(at, s->url, n0);
+  fm_snprintf(at + n0, 32, "#t=%.3f", t > 0 ? t : 0);
+  AmcNet *net;
+  AMediaDataSource *src;
+  AMediaExtractor *ex = net_extractor(at, &net, &src);
+  fm_free(at);
+  if (!ex) return false;
+  if ((s->v.idx >= 0 && nd.AMediaExtractor_selectTrack(ex, (size_t)s->v.idx) != AMEDIA_OK) ||
+      (s->a.idx >= 0 && nd.AMediaExtractor_selectTrack(ex, (size_t)s->a.idx) != AMEDIA_OK)) {
+    nd.AMediaExtractor_delete(ex);
+    ds.AMediaDataSource_delete(src);
+    net_free(net);
+    return false;
+  }
+  nd.AMediaExtractor_delete(s->ex);
+  ds.AMediaDataSource_delete(s->src);
+  net_free(s->net);
+  s->ex = ex;
+  s->src = src;
+  s->net = net;
+  s->hls_start = ns_hls_start(net->ns);
+  s->t_off_us = 0;
+  s->t_checked = false;
+  return true;
+}
+
 static bool amc_seek(void *p, double t) {
   Amc *s = (Amc *)p;
   release_held(s);
+  if (s->hls && s->url) {              /* never byte-seek across segments not read yet */
+    bool ok = hls_reopen(s, t);
+    track_flush(&s->v);
+    track_flush(&s->a);
+    s->ex_eos = false;
+    s->skip_until = ok ? t : 0;
+    s->rs_have = false;
+    return ok;
+  }
   int64_t us = (int64_t)(t * 1e6);
   bool ok = nd.AMediaExtractor_seekTo(s->ex, us, AMEDIAEXTRACTOR_SEEK_PREVIOUS_SYNC) == AMEDIA_OK ||
             nd.AMediaExtractor_seekTo(s->ex, us, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC) == AMEDIA_OK;

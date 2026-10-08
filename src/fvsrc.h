@@ -134,6 +134,8 @@ typedef struct FmVsrcConf {
   bool os_mp4;                  /* the system decoders play progressive MP4 (H.264/AAC) */
   bool send_headers;            /* the player can send FmVsrcStream.headers with video URLs */
   bool force_cache;             /* resolve downloads into the cache (streaming failed) */
+  bool os_dash;                 /* ... and stream fragmented (DASH) MP4 too (MediaCodec); then
+                                ** H.264 is preferred: every phone decodes it in hardware */
 } FmVsrcConf;
 
 typedef struct FmVsrc {

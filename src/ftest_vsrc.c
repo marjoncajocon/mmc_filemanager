@@ -793,8 +793,9 @@ static void vt_no_helpers(void) {
   FmErr e = g_vsrc_web.search(&c, "https://example.com/v", NULL, &p, NULL);
   TEST_CHECK(e != FM_OK && strstr(p.error, "yt-dlp") != NULL);
   vsrc_page_free(&p);
-  e = g_vsrc_youtube.search(&c, "cats", NULL, &p, NULL);       /* no key, no yt-dlp */
-  TEST_CHECK(e != FM_OK && strstr(p.error, "API key") != NULL);
+  /* a playlist link is yt-dlp's (one video, or a search without a key, is built in) */
+  e = g_vsrc_youtube.search(&c, "https://www.youtube.com/playlist?list=PL0123456789", NULL, &p, NULL);
+  TEST_CHECK(e != FM_OK && strstr(p.error, "yt-dlp") != NULL);
   vsrc_page_free(&p);
   e = g_vsrc_youtube.search(&c, "   ", NULL, &p, NULL);
   TEST_CHECK(e != FM_OK && p.error[0]);
@@ -1043,14 +1044,17 @@ static void vt_ytdlp_live(const char *tmp) {
   TEST_CHECK(count_prefix(c.cache_dir, "youtube-z01gL_ahiOQ") == 0);
   c.force_cache = false;
 
-  /* Dailymotion: HLS through yt-dlp */
+  /* Dailymotion: natively it streams (ftest_hls.c, MMCFM_DM_TEST); the
+  ** cache request still goes through yt-dlp (the fallback) */
   memset(&it, 0, sizeof it);
   fm_strlcpy(it.id, "x9i92l8", sizeof it.id);
   fm_strlcpy(it.title, "Cats", sizeof it.title);
   fm_strlcpy(it.page, "https://www.dailymotion.com/video/x9i92l8", sizeof it.page);
   t0 = plat_now_ms();
+  c.force_cache = true;
   e = g_vsrc_dailymotion.resolve(&c, &it, st, NULL, NULL, err, sizeof err, NULL);
-  printf("  dailymotion resolve (HLS only: the cache): %s (%d ms) %s, %d qualities\n", fm_err_str(e),
+  c.force_cache = false;
+  printf("  dailymotion resolve (yt-dlp into the cache): %s (%d ms) %s, %d qualities\n", fm_err_str(e),
          (int)(plat_now_ms() - t0), e == FM_OK ? fm_path_base(st->video) : err, st->nq);
   TEST_CHECK(e == FM_OK && st->local);
   if (e == FM_OK) TEST_CHECK(report_play("dailymotion play", st->video, st->audio));
@@ -1133,6 +1137,162 @@ static void vt_stream_probe(void) {
   }
 }
 
+
+/* ---- YouTube without yt-dlp (fvsrc_innertube.c) ------------------------------------ */
+
+static const char *kItSearch =
+  "{\"contents\":{\"twoColumnSearchResultsRenderer\":{\"primaryContents\":{\"sectionListRenderer\":{\"contents\":["
+  "{\"itemSectionRenderer\":{\"contents\":["
+  "{\"videoRenderer\":{\"videoId\":\"aqz-KE-bpKQ\",\"title\":{\"runs\":[{\"text\":\"Big Buck Bunny\"}]},"
+  "\"ownerText\":{\"runs\":[{\"text\":\"Blender\"}]},\"lengthText\":{\"simpleText\":\"10:35\"},"
+  "\"viewCountText\":{\"simpleText\":\"1,234,567 views\"},"
+  "\"thumbnail\":{\"thumbnails\":[{\"url\":\"https://i.ytimg.com/vi/aqz-KE-bpKQ/default.jpg\"},"
+  "{\"url\":\"https://i.ytimg.com/vi/aqz-KE-bpKQ/hq720.jpg\"}]}}},"
+  "{\"shelfRenderer\":{\"content\":{\"verticalListRenderer\":{\"items\":["
+  "{\"videoRenderer\":{\"videoId\":\"rFZHOHl-L8A\",\"title\":{\"runs\":[{\"text\":\"radio\"}]},"
+  "\"viewCountText\":{\"runs\":[{\"text\":\"9,247\"},{\"text\":\" watching\"}]},"
+  "\"badges\":[{\"metadataBadgeRenderer\":{\"style\":\"BADGE_STYLE_TYPE_LIVE_NOW\",\"label\":\"LIVE\"}}]}},"
+  "{\"videoRenderer\":{\"videoId\":\"aqz-KE-bpKQ\",\"title\":{\"runs\":[{\"text\":\"again\"}]}}},"
+  "{\"videoRenderer\":{\"videoId\":\"bad id\",\"title\":{\"simpleText\":\"x\"}}}"
+  "]}}}}]}},"
+  "{\"continuationItemRenderer\":{\"continuationEndpoint\":{\"continuationCommand\":{\"token\":\"NEXT-PAGE-TOKEN\"}}}}"
+  "]}}}}}";
+
+#define IT_FMT(itag, mime, extra) \
+  "{\"itag\":" #itag ",\"url\":\"https://rr1.googlevideo.com/videoplayback?itag=" #itag "\",\"mimeType\":\"" mime \
+  "\",\"bitrate\":500000,\"contentLength\":\"1000000\"" extra "}"
+
+static const char *kItPlayer =
+  "{\"playabilityStatus\":{\"status\":\"OK\"},\"videoDetails\":{\"videoId\":\"aqz-KE-bpKQ\",\"lengthSeconds\":\"635\"},"
+  "\"streamingData\":{\"adaptiveFormats\":["
+  IT_FMT(243, "video/webm; codecs=\\\"vp9\\\"", ",\"width\":640,\"height\":360,\"fps\":30") ","
+  IT_FMT(134, "video/mp4; codecs=\\\"avc1.4D401E\\\"", ",\"width\":640,\"height\":360,\"fps\":30") ","
+  IT_FMT(302, "video/webm; codecs=\\\"vp9\\\"", ",\"width\":1280,\"height\":720,\"fps\":60") ","
+  "{\"itag\":299,\"signatureCipher\":\"s=xx&url=https%3A%2F%2Fexample\",\"mimeType\":\"video/mp4; codecs=\\\"avc1.64002A\\\"\","
+  "\"width\":1920,\"height\":1080}," /* ciphered: skipped */
+  IT_FMT(160, "video/mp4; codecs=\\\"avc1.4D400C\\\"", ",\"width\":256,\"height\":144,\"type\":\"FORMAT_STREAM_TYPE_OTF\"") ","
+  IT_FMT(140, "audio/mp4; codecs=\\\"mp4a.40.2\\\"", "") ","
+  IT_FMT(251, "audio/webm; codecs=\\\"opus\\\"", ",\"isDrc\":true") ","
+  IT_FMT(251, "audio/webm; codecs=\\\"opus\\\"", "")
+  "]}}";
+
+static void vt_innertube(void) {
+  char id[16];
+  TEST_CHECK(vsrc_innertube_id("https://www.youtube.com/watch?v=aqz-KE-bpKQ&t=10", id, sizeof id) &&
+             !strcmp(id, "aqz-KE-bpKQ"));
+  TEST_CHECK(vsrc_innertube_id("https://youtu.be/aqz-KE-bpKQ?si=x", id, sizeof id) && !strcmp(id, "aqz-KE-bpKQ"));
+  TEST_CHECK(vsrc_innertube_id("https://m.youtube.com/shorts/aqz-KE-bpKQ", id, sizeof id));
+  TEST_CHECK(vsrc_innertube_id("https://www.youtube.com/embed/aqz-KE-bpKQ", id, sizeof id));
+  TEST_CHECK(vsrc_innertube_id("aqz-KE-bpKQ", id, sizeof id));
+  TEST_CHECK(!vsrc_innertube_id("https://www.youtube.com/playlist?list=PL123", id, sizeof id));
+  TEST_CHECK(!vsrc_innertube_id("https://example.com/watch?v=aqz-KE-bpKQ", id, sizeof id));
+  TEST_CHECK(!vsrc_innertube_id("https://youtu.be/short", id, sizeof id));
+
+  FmVsrcPage pg;
+  memset(&pg, 0, sizeof pg);
+  TEST_CHECK(vsrc_innertube_parse_search(kItSearch, strlen(kItSearch), &pg) == FM_OK);
+  TEST_CHECK(pg.count == 2);                                  /* the repeat and the bad id dropped */
+  if (pg.count == 2) {
+    TEST_CHECK(!strcmp(pg.items[0].title, "Big Buck Bunny") && !strcmp(pg.items[0].channel, "Blender"));
+    TEST_CHECK(pg.items[0].duration == 635 && pg.items[0].views == 1234567 && !pg.items[0].live);
+    TEST_CHECK(strstr(pg.items[0].thumb, "hq720") && strstr(pg.items[0].page, "watch?v=aqz-KE-bpKQ"));
+    TEST_CHECK(pg.items[1].live && pg.items[1].views == 9247);
+  }
+  TEST_CHECK(!strncmp(pg.next, "i:", 2));
+  vsrc_page_free(&pg);
+
+  FmVsrcConf c;
+  memset(&c, 0, sizeof c);
+  c.max_height = 720;
+  FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+  char err[160];
+  size_t n = strlen(kItPlayer);
+  /* Windows-like: VP9 + Opus (not the DRC copy); the ciphered and OTF formats are gone */
+  c.os_mp4 = true;
+  TEST_CHECK(vsrc_innertube_pick(kItPlayer, n, &c, st, err, sizeof err) == FM_OK);
+  TEST_CHECK(strstr(st->video, "itag=302") && strstr(st->audio, "itag=251") && st->duration == 635);
+  TEST_CHECK(q_find(st, "1080p") < 0 && q_find(st, "144p") < 0 && q_find(st, "720p60") >= 0);
+  TEST_CHECK(st->q[st->nq - 1].audio_only && !strcmp(st->q[st->nq - 1].codec, "Opus"));
+  /* Android with MediaCodec streaming DASH: H.264 + AAC preferred */
+  c.os_dash = true;
+  c.max_height = 360;
+  TEST_CHECK(vsrc_innertube_pick(kItPlayer, n, &c, st, err, sizeof err) == FM_OK);
+  TEST_CHECK(strstr(st->video, "itag=134") && strstr(st->audio, "itag=140"));
+  /* only the built-in decoder: VP9 + Opus */
+  c.os_mp4 = c.os_dash = false;
+  TEST_CHECK(vsrc_innertube_pick(kItPlayer, n, &c, st, err, sizeof err) == FM_OK);
+  TEST_CHECK(strstr(st->video, "itag=243") && strstr(st->audio, "itag=251"));
+  /* refused / not a reply */
+  const char *live = "{\"playabilityStatus\":{\"status\":\"OK\"},\"videoDetails\":{\"isLive\":true}}";
+  TEST_CHECK(vsrc_innertube_pick(live, strlen(live), &c, st, err, sizeof err) == FM_ERR_UNSUPPORTED);
+  TEST_CHECK(vsrc_innertube_pick("nope", 4, &c, st, err, sizeof err) == FM_ERR_FORMAT);
+  fm_free(st);
+}
+
+/* MMCFM_YT_TEST=<video id or link>: the built-in path against real YouTube:
+** search (two pages), resolve, then open the chosen pair and decode. */
+static void vt_innertube_live(void) {
+  const char *spec = getenv("MMCFM_YT_TEST");
+  if (!spec || !*spec) return;
+  FmVsrcConf c;
+  vsrc_conf_snapshot(&c);
+  char id[16], err[256];
+  TEST_CHECK(vsrc_innertube_id(spec, id, sizeof id));
+  u64 t0 = plat_now_ms();
+  FmVsrcPage pg;
+  memset(&pg, 0, sizeof pg);
+  FmErr e = vsrc_innertube_search(&c, "big buck bunny", NULL, &pg, NULL);
+  u64 t1 = plat_now_ms();
+  printf("  yt search: %s, %d results in %d ms%s%s\n", fm_err_str(e), pg.count, (int)(t1 - t0), pg.error[0] ? ": " : "",
+         pg.error);
+  TEST_CHECK(e == FM_OK && pg.count > 5 && pg.next[0]);
+  if (pg.next[0]) {
+    char next[256];
+    fm_strlcpy(next, pg.next, sizeof next);
+    vsrc_page_free(&pg);
+    memset(&pg, 0, sizeof pg);
+    e = vsrc_innertube_search(&c, "big buck bunny", next, &pg, NULL);
+    printf("  yt search page 2: %s, %d results\n", fm_err_str(e), pg.count);
+    TEST_CHECK(e == FM_OK && pg.count > 5);
+  }
+  vsrc_page_free(&pg);
+  FmVsrcItem it;
+  e = vsrc_innertube_item(id, &it, err, sizeof err, NULL);
+  printf("  yt item: %s \"%s\" by %s, %.0f s\n", fm_err_str(e), it.title, it.channel, it.duration);
+  TEST_CHECK(e == FM_OK && it.title[0]);
+  FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+  t0 = plat_now_ms();
+  e = vsrc_innertube_resolve(&c, id, st, err, sizeof err, NULL);
+  t1 = plat_now_ms();
+  printf("  yt resolve: %s in %d ms%s%s\n", fm_err_str(e), (int)(t1 - t0), err[0] ? ": " : "", err);
+  TEST_CHECK(e == FM_OK && st->video[0]);
+  for (int i = 0; i < st->nq; i++)
+    printf("    %s %-10s %-6s %5d kbps%s%s%s\n", i == st->cur ? ">" : " ", st->q[i].label, st->q[i].codec, st->q[i].kbps,
+           st->q[i].playable ? " stream" : "", st->q[i].cache_only ? " cache" : "", st->q[i].needs_ffmpeg ? " ffmpeg" : "");
+  if (e == FM_OK) {
+    t0 = plat_now_ms();
+    FmErr ve;
+    FmVid *v = vid_open_pair(st->video, st->audio, 0, &ve);
+    t1 = plat_now_ms();
+    TEST_CHECK(v != NULL);
+    if (v) {
+      FmVidFrame vf;
+      FmVidPcm pc;
+      int ev, nv = 0, na = 0, guard = 0;
+      while ((nv < 60 || na < 60) && guard++ < 5000 && (ev = vid_decode(v, &vf, &pc)) > 0) {
+        if (ev == VID_EV_VIDEO) nv++;
+        else if (ev == VID_EV_AUDIO) na++;
+      }
+      u64 t2 = plat_now_ms();
+      printf("  yt play: %s %dx%d, open %d ms, 60 frames + 60 sound blocks %d ms (v%d a%d)\n", vid_info(v)->backend,
+             vid_info(v)->w, vid_info(v)->h, (int)(t1 - t0), (int)(t2 - t1), nv, na);
+      TEST_CHECK(nv >= 60 && na >= 60);
+      vid_close(v);
+    }
+  }
+  fm_free(st);
+}
+
 int test_vsrc(const char *tmp) {
   int before = g_test_fail;
   vt_stream_probe();
@@ -1146,6 +1306,8 @@ int test_vsrc(const char *tmp) {
   vt_dailymotion();
   vt_ytdlp_parse();
   vt_pick_stream();
+  vt_innertube();
+  vt_innertube_live();
   vt_garbage();
   vt_cache(tmp);
   vt_save(tmp);

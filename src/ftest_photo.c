@@ -54,7 +54,84 @@ static void make_item(PhItem *p, const char *src, const char *id, const char *ti
   ph_item_init(p, &it, src);
 }
 
+static bool near(float a, float b) { return fabsf(a - b) < 0.01f; }
+
+/* Lightbox zoom: zoom about a point, pan clamping, the double tap, limits. */
+static void check_zoom(void) {
+  FmRect view = { 100, 50, 800, 600 };
+  FmRect fit = { 100, 83, 800, 534 };          /* a 3:2 photo fitted in the view (letterboxed) */
+  PhZoom z = { 1, 0, 0 };
+  /* fitted: exactly the fit rect */
+  FmRect r = pzoom_rect(&z, fit);
+  TEST_CHECK(near(r.x, fit.x) && near(r.y, fit.y) && near(r.w, fit.w) && near(r.h, fit.h));
+  /* zoom about a point: the picture point under it stays under it */
+  float ax = 300, ay = 200;
+  float u = (ax - r.x) / r.w, v = (ay - r.y) / r.h;    /* picture coordinates under the point */
+  pzoom_at(&z, fit, 2.5f, ax, ay);
+  r = pzoom_rect(&z, fit);
+  TEST_CHECK(near(z.s, 2.5f) && near(r.w, fit.w * 2.5f) && near(r.h, fit.h * 2.5f));
+  TEST_CHECK(near(r.x + u * r.w, ax) && near(r.y + v * r.h, ay));
+  /* and back out about another point: still consistent */
+  float bx = 700, by = 400;
+  u = (bx - r.x) / r.w;
+  v = (by - r.y) / r.h;
+  pzoom_at(&z, fit, 1.5f, bx, by);
+  r = pzoom_rect(&z, fit);
+  TEST_CHECK(near(r.x + u * r.w, bx) && near(r.y + v * r.h, by));
+  /* zooming about the centre does not pan */
+  PhZoom c = { 1, 0, 0 };
+  pzoom_at(&c, fit, 3, fit.x + fit.w * 0.5f, fit.y + fit.h * 0.5f);
+  TEST_CHECK(near(c.px, 0) && near(c.py, 0));
+  /* pan clamping: dragged far right/down, the left/top edge stops at the view's */
+  z.s = 3;
+  z.px = 5000;
+  z.py = 5000;
+  pzoom_clamp(&z, fit, view);
+  r = pzoom_rect(&z, fit);
+  TEST_CHECK(near(r.x, view.x) && near(r.y, view.y));
+  z.px = -5000;
+  z.py = -5000;
+  pzoom_clamp(&z, fit, view);
+  r = pzoom_rect(&z, fit);
+  TEST_CHECK(near(r.x + r.w, view.x + view.w) && near(r.y + r.h, view.y + view.h));
+  /* inside the limits nothing moves */
+  z.px = 40;
+  z.py = -30;
+  pzoom_clamp(&z, fit, view);
+  TEST_CHECK(near(z.px, 40) && near(z.py, -30));
+  /* a side smaller than the view is centred (1.1x: 880 wide, 586 high in 800x600) */
+  z.s = 1.1f;
+  z.px = 300;
+  z.py = 300;
+  pzoom_clamp(&z, fit, view);
+  r = pzoom_rect(&z, fit);
+  TEST_CHECK(near(r.x, view.x) && near(r.x + r.w, view.x + view.w + 80));   /* wider: at its limit */
+  TEST_CHECK(near(r.y + r.h * 0.5f, view.y + view.h * 0.5f));                    /* shorter: centred */
+  /* fitted or below: back where the unzoomed picture is */
+  z.s = 1;
+  z.px = 12;
+  z.py = -7;
+  pzoom_clamp(&z, fit, view);
+  TEST_CHECK(z.px == 0 && z.py == 0);
+  z.s = 0.7f;
+  z.px = 50;
+  pzoom_clamp(&z, fit, view);
+  TEST_CHECK(z.px == 0);
+  /* double tap: fit -> actual pixels, or 2x when those are barely larger; then back */
+  float one = 2400.0f / 800.0f;                /* a 2400 px wide photo fitted to 800 px */
+  float smax = pzoom_max(one);
+  TEST_CHECK(near(smax, 12.0f));
+  TEST_CHECK(near(pzoom_toggle(1.0f, one, smax), 3.0f));
+  TEST_CHECK(near(pzoom_toggle(3.0f, one, smax), 1.0f));
+  TEST_CHECK(near(pzoom_toggle(1.6f, one, smax), 1.0f));
+  TEST_CHECK(near(pzoom_toggle(1.0f, 1.1f, pzoom_max(1.1f)), 2.0f));   /* small photo: 2x */
+  TEST_CHECK(near(pzoom_toggle(1.0f, 0.5f, pzoom_max(0.5f)), 2.0f));   /* shown larger than it is */
+  TEST_CHECK(near(pzoom_toggle(1.0f, 40.0f, pzoom_max(40.0f)), 32.0f)); /* capped */
+  TEST_CHECK(near(pzoom_max(0.3f), 4.0f) && near(pzoom_max(100.0f), 32.0f));
+}
+
 int test_photo_ui(const char *tmp) {
+  check_zoom();
   /* rows: mixed shapes, all the same, a panorama, a lone last photo */
   static const float kMix[] = { 1.5f, 0.75f, 1.33f, 1.0f, 1.78f, 0.67f, 2.4f, 1.25f, 0.8f, 1.6f, 1.33f, 0.56f,
                                 1.5f, 1.5f, 1.0f, 0.75f, 3.9f, 1.2f, 1.33f, 1.5f, 0.7f };

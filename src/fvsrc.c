@@ -519,8 +519,12 @@ void vsrc_conf_snapshot(FmVsrcConf *c) {
     plat_place(PLACE_HOME, c->download_dir, sizeof c->download_dir);
   c->max_height = conf.online_height >= 144 && conf.online_height <= 4320 ? conf.online_height : 720;
   c->have_ffmpeg_libs = ff_available();
-#if (defined(FM_WIN) && !defined(__TINYC__)) || defined(FM_ANDROID)
-  c->os_mp4 = true;          /* Media Foundation / MediaCodec (fdec_vid_int.h) */
+#if defined(FM_ANDROID)
+  /* MediaCodec streams through FmNetStream from Android 9; before that
+  ** URLs go to the built-in decoder (VP9/Opus WebM only) */
+  c->os_mp4 = c->os_dash = vid_os_streams();
+#elif defined(FM_WIN) && !defined(__TINYC__)
+  c->os_mp4 = true;          /* Media Foundation (fdec_vid_int.h) */
 #endif
   /* send_headers stays false: vid_open has no headers argument yet, so
   ** formats that need a Referer/cookie go through the cache instead */

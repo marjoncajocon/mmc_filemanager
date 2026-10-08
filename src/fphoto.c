@@ -1532,6 +1532,10 @@ static void demo_after_results(void) {
   if (!strcmp(st, "lightbox") || !strcmp(st, "info")) {
     box_open(&S.res, k);
     if (!strcmp(st, "info")) box_set_info(true);
+  } else if (!strcmp(st, "zoom")) {
+    /* zoomed in 3x: the sharper picture is fetched once the full one is in */
+    box_open(&S.res, k);
+    box_demo_zoom(3.0f);
   } else if (!strcmp(st, "select")) {
     for (int i = 0; i < n && i < 9; i++) S.res.items[i].sel = i == 1 || i == 2 || i == 4 || i == 7;
   } else if (!strcmp(st, "albums") || !strcmp(st, "album") || !strcmp(st, "addalbum") || !strcmp(st, "favorites")) {

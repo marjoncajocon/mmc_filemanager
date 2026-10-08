@@ -100,6 +100,24 @@ FmErr vsrc_ytdlp_pick_stream(const char *json, size_t len, const FmVsrcConf *c, 
 /* The "<site>-<id>-<height>" cache key; "web" adds a hash of the page URL. */
 void  vsrc_cache_key(const char *site, const FmVsrcItem *item, int height, char *out, size_t cap);
 
+/* ---- YouTube without yt-dlp (fvsrc_innertube.c) ------------------------------- */
+
+/* A video id from an id or a YouTube link (watch, youtu.be, shorts, embed, live). */
+bool  vsrc_innertube_id(const char *s, char *out, size_t cap);
+/* Stream URLs and the quality list for one video id, like vsrc_ytdlp_resolve
+** (never downloads). */
+FmErr vsrc_innertube_resolve(const FmVsrcConf *c, const char *id, FmVsrcStream *out, char *err, size_t errcap,
+                             volatile int *cancel);
+/* Title, channel, length ... of one video (a pasted link). */
+FmErr vsrc_innertube_item(const char *id, FmVsrcItem *it, char *err, size_t errcap, volatile int *cancel);
+/* Keyless search; page tokens are "i:<n>". */
+FmErr vsrc_innertube_search(const FmVsrcConf *c, const char *query, const char *page_token, FmVsrcPage *out,
+                            volatile int *cancel);
+FmErr vsrc_innertube_parse_search(const char *json, size_t len, FmVsrcPage *out);
+/* The quality list and the default pick from a player reply (exposed for the self test). */
+FmErr vsrc_innertube_pick(const char *json, size_t len, const FmVsrcConf *c, FmVsrcStream *out, char *err,
+                          size_t errcap);
+
 void vsrc_youtube_search_url(const FmVsrcConf *c, const char *query, const char *token, char *out,
                              size_t cap);
 FmErr vsrc_youtube_parse_search(const char *json, size_t len, FmVsrcPage *out);
@@ -120,5 +138,18 @@ FmErr vsrc_peertube_pick(const char *json, size_t len, const FmVsrcConf *c, FmVs
 
 void  vsrc_dailymotion_search_url(const FmVsrcConf *c, const char *query, int page, char *out, size_t cap);
 FmErr vsrc_dailymotion_parse_search(const char *json, size_t len, int page, FmVsrcPage *out);
+/* The player metadata reply (www.dailymotion.com/player/metadata/video/<id>). */
+typedef struct FmDmMeta {
+  char master[2048];      /* qualities.auto[0].url: a signed HLS master playlist */
+  double duration;
+  bool live;
+} FmDmMeta;
+/* FM_OK, FM_ERR_NOT_FOUND (the site's own error message in err), FM_ERR_FORMAT */
+FmErr vsrc_dailymotion_parse_meta(const char *json, size_t len, FmDmMeta *m, char *err, size_t errcap);
+/* Fills out->q[] from the master playlist (base = its URL), and with FM_OK
+** also cur/video/audio/size for the tallest playable <= c->max_height.
+** FM_ERR_UNSUPPORTED = nothing decodes here, FM_ERR_FORMAT = not a master. */
+FmErr vsrc_dailymotion_pick(const char *m3u8, size_t len, const char *base, const FmDmMeta *m,
+                            const FmVsrcConf *c, FmVsrcStream *out);
 
 #endif

@@ -107,12 +107,14 @@ typedef struct PhTask {
   char token[256];
   char dir[FM_PATH_MAX];      /* PT_DOWNLOAD */
   int max_px;                 /* PT_FETCH: decode to fit this long edge (0 = only fetch) */
+  u32 max_pixels;             /* PT_FETCH: and to at most this many pixels (0 = no limit) */
   /* results */
   FmErr err;
   char errtext[512];
   FmPsrcPage page;            /* PT_SEARCH */
   char out[FM_PATH_MAX];      /* PT_FETCH / PT_DOWNLOAD: the file */
   FmImage img;                /* PT_FETCH: decoded */
+  FmImgInfo info;             /* PT_FETCH: the file's own size (before fitting) */
   /* progress */
   SDL_mutex *mx;
   float frac;                 /* < 0 unknown */
@@ -215,6 +217,28 @@ void  box_shutdown(void);
 void  box_set_info(bool on);
 void  box_view_full(void);                    /* "Open in viewer" (now or once fetched) */
 void  box_menu_results(void);
+void  box_demo_zoom(float s);                 /* screenshots: zoom the open photo (1 = fit) */
+
+/* Lightbox zoom, kept relative to the fitted picture so a sharper texture
+** arriving later changes nothing on screen. s: 1 = fit; px, py: offset of
+** the picture's centre from the fitted centre (screen px). Pure math, also
+** used by the self test. */
+typedef struct PhZoom {
+  float s, px, py;
+} PhZoom;
+
+/* Where the picture is drawn, given its fitted rect. */
+FmRect pzoom_rect(const PhZoom *z, FmRect fit);
+/* Zooms to `to` keeping the screen point (ax, ay) still. */
+void  pzoom_at(PhZoom *z, FmRect fit, float to, float ax, float ay);
+/* Keeps the picture over `view`: a side larger than the view cannot leave
+** a gap, a smaller side is centred. */
+void  pzoom_clamp(PhZoom *z, FmRect fit, FmRect view);
+/* Double tap: from fit to 100% (`one` = the scale of actual pixels, or 2x
+** when that is barely larger), from anything else back to fit. */
+float pzoom_toggle(float s, float one, float smax);
+/* Largest zoom: 4x the fit, or 4x actual pixels when that is more (at most 32x). */
+float pzoom_max(float one);
 
 /* ---- the view (fphoto.c) ------------------------------------------------------------------ */
 
