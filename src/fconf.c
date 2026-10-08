@@ -26,6 +26,7 @@ void conf_defaults(void) {
   fm_strlcpy(conf.online_source, "youtube", sizeof conf.online_source);
   conf.online_height = 720;
   fm_strlcpy(conf.photo_source, "openverse", sizeof conf.photo_source);
+  fm_strlcpy(conf.audio_source, "radio", sizeof conf.audio_source);
   conf.online_safe = true;
   conf.theme = 0;
   conf.dark = true;
@@ -151,6 +152,9 @@ static void set_key(const char *k, const char *raw) {
   else if (!strcmp(k, "key_pexels")) fm_strlcpy(conf.key_pexels, v, sizeof conf.key_pexels);
   else if (!strcmp(k, "key_unsplash")) fm_strlcpy(conf.key_unsplash, v, sizeof conf.key_unsplash);
   else if (!strcmp(k, "key_pixabay")) fm_strlcpy(conf.key_pixabay, v, sizeof conf.key_pixabay);
+  else if (!strcmp(k, "audio_source")) fm_strlcpy(conf.audio_source, v, sizeof conf.audio_source);
+  else if (!strcmp(k, "key_jamendo")) fm_strlcpy(conf.key_jamendo, v, sizeof conf.key_jamendo);
+  else if (!strcmp(k, "key_freesound")) fm_strlcpy(conf.key_freesound, v, sizeof conf.key_freesound);
   else if (!strcmp(k, "accent")) conf.accent = to_int(v, -1, UI_ACCENTS - 1, -1);
   else if (!strcmp(k, "zoom")) conf.zoom = to_float(v, 0.75f, 2.0f, 1.0f);
   else if (!strcmp(k, "touch")) conf.touch = to_int(v, -1, 1, -1);
@@ -288,6 +292,9 @@ void conf_save(void) {
   put(f, "key_pexels", conf.key_pexels);
   put(f, "key_unsplash", conf.key_unsplash);
   put(f, "key_pixabay", conf.key_pixabay);
+  put(f, "audio_source", conf.audio_source);
+  put(f, "key_jamendo", conf.key_jamendo);
+  put(f, "key_freesound", conf.key_freesound);
   put_i(f, "accent", conf.accent);
   put_f(f, "zoom", conf.zoom);
   put_i(f, "touch", conf.touch);

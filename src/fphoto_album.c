@@ -25,7 +25,6 @@
 **     adding fifty photos writes the file once.
 */
 #include "fphoto_int.h"
-#include "fview_int.h"
 
 enum { RF_SRC, RF_ID, RF_TITLE, RF_AUTHOR, RF_LICENSE, RF_THUMB, RF_FULL, RF_PAGE, RF_ORIG, RF_COUNT };
 

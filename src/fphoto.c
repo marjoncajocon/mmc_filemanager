@@ -431,7 +431,10 @@ static void menu_results(void) {
     case MI_SELECT: if (i >= 0) { w->items[i].sel = true; w->anchor = i; } break;
     case MI_BROWSER: ph_open_url(p->it.page); break;
     case MI_COPY: ph_copy_link(p); break;
-    case MI_REMOVE: palb_remove(S.album, p->src, p->it.id); ui_toast("Removed from \xE2\x80\x9C%s\xE2\x80\x9D", palb_name(S.album)); break;
+    case MI_REMOVE:
+      palb_remove(S.album, p->src, p->it.id);
+      ui_toast("Removed from \xE2\x80\x9C%s\xE2\x80\x9D", palb_name(S.album));
+      break;
     default: break;
   }
   g_menu_item = -1;
@@ -690,7 +693,10 @@ static void draw_search(FmRect pill, const FmPsrc *s) {
   {
     int f = ui_hit(ui_idn(id, 1), go);
     gfx_circle(go.x + bs * 0.5f, go.y + bs * 0.5f, bs * 0.5f, S.field[0] ? T.accent : col_alpha(T.accent, 0.45f));
-    if (f & UI_HOVER) { gfx_circle(go.x + bs * 0.5f, go.y + bs * 0.5f, bs * 0.5f, T.hover); ui_set_cursor(SDL_SYSTEM_CURSOR_HAND); }
+    if (f & UI_HOVER) {
+      gfx_circle(go.x + bs * 0.5f, go.y + bs * 0.5f, bs * 0.5f, T.hover);
+      ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
+    }
     icon_draw(IC_ARROW_RIGHT, rect_center(go, DP(18), DP(18)), T.on_accent);
     ui_tip_track(ui_idn(id, 1), f, "Search (Enter)");
     clicked_go = (f & UI_CLICK) != 0;
@@ -818,7 +824,8 @@ static void selection_bar(FmRect r) {
   bool narrow = bar.w < DP(620);
   bool album = S.page == PG_ALBUM && S.album != PALB_FAV;
   struct { FmIcon ic; const char *label; int act; } kAct[4] = {
-    { IC_DOWNLOAD, "Download", 2 }, { IC_ALBUM_ADD, "Add to album", 1 }, { IC_HEART, "Favorite", 0 }, { IC_DELETE, "Remove", 3 },
+    { IC_DOWNLOAD, "Download", 2 }, { IC_ALBUM_ADD, "Add to album", 1 },
+    { IC_HEART, "Favorite", 0 },    { IC_DELETE, "Remove", 3 },
   };
   int na = album ? 4 : 3;
   for (int i = 0; i < na; i++) {
@@ -938,7 +945,8 @@ static void album_page(FmRect body) {
       ph_show_albums();
     rect_cut_left(&in, DP(6));
     bool narrow = in.w < DP(460);
-    if (a != PALB_FAV) {
+    if (a == PALB_FAV) rect_cut_right(&in, DP(8));
+    else {
       FmRect b = rect_center(rect_cut_right(&in, bs), bs, bs);
       if (ui_icon_btn(ui_idn(id, 2), b, IC_MORE, T.text2, "More")) palb_album_menu(a, b.x + b.w, b.y + b.h);
     }
@@ -1226,7 +1234,8 @@ static void draw_top(FmRect r, bool narrow) {
   if (S.page == PG_SOURCE) {
     fm_strlcpy(title, narrow && s ? s->name : "Online photos", sizeof title);
     lead = narrow || !s ? "Online photos" : s->name;
-    if (S.search && !S.search_more) fm_snprintf(sub, sizeof sub, "%s  \xC2\xB7  %s", lead, S.query[0] ? "Searching\xE2\x80\xA6" : "Loading\xE2\x80\xA6");
+    if (S.search && !S.search_more)
+      fm_snprintf(sub, sizeof sub, "%s  \xC2\xB7  %s", lead, S.query[0] ? "Searching\xE2\x80\xA6" : "Loading\xE2\x80\xA6");
     else if (S.res.n > 0)
       fm_snprintf(sub, sizeof sub, "%s  \xC2\xB7  %s%d%s %s", lead, S.query[0] ? "" : "Curated  \xC2\xB7  ", S.res.n,
                   S.next[0] ? "+" : "", S.res.n == 1 ? "photo" : "photos");
@@ -1560,7 +1569,8 @@ void photo_demo(const char *source, const char *query, const char *state) {
   env_conf("MMCFM_PIXABAY_KEY", conf.key_pixabay, sizeof conf.key_pixabay);
   if (state && !strcmp(state, "downloads")) {
     char tmp[FM_PATH_MAX];
-    if (plat_place(PLACE_TEMP, tmp, sizeof tmp)) fm_path_join(conf.online_dl_dir, sizeof conf.online_dl_dir, tmp, "mmcfm-demo-photos");
+    if (plat_place(PLACE_TEMP, tmp, sizeof tmp))
+      fm_path_join(conf.online_dl_dir, sizeof conf.online_dl_dir, tmp, "mmcfm-demo-photos");
   }
   if (state && !strcmp(state, "onboarding")) conf.photo_source[0] = 0;
   photo_open(source);

@@ -57,7 +57,9 @@ bool  photo_settings_focus(void);
 /* Opens the view on `source` and searches `query` (NULL: onboarding or the
 ** curated page). `state` picks what the screenshot shows once results are
 ** in: "lightbox", "info", "select", "albums", "album", "addalbum",
-** "downloads", "menu", or a forced state: "nokey", "offline", "quota",
+** "downloads", "menu", "scroll", "favorites", "e2e" (lightbox, favourite,
+** album "E2E test", download, then the image viewer; outside --shot it
+** really writes), or a forced state: "nokey", "offline", "quota",
 ** "empty", "error", "settings". */
 void photo_demo(const char *source, const char *query, const char *state);
 

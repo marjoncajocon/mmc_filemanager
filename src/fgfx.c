@@ -496,11 +496,28 @@ static int rrect_pts(float *xy, FmRect r, float tl, float tr, float br, float bl
   return n;
 }
 
+/* Drops consecutive (and wrap-around) duplicate points. A pill (radius = half
+** the height) has its arcs meet in one point; the zero-length edge there got
+** its own anti-aliasing fringe, a faint seam on translucent fills. Only for
+** single fills: the shadow rings pair their points one to one. */
+static int dedupe_pts(float *xy, int n) {
+  int m = 0;
+  for (int i = 0; i < n; i++) {
+    if (m > 0 && fabsf(xy[2 * i] - xy[2 * (m - 1)]) < 0.01f && fabsf(xy[2 * i + 1] - xy[2 * (m - 1) + 1]) < 0.01f)
+      continue;
+    xy[2 * m] = xy[2 * i];
+    xy[2 * m + 1] = xy[2 * i + 1];
+    m++;
+  }
+  while (m > 3 && fabsf(xy[0] - xy[2 * (m - 1)]) < 0.01f && fabsf(xy[1] - xy[2 * (m - 1) + 1]) < 0.01f) m--;
+  return m;
+}
+
 void gfx_rrect4(FmRect r, float tl, float tr, float br, float bl, FmColor c) {
   if (c.a == 0 || r.w <= 0 || r.h <= 0 || culled(r.x - 1, r.y - 1, r.w + 2, r.h + 2)) return;
   float xy[2 * 4 * 13];
   int segs = corner_segs(FM_MAX(FM_MAX(tl, tr), FM_MAX(br, bl)));
-  int n = rrect_pts(xy, r, tl, tr, br, bl, segs);
+  int n = dedupe_pts(xy, rrect_pts(xy, r, tl, tr, br, bl, segs));
   FmRect none = { 0, 0, 1, 1 };
   fill_convex(xy, NULL, c, n, NULL, none);
 }

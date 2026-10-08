@@ -78,6 +78,9 @@ typedef struct FmConf {
   /* online photos (fpsrc*.c, fphoto*.c) */
   char photo_source[16];      /* last used photo source key */
   char key_pexels[96], key_unsplash[96], key_pixabay[96];   /* free API keys, "" = none */
+  /* online audio (fasrc*.c, faudio_online*.c) */
+  char audio_source[16];      /* last used audio source key */
+  char key_jamendo[64], key_freesound[96];                   /* free API keys, "" = none */
   float volume;               /* audio player 0..1 */
   FmVizConf viz;              /* the visualizer as shown */
   FmVizConf viz_saved;        /* the user's own custom setup ("Custom" chip) */

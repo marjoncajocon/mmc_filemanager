@@ -19,6 +19,7 @@
 **     DOS device names) without splitting UTF-8 characters.
 */
 #include "fpsrc.h"
+#include "fsdl.h"
 #include "fpsrc_int.h"
 #include "fvsrc_int.h"     /* vsrc_html_unescape, vsrc_unix_date */
 #include "fconf.h"
@@ -525,18 +526,30 @@ static FmErr copy_file(const char *from, const char *to, volatile int *cancel) {
 }
 
 /* dir/base[ (n)]<ext> with no file and no "<same>.txt" there yet */
+/* Picks "<base>.ext" or "<base> (N).ext" and reserves it at once by creating
+** the credit .txt: downloads run in parallel, and two photos with the same
+** "title - author" used to pick the same name (one then failed). */
+static SDL_SpinLock g_dest_lock;
+
 static bool unique_dest(const char *dir, const char *base, const char *ext, char *img, char *txt, size_t cap) {
   char name[300];
-  for (int i = 1; i < 1000; i++) {
+  bool found = false;
+  SDL_AtomicLock(&g_dest_lock);
+  for (int i = 1; i < 1000 && !found; i++) {
     if (i == 1) fm_snprintf(name, sizeof name, "%s", base);
     else fm_snprintf(name, sizeof name, "%s (%d)", base, i);
     char a[320], b[320];
     fm_snprintf(a, sizeof a, "%s%s", name, ext);
     fm_snprintf(b, sizeof b, "%s.txt", name);
-    if (!fm_path_join(img, cap, dir, a) || !fm_path_join(txt, cap, dir, b)) return false;
-    if (!plat_exists(img) && !plat_exists(txt)) return true;
+    if (!fm_path_join(img, cap, dir, a) || !fm_path_join(txt, cap, dir, b)) break;
+    if (!plat_exists(img) && !plat_exists(txt)) {
+      FILE *f = fm_fopen(txt, "wb");       /* the reservation */
+      if (f) fclose(f);
+      found = true;
+    }
   }
-  return false;
+  SDL_AtomicUnlock(&g_dest_lock);
+  return found;
 }
 
 static bool write_text(const char *path, const char *text) {
@@ -640,6 +653,7 @@ FmErr psrc_fetch(const FmPsrcConf *c, const FmPsrcItem *item, const char *dir, c
       return FM_ERR_EXISTS;
     }
     e = copy_file(cached, img, cancel);
+    if (e != FM_OK) plat_remove_file(txt);  /* give the reserved name back */
     if (e == FM_ERR_CANCEL) { fm_strlcpy(err, "Cancelled", errcap); return e; }
     if (e != FM_OK) { fm_snprintf(err, errcap, "Could not save: %s", fm_err_str(e)); return e; }
   } else {
@@ -657,6 +671,7 @@ FmErr psrc_fetch(const FmPsrcConf *c, const FmPsrcItem *item, const char *dir, c
     e = plat_rename(tmp, img);
     if (e != FM_OK) {
       plat_remove_file(tmp);
+      plat_remove_file(txt);
       fm_snprintf(err, errcap, "Could not save: %s", fm_err_str(e));
       return e;
     }

@@ -330,7 +330,8 @@ static void tile(TileCtx *c, FmRect r, int i) {
                        col_alpha(PH_WHITE, hv));
   }
   /* favourite: a small heart at the bottom left */
-  if (palb_is_fav(p) && r.w >= DP(56)) {
+  bool in_favs = ph_page() == PG_ALBUM && ph_cur_album() == PALB_FAV;
+  if (!in_favs && r.w >= DP(56) && palb_is_fav(p)) {
     float hs = DP(16);
     FmRect hb = { pic.x + DP(7), pic.y + pic.h - hs - DP(7), hs, hs };
     icon_draw(IC_HEART_FILL, rect_inset(hb, -DP(1)), FM_RGBA(0, 0, 0, 90));
