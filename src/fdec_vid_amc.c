@@ -12,7 +12,10 @@
 **     format keys are string literals because AMEDIAFORMAT_KEY_* are
 **     variables exported by the library.
 **   - The file is opened with open() and handed over as an fd, so plain
-**     paths work without a content URI.
+**     paths work without a content URI. http(s) URLs (online videos) go to
+**     AMediaExtractor_setDataSource, which streams with the system's own HTTP
+**     stack and hardware decoders; it is looked up on its own, so a device
+**     without it still plays files (URLs then fall to the built-in decoder).
 **   - Video decodes to ByteBuffers (no Surface) in YUV420Flexible. Planar
 **     (19) output is handed out in place: the output buffer is held until
 **     the next decode call, so the Y plane is never copied. Semi-planar
@@ -68,6 +71,7 @@
 #define AMC_FIELD(f) __typeof__(f) *f;
 static struct { AMC_FUNCS(AMC_FIELD) } nd;
 static bool g_nd_ok;
+static __typeof__(AMediaExtractor_setDataSource) *g_set_url;   /* optional: URLs */
 static pthread_once_t g_nd_once = PTHREAD_ONCE_INIT;
 
 static void amc_load(void) {
@@ -78,6 +82,7 @@ static void amc_load(void) {
   AMC_FUNCS(AMC_SYM)
 #undef AMC_SYM
   if (!ok) { dlclose(h); memset(&nd, 0, sizeof nd); return; }
+  *(void **)&g_set_url = dlsym(h, "AMediaExtractor_setDataSource");
   g_nd_ok = true;                      /* the library stays loaded for the process */
 }
 
@@ -190,17 +195,25 @@ static void release_held(Amc *s) {
 static void *amc_open(const char *path, int flags, FmVidInfo *in) {
   pthread_once(&g_nd_once, amc_load);
   if (!g_nd_ok) return NULL;
-  int fd = open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) return NULL;
+  bool url = !fm_strnicmp(path, "http://", 7) || !fm_strnicmp(path, "https://", 8);
+  if (url && !g_set_url) return NULL;
+  int fd = -1;
   struct stat st;
-  if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return NULL; }
+  if (!url) {
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return NULL; }
+  }
   Amc *s = (Amc *)fm_calloc(1, sizeof *s);
   s->fd = fd;
   s->held = -1;
   s->v.idx = s->a.idx = -1;
   s->info = in;
   s->ex = nd.AMediaExtractor_new();
-  if (!s->ex || nd.AMediaExtractor_setDataSourceFd(s->ex, fd, 0, (off64_t)st.st_size) != AMEDIA_OK) {
+  media_status_t ms = AMEDIA_ERROR_UNKNOWN;
+  if (s->ex) ms = url ? g_set_url(s->ex, path) : nd.AMediaExtractor_setDataSourceFd(s->ex, fd, 0, (off64_t)st.st_size);
+  if (ms != AMEDIA_OK) {
+    if (url) fm_log("video: MediaCodec could not open the stream (%d)", (int)ms);
     amc_close(s);
     return NULL;
   }

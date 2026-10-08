@@ -38,7 +38,7 @@ void net_resp_free(FmNetResp *r) {
   r->len = 0;
 }
 
-#if !defined(FM_ANDROID) && !defined(FM_WEB)
+#if !defined(FM_WEB)
 /* Growable body buffer shared by the backends. */
 typedef struct Body {
   u8 *data;
@@ -449,6 +449,179 @@ static FmErr cu_request(const char *url, const char *headers, Body *b, FmNetProg
 }
 
 #define REQUEST cu_request
+
+/* ============================================================================ */
+#elif defined(FM_ANDROID)
+
+/* Android: HttpURLConnection through FmNet.java (system TLS and certificates).
+** Worker threads attach through SDL_AndroidGetJNIEnv; FindClass there would
+** use the system class loader, so the class comes from the activity's loader
+** once and is kept as a global reference. */
+#include <jni.h>
+
+static struct {
+  int state;
+  jclass cls, conn;
+  jmethodID open, header, read, close;
+  jfieldID status, length, type, error;
+} jx;
+static SDL_SpinLock g_jn_lock;
+
+static bool jn_clear(JNIEnv *e) {
+  if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionClear(e); return true; }
+  return false;
+}
+
+static jclass jn_class(JNIEnv *e, jobject loader, jmethodID load, const char *name) {
+  jstring s = (*e)->NewStringUTF(e, name);
+  jclass c = (jclass)(*e)->CallObjectMethod(e, loader, load, s);
+  (*e)->DeleteLocalRef(e, s);
+  if (jn_clear(e) || !c) return NULL;
+  jclass g = (jclass)(*e)->NewGlobalRef(e, c);
+  (*e)->DeleteLocalRef(e, c);
+  return g;
+}
+
+static JNIEnv *jn_load(void) {
+  JNIEnv *e = (JNIEnv *)SDL_AndroidGetJNIEnv();
+  if (!e) return NULL;
+  SDL_AtomicLock(&g_jn_lock);
+  if (!jx.state) {
+    jx.state = -1;
+    jobject act = (jobject)SDL_AndroidGetActivity();
+    if (act) {
+      jclass ac = (*e)->GetObjectClass(e, act);
+      jmethodID gl = (*e)->GetMethodID(e, ac, "getClassLoader", "()Ljava/lang/ClassLoader;");
+      jobject loader = gl ? (*e)->CallObjectMethod(e, act, gl) : NULL;
+      jn_clear(e);
+      if (loader) {
+        jclass lc = (*e)->GetObjectClass(e, loader);
+        jmethodID load = (*e)->GetMethodID(e, lc, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+        if (load) {
+          jx.cls = jn_class(e, loader, load, "io.github.mmc.filemanager.FmNet");
+          jx.conn = jn_class(e, loader, load, "io.github.mmc.filemanager.FmNet$Conn");
+        }
+        jn_clear(e);
+        (*e)->DeleteLocalRef(e, lc);
+        (*e)->DeleteLocalRef(e, loader);
+      }
+      (*e)->DeleteLocalRef(e, ac);
+      (*e)->DeleteLocalRef(e, act);
+    }
+    if (jx.cls && jx.conn) {
+      jx.open = (*e)->GetStaticMethodID(e, jx.cls, "open",
+                                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
+                                        "Lio/github/mmc/filemanager/FmNet$Conn;");
+      jx.header = (*e)->GetStaticMethodID(e, jx.cls, "header",
+                                          "(Lio/github/mmc/filemanager/FmNet$Conn;Ljava/lang/String;)Ljava/lang/String;");
+      jx.read = (*e)->GetStaticMethodID(e, jx.cls, "read", "(Lio/github/mmc/filemanager/FmNet$Conn;[B)I");
+      jx.close = (*e)->GetStaticMethodID(e, jx.cls, "close", "(Lio/github/mmc/filemanager/FmNet$Conn;)V");
+      jx.status = (*e)->GetFieldID(e, jx.conn, "status", "I");
+      jx.length = (*e)->GetFieldID(e, jx.conn, "length", "J");
+      jx.type = (*e)->GetFieldID(e, jx.conn, "type", "Ljava/lang/String;");
+      jx.error = (*e)->GetFieldID(e, jx.conn, "error", "Ljava/lang/String;");
+      jn_clear(e);
+      if (jx.open && jx.header && jx.read && jx.close && jx.status && jx.length && jx.type && jx.error) jx.state = 1;
+    }
+  }
+  SDL_AtomicUnlock(&g_jn_lock);
+  return jx.state > 0 ? e : NULL;
+}
+
+bool net_available(void) { return jn_load() != NULL; }
+const char *net_backend(void) { return jn_load() ? "HttpURLConnection" : "the Java network helper is missing"; }
+
+/* a String field or header of the connection into out ("" when null) */
+static void jn_str(JNIEnv *e, jstring s, char *out, size_t cap) {
+  out[0] = 0;
+  if (!s) return;
+  const char *u = (*e)->GetStringUTFChars(e, s, NULL);
+  if (u) {
+    fm_strlcpy(out, u, cap);
+    (*e)->ReleaseStringUTFChars(e, s, u);
+  }
+  (*e)->DeleteLocalRef(e, s);
+}
+
+static void jn_header(JNIEnv *e, jobject c, const char *name, char *out, size_t cap) {
+  jstring n = (*e)->NewStringUTF(e, name);
+  jstring v = (jstring)(*e)->CallStaticObjectMethod(e, jx.cls, jx.header, c, n);
+  (*e)->DeleteLocalRef(e, n);
+  if (jn_clear(e)) v = NULL;
+  jn_str(e, v, out, cap);
+}
+
+static FmErr jn_request(const char *url, const char *headers, Body *b, FmNetProgress cb, void *user,
+                        FmNetResp *out, volatile int *cancel) {
+  memset(out, 0, sizeof *out);
+  out->length = -1;
+  JNIEnv *e = jn_load();
+  if (!e) { fm_strlcpy(out->error, net_backend(), sizeof out->error); return FM_ERR_UNSUPPORTED; }
+  if ((*e)->PushLocalFrame(e, 16) < 0) { jn_clear(e); return FM_ERR_NOMEM; }
+  jstring ju = (*e)->NewStringUTF(e, url);
+  jstring jh = (*e)->NewStringUTF(e, headers ? headers : "");
+  jstring ja = (*e)->NewStringUTF(e, NET_UA);
+  jobject c = (ju && jh && ja) ? (*e)->CallStaticObjectMethod(e, jx.cls, jx.open, ju, jh, ja) : NULL;
+  if (jn_clear(e) || !c) {
+    (*e)->PopLocalFrame(e, NULL);
+    fm_strlcpy(out->error, "could not start the request", sizeof out->error);
+    return FM_ERR_IO;
+  }
+  FmErr err = FM_OK;
+  out->status = (int)(*e)->GetIntField(e, c, jx.status);
+  if (!out->status) {
+    jn_str(e, (jstring)(*e)->GetObjectField(e, c, jx.error), out->error, sizeof out->error);
+    (*e)->PopLocalFrame(e, NULL);
+    return FM_ERR_IO;
+  }
+  out->length = (i64)(*e)->GetLongField(e, c, jx.length);
+  jn_str(e, (jstring)(*e)->GetObjectField(e, c, jx.type), out->type, sizeof out->type);
+  char v[160];
+  jn_header(e, c, "Accept-Ranges", v, sizeof v);
+  out->ranges = out->status == 206 || !fm_strnicmp(v, "bytes", 5);
+  jn_header(e, c, "Content-Range", v, sizeof v);
+  const char *sl = strchr(v, '/');
+  if (sl && sl[1] != '*') out->total = (i64)strtoll(sl + 1, NULL, 10);
+  jn_header(e, c, "icy-metaint", v, sizeof v);
+  out->icy_metaint = atoi(v);
+  jn_header(e, c, "icy-name", out->icy_name, sizeof out->icy_name);
+  if (b->head) b->head(b->su, out);
+
+  enum { CHUNK = 64 * 1024 };
+  jbyteArray arr = (*e)->NewByteArray(e, CHUNK);
+  u8 *tmp = arr ? (u8 *)fm_alloc(CHUNK) : NULL;
+  u64 done = 0;
+  while (tmp) {
+    if (cancel && *cancel) { err = FM_ERR_CANCEL; break; }
+    jint n = (*e)->CallStaticIntMethod(e, jx.cls, jx.read, c, arr);
+    if (jn_clear(e)) n = -1;
+    if (n == 0) break;
+    if (n < 0) {
+      jn_str(e, (jstring)(*e)->GetObjectField(e, c, jx.error), out->error, sizeof out->error);
+      err = FM_ERR_IO;
+      break;
+    }
+    (*e)->GetByteArrayRegion(e, arr, 0, n, (jbyte *)tmp);
+    if (!body_put(b, tmp, (size_t)n)) {
+      if (cancel && *cancel) err = FM_ERR_CANCEL;
+      else {
+        fm_strlcpy(out->error, b->over ? "response too large" : "write failed", sizeof out->error);
+        err = b->over ? FM_ERR_FULL : FM_ERR_IO;
+      }
+      break;
+    }
+    done += (u64)n;
+    if (cb && !cb(user, done, out->length > 0 ? (u64)out->length : 0)) { err = FM_ERR_CANCEL; break; }
+  }
+  if (!tmp) err = FM_ERR_NOMEM;
+  fm_free(tmp);
+  (*e)->CallStaticVoidMethod(e, jx.cls, jx.close, c);
+  jn_clear(e);
+  (*e)->PopLocalFrame(e, NULL);
+  return err;
+}
+
+#define REQUEST jn_request
 
 /* ============================================================================ */
 #else
