@@ -21,14 +21,22 @@
 **     resolve to a network URL the player streams at once (Media Foundation
 **     and FFmpeg read http(s); measured: archive.org opens in ~5 s, seeks).
 **   - Sites that do not (YouTube, Dailymotion, "any site") resolve through
-**     yt-dlp, which downloads into the cache first and returns local files.
-**     Findings that shaped this (2026-10-08, this PC):
+**     yt-dlp. Since the streaming work (2026-10-08 night) one `yt-dlp -J`
+**     lists the formats and resolve returns their URLs (local = false), so
+**     playback starts once the first frames decode; the same reply fills
+**     FmVsrcStream.q[] for the player's quality menu. Only when no format
+**     streams (HLS-only sites such as Dailymotion, formats needing request
+**     headers the decoders cannot send) or with FmVsrcConf.force_cache (the
+**     player's fallback after a stream failed) does yt-dlp download into
+**     the cache first and return local files, as it always did before.
+**     Older findings that shaped this (2026-10-08, this PC):
 **       * YouTube no longer serves one file with picture and sound for most
 **         videos; streams come as separate video-only and audio-only files,
 **         so FmVsrcStream has `audio` and the player opens them as a pair
 **         (vid_open_pair).
 **       * Streaming YouTube URLs through Media Foundation directly is
 **         throttled to uselessness; yt-dlp downloads 10 min of 360p in ~8 s.
+**         (Fixed since: the decoders now read URLs through FmNetStream.)
 **       * Windows Media Foundation does not decode YouTube's fragmented
 **         H.264 MP4 (DASH); VP9 WebM video + Opus WebM audio work. Without
 **         FFmpeg prefer webm; with FFmpeg anything goes.
@@ -71,6 +79,25 @@ typedef struct FmVsrcPage {
   char error[256];        /* human-readable reason when the call failed */
 } FmVsrcPage;
 
+/* One quality the item comes in (the player's quality menu). Built from the
+** same reply that resolved the stream, so listing costs nothing extra. */
+#define VSRC_QMAX 12            /* at most 11 picture sizes plus "Audio only" */
+#define VSRC_QURL 2048          /* longer stream URLs are left out (re-resolved on demand) */
+typedef struct FmVsrcQuality {
+  char label[16];         /* "1080p60", "720p", "Audio only" */
+  int height;             /* the smaller side of the picture ("res"); 0 = audio only */
+  int fps;                /* rounded; 0 = unknown or audio */
+  char codec[24];         /* "VP9", "H.264", "AV1", "Opus" ... (the picture's when both) */
+  int kbps;               /* approximate total bitrate (picture + sound), 0 = unknown */
+  i64 bytes;              /* approximate total size, 0 = unknown */
+  bool playable;          /* streams with the current decoders (url is set) */
+  bool cache_only;        /* plays, but only after a download into the cache (HLS, headers) */
+  bool needs_ffmpeg;      /* exists, but only the FFmpeg libraries decode it */
+  bool muxed;             /* url has picture and sound (no separate audio) */
+  bool audio_only;
+  char url[VSRC_QURL];    /* the stream; with !muxed the sound is FmVsrcStream.audio */
+} FmVsrcQuality;
+
 /* What the player opens: one source with picture and sound, or two (video +
 ** audio) that vid_open_pair() plays together. Network URLs or local files. */
 typedef struct FmVsrcStream {
@@ -79,6 +106,12 @@ typedef struct FmVsrcStream {
   bool local;             /* both are files (already downloaded to the cache) */
   int width, height;      /* 0 = unknown */
   double duration;
+  /* additive (streaming): request lines the site wants with the URLs, as
+  ** "Key: value\r\n" (yt-dlp's http_headers; "" = none needed) */
+  char headers[1024];
+  /* the qualities, best first; cur = the one video/audio play (-1 = none) */
+  int nq, cur;
+  FmVsrcQuality q[VSRC_QMAX];
 } FmVsrcStream;
 
 /* Progress for long steps (downloads into the cache): frac 0..1, or < 0 when
@@ -97,6 +130,10 @@ typedef struct FmVsrcConf {
   bool have_ffmpeg_libs;        /* the player has FFmpeg: any container/codec plays */
   char region[8];               /* "US", "" = any */
   bool safe_search;
+  /* additive (streaming) */
+  bool os_mp4;                  /* the system decoders play progressive MP4 (H.264/AAC) */
+  bool send_headers;            /* the player can send FmVsrcStream.headers with video URLs */
+  bool force_cache;             /* resolve downloads into the cache (streaming failed) */
 } FmVsrcConf;
 
 typedef struct FmVsrc {

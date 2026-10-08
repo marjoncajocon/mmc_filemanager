@@ -385,6 +385,213 @@ static void vt_dailymotion(void) {
   vsrc_page_free(&p);
 }
 
+/* trimmed from a real `yt-dlp -J` of aqz-KE-bpKQ (2026-10-08): 24 of its 47 formats,
+** URLs shortened; plus the progressive itag 18 most videos also have */
+static const char *kYtdlpFormats =
+    "{\"id\":\"aqz-KE-bpKQ\",\"title\":\"Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film\",\"dura"
+    "tion\":635,\"live_status\":\"not_live\",\"format_id\":\"302+251\",\"width\":1280,\"height\":720,\"formats\":[{\"form"
+    "at_id\":\"sb0\",\"format_note\":\"storyboard\",\"ext\":\"mhtml\",\"protocol\":\"mhtml\",\"vcodec\":\"none\",\"acodec\":\"n"
+    "one\",\"width\":320,\"height\":180,\"fps\":0.2015748031496063,\"url\":\"https://rr1---sn-x.googlevideo.com/vid"
+    "eoplayback?itag=sb0&expire=1\"},{\"format_id\":\"233\",\"format_note\":\"Default, low\",\"ext\":\"mp4\",\"protocol"
+    "\":\"m3u8_native\",\"vcodec\":\"none\",\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=233&exp"
+    "ire=1\"},{\"format_id\":\"139-drc\",\"format_note\":\"low, DRC\",\"ext\":\"m4a\",\"protocol\":\"https\",\"vcodec\":\"non"
+    "e\",\"acodec\":\"mp4a.40.5\",\"tbr\":48.8,\"filesize\":3871021,\"filesize_approx\":3870998,\"container\":\"m4a_das"
+    "h\",\"language_preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=139-drc&exp"
+    "ire=1\"},{\"format_id\":\"249\",\"format_note\":\"low\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcodec\":\"none\",\"acod"
+    "ec\":\"opus\",\"tbr\":49.6,\"filesize\":3931453,\"filesize_approx\":3931432,\"container\":\"webm_dash\",\"language"
+    "_preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=249&expire=1\"},{\"format"
+    "_id\":\"251-drc\",\"format_note\":\"medium, DRC\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcodec\":\"none\",\"acodec\":"
+    "\"opus\",\"tbr\":129.3,\"filesize\":10258925,\"filesize_approx\":10258880,\"container\":\"webm_dash\",\"language_"
+    "preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=251-drc&expire=1\"},{\"for"
+    "mat_id\":\"140\",\"format_note\":\"medium\",\"ext\":\"m4a\",\"protocol\":\"https\",\"vcodec\":\"none\",\"acodec\":\"mp4a.4"
+    "0.2\",\"tbr\":129.5,\"filesize\":10271496,\"filesize_approx\":10271468,\"container\":\"m4a_dash\",\"language_pre"
+    "ference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=140&expire=1\"},{\"format_id\""
+    ":\"251\",\"format_note\":\"medium\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcodec\":\"none\",\"acodec\":\"opus\",\"tbr\":"
+    "128.6,\"filesize\":10202210,\"filesize_approx\":10202162,\"container\":\"webm_dash\",\"language_preference\":-"
+    "1,\"http_headers\":{\"User-Agent\":\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+    " like Gecko) Chrome/148.0.0.0 Safari/537.36\",\"Accept\":\"text/html,application/xhtml+xml,application/x"
+    "ml;q=0.9,*/*;q=0.8\",\"Accept-Language\":\"en-us,en;q=0.5\",\"Sec-Fetch-Mode\":\"navigate\"},\"url\":\"https://r"
+    "r1---sn-x.googlevideo.com/videoplayback?itag=251&expire=1\"},{\"format_id\":\"628\",\"ext\":\"mp4\",\"protocol"
+    "\":\"m3u8_native\",\"vcodec\":\"vp09.00.51.08\",\"acodec\":\"none\",\"width\":3840,\"height\":2160,\"fps\":60.0,\"tbr\""
+    ":27987.1,\"dynamic_range\":\"SDR\",\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=628&expi"
+    "re=1\"},{\"format_id\":\"315\",\"format_note\":\"2160p60\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcodec\":\"vp9\",\"ac"
+    "odec\":\"none\",\"width\":3840,\"height\":2160,\"fps\":60,\"tbr\":17174.2,\"filesize\":1362269481,\"filesize_appro"
+    "x\":1362269472,\"container\":\"webm_dash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"https://"
+    "rr1---sn-x.googlevideo.com/videoplayback?itag=315&expire=1\"},{\"format_id\":\"401\",\"format_note\":\"2160p"
+    "60\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcodec\":\"av01.0.13M.08\",\"acodec\":\"none\",\"width\":3840,\"height\":21"
+    "60,\"fps\":60,\"tbr\":8981.8,\"filesize\":712445280,\"filesize_approx\":712445254,\"container\":\"mp4_dash\",\"dy"
+    "namic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?"
+    "itag=401&expire=1\"},{\"format_id\":\"299\",\"format_note\":\"1080p60\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcode"
+    "c\":\"avc1.64002A\",\"acodec\":\"none\",\"width\":1920,\"height\":1080,\"fps\":60,\"tbr\":3247.8,\"filesize\":2576196"
+    "53,\"filesize_approx\":257619597,\"container\":\"mp4_dash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1"
+    ",\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=299&expire=1\"},{\"format_id\":\"303\",\"for"
+    "mat_note\":\"1080p60\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcodec\":\"vp9\",\"acodec\":\"none\",\"width\":1920,\"hei"
+    "ght\":1080,\"fps\":60,\"tbr\":2127.3,\"filesize\":168736189,\"filesize_approx\":168736175,\"container\":\"webm_d"
+    "ash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videop"
+    "layback?itag=303&expire=1\"},{\"format_id\":\"399\",\"format_note\":\"1080p60\",\"ext\":\"mp4\",\"protocol\":\"https"
+    "\",\"vcodec\":\"av01.0.09M.08\",\"acodec\":\"none\",\"width\":1920,\"height\":1080,\"fps\":60,\"tbr\":1568.2,\"filesiz"
+    "e\":124386876,\"filesize_approx\":124386834,\"container\":\"mp4_dash\",\"dynamic_range\":\"SDR\",\"language_pref"
+    "erence\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=399&expire=1\"},{\"format_id\":"
+    "\"160\",\"format_note\":\"144p\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcodec\":\"avc1.4D400C\",\"acodec\":\"none\",\"wi"
+    "dth\":256,\"height\":144,\"fps\":30,\"tbr\":54.5,\"filesize\":4323893,\"filesize_approx\":4323853,\"container\":\""
+    "mp4_dash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/v"
+    "ideoplayback?itag=160&expire=1\"},{\"format_id\":\"278\",\"format_note\":\"144p\",\"ext\":\"webm\",\"protocol\":\"ht"
+    "tps\",\"vcodec\":\"vp9\",\"acodec\":\"none\",\"width\":256,\"height\":144,\"fps\":30,\"tbr\":66.7,\"filesize\":5289812,"
+    "\"filesize_approx\":5289742,\"container\":\"webm_dash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1,\"ur"
+    "l\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=278&expire=1\"},{\"format_id\":\"134\",\"format_"
+    "note\":\"360p\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcodec\":\"avc1.4D401E\",\"acodec\":\"none\",\"width\":640,\"heig"
+    "ht\":360,\"fps\":30,\"tbr\":230.6,\"filesize\":18294110,\"filesize_approx\":18294061,\"container\":\"mp4_dash\",\""
+    "dynamic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplaybac"
+    "k?itag=134&expire=1\"},{\"format_id\":\"243\",\"format_note\":\"360p\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcode"
+    "c\":\"vp9\",\"acodec\":\"none\",\"width\":640,\"height\":360,\"fps\":30,\"tbr\":303.9,\"filesize\":24109536,\"filesize"
+    "_approx\":24109462,\"container\":\"webm_dash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"http"
+    "s://rr1---sn-x.googlevideo.com/videoplayback?itag=243&expire=1\"},{\"format_id\":\"396\",\"format_note\":\"3"
+    "60p\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcodec\":\"av01.0.01M.08\",\"acodec\":\"none\",\"width\":640,\"height\":36"
+    "0,\"fps\":30,\"tbr\":192.9,\"filesize\":15298808,\"filesize_approx\":15298751,\"container\":\"mp4_dash\",\"dynami"
+    "c_range\":\"SDR\",\"language_preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag"
+    "=396&expire=1\"},{\"format_id\":\"135\",\"format_note\":\"480p\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcodec\":\"avc"
+    "1.4D401F\",\"acodec\":\"none\",\"width\":854,\"height\":480,\"fps\":30,\"tbr\":355.6,\"filesize\":28207144,\"filesiz"
+    "e_approx\":28207093,\"container\":\"mp4_dash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"http"
+    "s://rr1---sn-x.googlevideo.com/videoplayback?itag=135&expire=1\"},{\"format_id\":\"244\",\"format_note\":\"4"
+    "80p\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcodec\":\"vp9\",\"acodec\":\"none\",\"width\":854,\"height\":480,\"fps\":3"
+    "0,\"tbr\":417.8,\"filesize\":33138062,\"filesize_approx\":33137988,\"container\":\"webm_dash\",\"dynamic_range\""
+    ":\"SDR\",\"language_preference\":-1,\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=244&exp"
+    "ire=1\"},{\"format_id\":\"298\",\"format_note\":\"720p60\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcodec\":\"avc1.4D40"
+    "20\",\"acodec\":\"none\",\"width\":1280,\"height\":720,\"fps\":60,\"tbr\":1897.7,\"filesize\":150524867,\"filesize_a"
+    "pprox\":150524845,\"container\":\"mp4_dash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"https:"
+    "//rr1---sn-x.googlevideo.com/videoplayback?itag=298&expire=1\"},{\"format_id\":\"302\",\"format_note\":\"720"
+    "p60\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcodec\":\"vp9\",\"acodec\":\"none\",\"width\":1280,\"height\":720,\"fps\":"
+    "60,\"tbr\":1420.5,\"filesize\":112676322,\"filesize_approx\":112676315,\"container\":\"webm_dash\",\"dynamic_ra"
+    "nge\":\"SDR\",\"language_preference\":-1,\"http_headers\":{\"User-Agent\":\"Mozilla/5.0 (Windows NT 10.0; Win6"
+    "4; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36\",\"Accept\":\"text/html,a"
+    "pplication/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\",\"Accept-Language\":\"en-us,en;q=0.5\",\"Sec-Fetch-"
+    "Mode\":\"navigate\"},\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=302&expire=1\"},{\"form"
+    "at_id\":\"398\",\"format_note\":\"720p60\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcodec\":\"av01.0.08M.08\",\"acodec\""
+    ":\"none\",\"width\":1280,\"height\":720,\"fps\":60,\"tbr\":898.7,\"filesize\":71283827,\"filesize_approx\":7128381"
+    "2,\"container\":\"mp4_dash\",\"dynamic_range\":\"SDR\",\"language_preference\":-1,\"url\":\"https://rr1---sn-x.go"
+    "oglevideo.com/videoplayback?itag=398&expire=1\"},{\"format_id\":\"312\",\"ext\":\"mp4\",\"protocol\":\"m3u8_nati"
+    "ve\",\"vcodec\":\"avc1.64002A\",\"acodec\":\"none\",\"width\":1920,\"height\":1080,\"fps\":60.0,\"tbr\":7417.7,\"dynam"
+    "ic_range\":\"SDR\",\"url\":\"https://rr1---sn-x.googlevideo.com/videoplayback?itag=312&expire=1\"},{\"format"
+    "_id\":\"18\",\"format_note\":\"360p\",\"ext\":\"mp4\",\"protocol\":\"https\",\"vcodec\":\"avc1.42001E\",\"acodec\":\"mp4a."
+    "40.2\",\"width\":640,\"height\":360,\"fps\":30,\"tbr\":396.3,\"filesize_approx\":31469000,\"url\":\"https://rr1---"
+    "sn-x.googlevideo.com/videoplayback?itag=18&expire=1\"}],\"requested_formats\":[{\"format_id\":\"302\",\"ext\""
+    ":\"webm\",\"protocol\":\"https\",\"vcodec\":\"vp9\"},{\"format_id\":\"251\",\"ext\":\"webm\",\"protocol\":\"https\",\"vcode"
+    "c\":\"none\",\"acodec\":\"opus\"}]}";
+
+/* ---- streaming: format choice and the quality list (vsrc_ytdlp_pick_stream) ---------- */
+
+static const char *kDmHlsOnly =
+    "{\"id\":\"xhfpjn\",\"duration\":944,\"formats\":[{\"format_id\":\"hls-380\",\"ext\":\"mp4\","
+    "\"protocol\":\"m3u8_native\",\"vcodec\":\"avc1.64000d\",\"acodec\":\"mp4a.40.2\",\"width\":320,"
+    "\"height\":240,\"tbr\":460.56,\"url\":\"https://www.dailymotion.com/cdn/manifest/video/xhfpjn.m3u8\"}]}";
+
+static const char *kNeedsReferer =
+    "{\"duration\":60,\"formats\":[{\"format_id\":\"hd\",\"ext\":\"mp4\",\"protocol\":\"https\","
+    "\"vcodec\":\"avc1.4d401f\",\"acodec\":\"mp4a.40.2\",\"width\":1280,\"height\":720,\"tbr\":2000,"
+    "\"url\":\"https://cdn.example.com/v.mp4\",\"http_headers\":{\"User-Agent\":\"Mozilla/5.0\","
+    "\"Referer\":\"https://example.com/watch/1\"}}]}";
+
+static int q_find(const FmVsrcStream *st, const char *label) {
+  for (int i = 0; i < st->nq; i++)
+    if (!strcmp(st->q[i].label, label)) return i;
+  return -1;
+}
+
+static bool url_itag(const char *url, const char *itag) {
+  const char *p = strstr(url, "itag=");
+  size_t n = strlen(itag);
+  return p && !strncmp(p + 5, itag, n) && p[5 + n] == '&';
+}
+
+static void vt_pick_stream(void) {
+  FmVsrcConf c;
+  memset(&c, 0, sizeof c);
+  FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+  size_t n = strlen(kYtdlpFormats);
+
+  /* no FFmpeg, Windows-like (Media Foundation): VP9 + Opus streams */
+  c.os_mp4 = true;
+  c.max_height = 720;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kYtdlpFormats, n, &c, st) == FM_OK);
+  TEST_CHECK(!st->local && st->nq == 7 && st->cur == q_find(st, "720p60"));
+  TEST_CHECK(url_itag(st->video, "302") && url_itag(st->audio, "251"));       /* 251: Opus, not the DRC copy */
+  TEST_CHECK(st->width == 1280 && st->height == 720 && st->duration == 635);
+  TEST_CHECK(strstr(st->headers, "User-Agent: ") && strstr(st->headers, "\r\n"));
+  static const char *const kOrder[] = { "2160p60", "1080p60", "720p60", "480p", "360p", "144p", "Audio only" };
+  for (int i = 0; i < FM_COUNT(kOrder) && i < st->nq; i++) {
+    const FmVsrcQuality *q = &st->q[i];
+    TEST_CHECK(!strcmp(q->label, kOrder[i]));
+    TEST_CHECK(q->playable && q->url[0] && !q->needs_ffmpeg && !q->cache_only);
+  }
+  int k = q_find(st, "360p");
+  TEST_CHECK(k >= 0 && url_itag(st->q[k].url, "243") && !st->q[k].muxed && !strcmp(st->q[k].codec, "VP9"));
+  TEST_CHECK(k >= 0 && st->q[k].height == 360 && st->q[k].fps == 30);
+  k = q_find(st, "2160p60");
+  TEST_CHECK(k >= 0 && st->q[k].height == 2160 && st->q[k].fps == 60 && st->q[k].kbps > 17000 &&
+             st->q[k].bytes > 1362269481LL);
+  k = q_find(st, "Audio only");
+  TEST_CHECK(k == st->nq - 1 && st->q[k].audio_only && st->q[k].height == 0 && !strcmp(st->q[k].codec, "Opus") &&
+             url_itag(st->q[k].url, "251"));
+
+  /* the size setting: the biggest within it, else the smallest */
+  c.max_height = 360;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kYtdlpFormats, n, &c, st) == FM_OK && st->cur == q_find(st, "360p") &&
+             url_itag(st->video, "243"));
+  c.max_height = 1080;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kYtdlpFormats, n, &c, st) == FM_OK && url_itag(st->video, "303"));
+  c.max_height = 2160;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kYtdlpFormats, n, &c, st) == FM_OK && url_itag(st->video, "315"));
+  c.max_height = 144;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kYtdlpFormats, n, &c, st) == FM_OK && url_itag(st->video, "278"));
+
+  /* FFmpeg: H.264 + AAC first; the progressive 360p (itag 18) has both */
+  c.have_ffmpeg_libs = true;
+  c.max_height = 1080;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kYtdlpFormats, n, &c, st) == FM_OK && url_itag(st->video, "299") &&
+             url_itag(st->audio, "140"));
+  k = q_find(st, "360p");
+  TEST_CHECK(k >= 0 && st->q[k].muxed && url_itag(st->q[k].url, "18") && !strcmp(st->q[k].codec, "H.264"));
+  c.max_height = 360;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kYtdlpFormats, n, &c, st) == FM_OK && url_itag(st->video, "18") &&
+             !st->audio[0]);
+  k = q_find(st, "Audio only");
+  TEST_CHECK(k >= 0 && !strcmp(st->q[k].codec, "AAC"));
+
+  /* Dailymotion: HLS only, so nothing streams; the cache plays it */
+  c.have_ffmpeg_libs = false;
+  c.max_height = 720;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kDmHlsOnly, strlen(kDmHlsOnly), &c, st) == FM_ERR_UNSUPPORTED);
+  TEST_CHECK(st->nq == 1 && st->cur == -1 && !strcmp(st->q[0].label, "240p") && st->q[0].cache_only &&
+             !st->q[0].playable && !st->q[0].url[0] && st->q[0].muxed);
+  c.os_mp4 = false;                        /* no system H.264: the built-in decoder is VP9 only */
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kDmHlsOnly, strlen(kDmHlsOnly), &c, st) == FM_ERR_UNSUPPORTED);
+  TEST_CHECK(st->nq == 1 && st->q[0].needs_ffmpeg && !st->q[0].cache_only);
+  /* ... and without MP4 support YouTube still streams VP9 */
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kYtdlpFormats, n, &c, st) == FM_OK && url_itag(st->video, "302"));
+
+  /* a site that checks the Referer: through the cache until the player can send headers */
+  c.have_ffmpeg_libs = true;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kNeedsReferer, strlen(kNeedsReferer), &c, st) == FM_ERR_UNSUPPORTED);
+  TEST_CHECK(st->nq == 1 && st->q[0].cache_only && st->q[0].muxed);
+  c.send_headers = true;
+  TEST_CHECK(vsrc_ytdlp_pick_stream(kNeedsReferer, strlen(kNeedsReferer), &c, st) == FM_OK);
+  TEST_CHECK(!strcmp(st->video, "https://cdn.example.com/v.mp4") && !st->audio[0] &&
+             strstr(st->headers, "Referer: https://example.com/watch/1\r\n"));
+
+  /* garbage */
+  static const char *const kBad[] = { "", "{", "[]", "null", "{\"formats\":7}", "{\"formats\":[1,\"x\",{}]}" };
+  for (int i = 0; i < FM_COUNT(kBad); i++) {
+    FmErr e = vsrc_ytdlp_pick_stream(kBad[i], strlen(kBad[i]), &c, st);
+    TEST_CHECK(e != FM_OK && st->nq == 0 && st->cur == -1);
+  }
+  /* every prefix of a real reply: no crash, never a stream from a cut reply */
+  for (size_t cut = 0; cut < n; cut += 97) {
+    FmErr e = vsrc_ytdlp_pick_stream(kYtdlpFormats, cut, &c, st);
+    TEST_CHECK(e != FM_OK);
+  }
+  fm_free(st);
+}
+
 static void vt_ytdlp_parse(void) {
   FmVsrcPage p;
   memset(&p, 0, sizeof p);
@@ -784,7 +991,8 @@ static void vt_ytdlp_live(const char *tmp) {
   TEST_CHECK(p.count == 1 && strstr(p.items[0].title, "zoo"));
   vsrc_page_free(&p);
 
-  /* resolve a 19 s video, play the pair, resolve again from the cache */
+  /* resolve a 19 s video: stream URLs and the quality list; play the pair
+  ** streaming; then the cache fallback, and again from the cache */
   FmVsrcItem it;
   memset(&it, 0, sizeof it);
   fm_strlcpy(it.id, "jNQXAC9IVRw", sizeof it.id);
@@ -794,8 +1002,21 @@ static void vt_ytdlp_live(const char *tmp) {
   memset(&pg, 0, sizeof pg);
   u64 t0 = plat_now_ms();
   FmErr e = g_vsrc_youtube.resolve(&c, &it, st, on_prog, &pg, err, sizeof err, NULL);
-  printf("  youtube resolve: %s (%d ms, %d progress calls, last \"%s\")%s%s\n", fm_err_str(e),
+  printf("  youtube resolve (stream): %s (%d ms, %d progress calls, last \"%s\")%s%s\n", fm_err_str(e),
          (int)(plat_now_ms() - t0), pg.calls, pg.status, e ? " -- " : "", e ? err : "");
+  TEST_CHECK(e == FM_OK && !st->local && st->nq > 0 && st->cur >= 0 && !strncmp(st->video, "https://", 8));
+  if (e == FM_OK) {
+    for (int i = 0; i < st->nq; i++)
+      printf("    %c %-10s %-6s %5d kb/s %s%s%s\n", i == st->cur ? '*' : ' ', st->q[i].label, st->q[i].codec,
+             st->q[i].kbps, st->q[i].playable ? "stream" : st->q[i].cache_only ? "cache" : "-",
+             st->q[i].needs_ffmpeg ? " needs FFmpeg" : "", st->q[i].muxed ? " muxed" : "");
+    TEST_CHECK(report_play("youtube stream pair", st->video, st->audio[0] ? st->audio : NULL));
+  }
+  c.force_cache = true;
+  t0 = plat_now_ms();
+  e = g_vsrc_youtube.resolve(&c, &it, st, on_prog, &pg, err, sizeof err, NULL);
+  printf("  youtube resolve (cache): %s (%d ms)%s%s\n", fm_err_str(e), (int)(plat_now_ms() - t0), e ? " -- " : "",
+         e ? err : "");
   TEST_CHECK(e == FM_OK && st->local);
   if (e == FM_OK) {
     printf("    video %s\n    audio %s\n", fm_path_base(st->video),
@@ -820,6 +1041,7 @@ static void vt_ytdlp_live(const char *tmp) {
          (int)(plat_now_ms() - t0));
   TEST_CHECK(e == FM_ERR_CANCEL);
   TEST_CHECK(count_prefix(c.cache_dir, "youtube-z01gL_ahiOQ") == 0);
+  c.force_cache = false;
 
   /* Dailymotion: HLS through yt-dlp */
   memset(&it, 0, sizeof it);
@@ -828,9 +1050,9 @@ static void vt_ytdlp_live(const char *tmp) {
   fm_strlcpy(it.page, "https://www.dailymotion.com/video/x9i92l8", sizeof it.page);
   t0 = plat_now_ms();
   e = g_vsrc_dailymotion.resolve(&c, &it, st, NULL, NULL, err, sizeof err, NULL);
-  printf("  dailymotion resolve: %s (%d ms) %s\n", fm_err_str(e), (int)(plat_now_ms() - t0),
-         e == FM_OK ? fm_path_base(st->video) : err);
-  TEST_CHECK(e == FM_OK);
+  printf("  dailymotion resolve (HLS only: the cache): %s (%d ms) %s, %d qualities\n", fm_err_str(e),
+         (int)(plat_now_ms() - t0), e == FM_OK ? fm_path_base(st->video) : err, st->nq);
+  TEST_CHECK(e == FM_OK && st->local);
   if (e == FM_OK) TEST_CHECK(report_play("dailymotion play", st->video, st->audio));
 
   /* download, non-ASCII title: without ffmpeg (two files), then merged */
@@ -882,8 +1104,38 @@ static void vt_install(void) {
   printf("  found again: %s\n", found);
 }
 
+/* MMCFM_STREAM_PROBE=<video url>|<audio url>: how long each half takes to
+** open and to give its first frame / sound (MMCFM_VIDEO_BACKEND picks one). */
+static void vt_stream_probe(void) {
+  const char *spec = getenv("MMCFM_STREAM_PROBE");
+  if (!spec || !strchr(spec, '|')) return;
+  static char u[2][4096];
+  fm_strlcpy(u[0], spec, FM_MIN(sizeof u[0], (size_t)(strchr(spec, '|') - spec) + 1));
+  fm_strlcpy(u[1], strchr(spec, '|') + 1, sizeof u[1]);
+  for (int i = 0; i < 2; i++) {
+    if (!u[i][0]) continue;
+    u64 t0 = plat_now_ms();
+    FmErr err;
+    FmVid *v = vid_open(u[i], i == 0 ? VID_OPEN_NO_AUDIO : VID_OPEN_AUDIO_ONLY, &err);
+    u64 t1 = plat_now_ms();
+    if (!v) { printf("  probe %s: open failed (%s) after %d ms\n", i ? "audio" : "video", fm_err_str(err), (int)(t1 - t0)); continue; }
+    FmVidFrame vf;
+    FmVidPcm pc;
+    int ev = 0, n = 0;
+    while (n++ < 400 && (ev = vid_decode(v, &vf, &pc)) > 0 && ev != (i == 0 ? VID_EV_VIDEO : VID_EV_AUDIO)) {}
+    u64 t2 = plat_now_ms();
+    bool sk = vid_seek(v, vid_info(v)->duration * 0.5);
+    while (sk && n++ < 2000 && (ev = vid_decode(v, &vf, &pc)) > 0 && ev != (i == 0 ? VID_EV_VIDEO : VID_EV_AUDIO)) {}
+    u64 t3 = plat_now_ms();
+    printf("  probe %s: %s open %d ms, first %s %d ms, seek+first %d ms (ev %d)\n", i ? "audio" : "video",
+           vid_info(v)->backend, (int)(t1 - t0), i ? "sound" : "frame", (int)(t2 - t1), (int)(t3 - t2), ev);
+    vid_close(v);
+  }
+}
+
 int test_vsrc(const char *tmp) {
   int before = g_test_fail;
+  vt_stream_probe();
   vt_registry();
   vt_page();
   vt_text(tmp);
@@ -893,6 +1145,7 @@ int test_vsrc(const char *tmp) {
   vt_peertube();
   vt_dailymotion();
   vt_ytdlp_parse();
+  vt_pick_stream();
   vt_garbage();
   vt_cache(tmp);
   vt_save(tmp);

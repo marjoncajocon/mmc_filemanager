@@ -264,6 +264,34 @@ VENDOR_SRCS="
   vendor/lzma/XzCrc64Opt.c vendor/lzma/XzDec.c vendor/lzma/XzEnc.c vendor/lzma/XzIn.c
 "
 VENDOR_SRCS="$VENDOR_SRCS $(ls vendor/zstd/common/*.c vendor/zstd/compress/*.c vendor/zstd/decompress/*.c | tr '\n' ' ')"
+# Built-in video (src/fdec_vid_soft.c): WebM demuxer, VP9 decoder (libvpx,
+# generic C) and Opus decoder (libopus, float); see vendor/PATCHES.md.
+VENDOR_SRCS="$VENDOR_SRCS vendor/nestegg/nestegg.c
+  vendor/libvpx/vpx_config.c
+  vendor/libvpx/vp9/common/vp9_alloccommon.c vendor/libvpx/vp9/common/vp9_blockd.c
+  vendor/libvpx/vp9/common/vp9_common_data.c vendor/libvpx/vp9/common/vp9_entropy.c
+  vendor/libvpx/vp9/common/vp9_entropymode.c vendor/libvpx/vp9/common/vp9_entropymv.c
+  vendor/libvpx/vp9/common/vp9_filter.c vendor/libvpx/vp9/common/vp9_frame_buffers.c
+  vendor/libvpx/vp9/common/vp9_idct.c vendor/libvpx/vp9/common/vp9_loopfilter.c
+  vendor/libvpx/vp9/common/vp9_mvref_common.c vendor/libvpx/vp9/common/vp9_pred_common.c
+  vendor/libvpx/vp9/common/vp9_quant_common.c vendor/libvpx/vp9/common/vp9_reconinter.c
+  vendor/libvpx/vp9/common/vp9_reconintra.c vendor/libvpx/vp9/common/vp9_rtcd.c
+  vendor/libvpx/vp9/common/vp9_scale.c vendor/libvpx/vp9/common/vp9_scan.c
+  vendor/libvpx/vp9/common/vp9_seg_common.c vendor/libvpx/vp9/common/vp9_thread_common.c
+  vendor/libvpx/vp9/common/vp9_tile_common.c
+  vendor/libvpx/vp9/decoder/vp9_decodeframe.c vendor/libvpx/vp9/decoder/vp9_decodemv.c
+  vendor/libvpx/vp9/decoder/vp9_decoder.c vendor/libvpx/vp9/decoder/vp9_detokenize.c
+  vendor/libvpx/vp9/decoder/vp9_dsubexp.c vendor/libvpx/vp9/decoder/vp9_job_queue.c
+  vendor/libvpx/vp9/vp9_dx_iface.c vendor/libvpx/vp9/vp9_iface_common.c
+  vendor/libvpx/vpx/src/vpx_codec.c vendor/libvpx/vpx/src/vpx_decoder.c vendor/libvpx/vpx/src/vpx_image.c
+  vendor/libvpx/vpx_dsp/bitreader.c vendor/libvpx/vpx_dsp/bitreader_buffer.c vendor/libvpx/vpx_dsp/intrapred.c
+  vendor/libvpx/vpx_dsp/inv_txfm.c vendor/libvpx/vpx_dsp/loopfilter.c vendor/libvpx/vpx_dsp/prob.c
+  vendor/libvpx/vpx_dsp/vpx_convolve.c vendor/libvpx/vpx_dsp/vpx_dsp_rtcd.c vendor/libvpx/vpx_mem/vpx_mem.c
+  vendor/libvpx/vpx_scale/generic/gen_scalers.c vendor/libvpx/vpx_scale/generic/vpx_scale.c
+  vendor/libvpx/vpx_scale/generic/yv12config.c vendor/libvpx/vpx_scale/generic/yv12extend.c
+  vendor/libvpx/vpx_scale/vpx_scale_rtcd.c vendor/libvpx/vpx_util/vpx_thread.c
+"
+VENDOR_SRCS="$VENDOR_SRCS $(ls vendor/opus/celt/*.c vendor/opus/silk/*.c vendor/opus/src/*.c | tr '\n' ' ')"
 
 SRCS="$(ls src/*.c | tr '\n' ' ')"
 
@@ -304,6 +332,9 @@ gen_assets() {
 COMMON_DEFS="-DFM_VERSION=\"$APP_VERSION\" -DZSTD_DISABLE_ASM -DZ7_ST"
 WARN="-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare"
 INC="-Isrc -I$GEN -Ivendor -Ivendor/SDL2-include -Ivendor/lzma -Ivendor/zstd -Ivendor/bzip2 -Ivendor/miniz"
+# built-in video: nestegg, libvpx (its generated config headers sit at its root), libopus
+INC="$INC -Ivendor/nestegg -Ivendor/libvpx -Ivendor/opus/include -Ivendor/opus/celt -Ivendor/opus/silk"
+COMMON_DEFS="$COMMON_DEFS -DOPUS_BUILD -DUSE_ALLOCA -DHAVE_LRINTF -DNO_ASSERTS"
 [ "$USE_ASM" = 1 ] || COMMON_DEFS="$COMMON_DEFS -DFM_NO_ASM"
 
 case "$MODE" in
@@ -395,7 +426,7 @@ case "$TARGET" in
     [ "$CMD" = sdl ] && { echo "web uses emscripten's SDL2 port; nothing to build"; exit 0; }
     CC="$EMCC"
     CFLAGS="-std=c11 $OPT $WARN -sUSE_SDL=2 -DFM_NO_ASM"
-    VCFLAGS="-std=c11 $OPT -w -sUSE_SDL=2 -D_POSIX_C_SOURCE=200809L"   # bzip2 uses fdopen
+    VCFLAGS="-std=c11 $OPT -w -sUSE_SDL=2 -D_POSIX_C_SOURCE=200809L -DHAVE_ALLOCA_H"   # bzip2 uses fdopen; opus alloca
     SDL_LINK="static"
     LDFLAGS="-sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=33554432 -lidbfs.js --shell-file web/index.html"
     OUT="$OUTDIR/index.html"

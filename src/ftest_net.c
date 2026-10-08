@@ -8,6 +8,8 @@
 #include "fjson.h"
 #include "fnet.h"
 #include "fproc.h"
+#include "fnetstream.h"
+#include "fsdl.h"
 #include "fplat.h"
 
 static void test_json(void) {
@@ -143,8 +145,52 @@ static void test_https(const char *tmp) {
   TEST_CHECK(net_get("https://www.googleapis.com/", NULL, 0, &r, &cancel) == FM_ERR_CANCEL);
 }
 
+/* MMCFM_NS_TEST=<url>|<outfile>|<pause ms>|<seek>: reads a stream through
+** FmNetStream (pausing after 1 MB, optionally seeking to the end and back like
+** demuxers do) and writes what it got, to compare with a plain download. */
+static void test_ns_dump(void) {
+  const char *spec = getenv("MMCFM_NS_TEST");
+  if (!spec) return;
+  char url[4096], out[FM_PATH_MAX];
+  const char *b1 = strchr(spec, '|');
+  if (!b1) return;
+  fm_strlcpy(url, spec, FM_MIN(sizeof url, (size_t)(b1 - spec) + 1));
+  const char *b2 = strchr(b1 + 1, '|');
+  fm_strlcpy(out, b1 + 1, FM_MIN(sizeof out, (size_t)((b2 ? b2 : b1 + 1 + strlen(b1 + 1)) - (b1 + 1)) + 1));
+  int pause = b2 ? atoi(b2 + 1) : 0;
+  const char *b3 = b2 ? strchr(b2 + 1, '|') : NULL;
+  int seekprobe = b3 ? atoi(b3 + 1) : 0;
+  char err[160];
+  FmNetStream *ns = ns_open(url, NULL, err, sizeof err);
+  if (!ns) { printf("  ns: open failed: %s\n", err); return; }
+  FILE *f = fm_fopen(out, "wb");
+  static u8 buf[65536];
+  i64 total = 0;
+  size_t n;
+  bool paused = false;
+  while ((n = ns_read(ns, buf, sizeof buf)) > 0) {
+    fwrite(buf, 1, n, f);
+    total += (i64)n;
+    if (!paused && total >= (1 << 20)) {
+      paused = true;
+      if (seekprobe) {                  /* like a demuxer: peek at the end, come back */
+        i64 here = ns_tell(ns);
+        ns_seek(ns, ns_size(ns) - 4096);
+        ns_read(ns, buf, 4096);
+        ns_seek(ns, here);
+      }
+      if (pause > 0) SDL_Delay((Uint32)pause);
+    }
+  }
+  fclose(f);
+  printf("  ns: %lld bytes (size %lld), seekprobe %d, pause %d ms\n", (long long)total, (long long)ns_size(ns), seekprobe,
+         pause);
+  ns_close(ns);
+}
+
 int test_net(const char *tmp) {
   int before = g_test_fail;
+  test_ns_dump();
   test_json();
   test_url();
   test_proc();

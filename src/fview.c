@@ -61,26 +61,37 @@ const FmViewer *view_for(FmType t, const char *path) {
 
 /* ---- timers ------------------------------------------------------------------ */
 
-static SDL_atomic_t g_wake_pending;
+/* One pending wake-up for all viewers, the earliest asked for. A sooner
+** request cancels the pending timer instead of adding a second one, and
+** each timer carries a generation so a stale one cannot clear the flag of
+** its replacement (that let periodic callers build parallel timer chains:
+** a 60 Hz wake-up storm while two of them were active). Called on the main
+** thread; the callback runs on SDL's timer thread. */
+static SDL_atomic_t g_wake_gen;      /* generation of the live timer, 0 = none */
+static SDL_TimerID g_wake_id;
 static u64 g_wake_at;
+static int g_wake_next = 1;
 
 static Uint32 wake_cb(Uint32 interval, void *param) {
   FM_UNUSED(interval);
-  FM_UNUSED(param);
-  SDL_AtomicSet(&g_wake_pending, 0);
+  int gen = (int)(intptr_t)param;
+  SDL_AtomicCAS(&g_wake_gen, gen, 0);  /* only the current timer clears it */
   app_wake();
   return 0;
 }
 
 void view_wake_in(u32 ms) {
-  u64 now = SDL_GetTicks64();
-  u64 at = now + ms;
-  /* one timer at a time: keep the earliest */
-  if (SDL_AtomicGet(&g_wake_pending) && g_wake_at <= at) return;
-  if (SDL_AddTimer(ms ? ms : 1, wake_cb, NULL)) {
-    SDL_AtomicSet(&g_wake_pending, 1);
-    g_wake_at = at;
+  u64 at = SDL_GetTicks64() + ms;
+  if (SDL_AtomicGet(&g_wake_gen)) {
+    if (g_wake_at <= at) return;         /* the pending one comes first anyway */
+    SDL_RemoveTimer(g_wake_id);          /* replaced by a sooner one */
   }
+  int gen = g_wake_next++;
+  if (g_wake_next <= 0) g_wake_next = 1;
+  SDL_AtomicSet(&g_wake_gen, gen);
+  g_wake_id = SDL_AddTimer(ms ? ms : 1, wake_cb, (void *)(intptr_t)gen);
+  if (!g_wake_id) SDL_AtomicSet(&g_wake_gen, 0);
+  g_wake_at = at;
 }
 
 /* ---- chrome --------------------------------------------------------------------- */

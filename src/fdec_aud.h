@@ -20,7 +20,21 @@
 
 typedef struct FmAudio FmAudio;
 
+/* path may be an http(s) URL: an HTTP stream reader (fnet) feeds the
+** decoder; seeking re-requests at a byte offset when the server allows it,
+** live streams (radio) cannot seek. MP3 streams decode built in; others need
+** FFmpeg. */
 FmAudio *aud_open(const char *path, FmErr *err);
+/* Same, with extra request header lines ("Key: value" + CRLF each). */
+FmAudio *aud_open_ex(const char *path, const char *headers, FmErr *err);
+/* Same again; on failure msg gets the reason in words when there is one
+** ("The server answered 404", "Not an audio stream ..."), else "". */
+FmAudio *aud_open_msg(const char *path, const char *headers, FmErr *err, char *msg, size_t cap);
+/* Live radio: the station's current "Artist - Title" (ICY metadata), "" when
+** unknown. Changes while playing; copy it out. Thread-safe. */
+void aud_now_playing(const FmAudio *a, char *out, size_t cap);
+/* An endless stream (no length, no seeking). */
+bool aud_is_live(const FmAudio *a);
 int  aud_channels(const FmAudio *a);       /* 1 or 2 */
 int  aud_rate(const FmAudio *a);
 u64  aud_length(const FmAudio *a);         /* frames, 0 when unknown */

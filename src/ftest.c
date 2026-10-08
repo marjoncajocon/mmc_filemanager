@@ -99,6 +99,7 @@ static const TestArea kAreas[] = {
   { "7z-rar", test_archives2 },
   { "fs", test_fs },
   { "media", test_media },
+  { "soft-video", test_soft },
   { "themes", test_themes },
   { "net", test_net },
   { "viz", test_viz },
@@ -107,6 +108,8 @@ static const TestArea kAreas[] = {
   { "online-ui", test_online_ui },
   { "psrc", test_psrc },
   { "photo-ui", test_photo_ui },
+  { "asrc", test_asrc },
+  { "aonline-ui", test_aonline_ui },
 };
 
 int test_run_all(void) {

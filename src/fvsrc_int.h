@@ -74,7 +74,9 @@ void   vsrc_cache_trim(const char *cache_dir, u64 max_bytes, const char *keep);
 ** Page tokens are "y:<first item>". site picks thumbnail/page rules. */
 FmErr vsrc_ytdlp_search(const FmVsrcConf *c, const char *site, const char *search_key, const char *target,
                         const char *page_token, FmVsrcPage *out, volatile int *cancel);
-/* Downloads the playable stream(s) into the cache and returns local files. */
+/* One yt-dlp -J: stream URLs plus the quality list. When nothing streams
+** (or c->force_cache) the chosen formats download into the cache and local
+** files come back, the quality list still filled. */
 FmErr vsrc_ytdlp_resolve(const char *site, const FmVsrcConf *c, const FmVsrcItem *item, FmVsrcStream *out,
                          FmVsrcProgress cb, void *user, char *err, size_t errcap, volatile int *cancel);
 /* Download button: one merged file with ffmpeg, else one single-file format
@@ -89,6 +91,12 @@ FmErr vsrc_ytdlp_parse_search(const char *json, size_t len, const char *site, in
                               FmVsrcPage *out);
 /* "-f" selector for playback; prefer_single puts single-file formats first */
 const char *vsrc_ytdlp_selector(bool have_ffmpeg_libs, bool prefer_single);
+/* Streaming choice from a yt-dlp -J reply: fills out->q[] (always, when the
+** reply parses), and when a quality streams with the decoders c describes
+** also out->video/audio/headers/cur, at the largest size <= c->max_height.
+** FM_OK = streamable, FM_ERR_UNSUPPORTED = only through the cache,
+** FM_ERR_FORMAT = not a reply. */
+FmErr vsrc_ytdlp_pick_stream(const char *json, size_t len, const FmVsrcConf *c, FmVsrcStream *out);
 /* The "<site>-<id>-<height>" cache key; "web" adds a hash of the page URL. */
 void  vsrc_cache_key(const char *site, const FmVsrcItem *item, int height, char *out, size_t cap);
 

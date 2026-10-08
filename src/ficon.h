@@ -36,6 +36,8 @@ typedef enum FmIcon {
   IC_PLAY_BADGE, IC_LINK, IC_TV, IC_LANDMARK,
   /* online photos (fphoto) */
   IC_ALBUM, IC_ALBUM_ADD,
+  /* online audio (faudio_online) */
+  IC_RADIO, IC_PODCAST, IC_WAVEFORM, IC_RSS, IC_TRENDING, IC_MIC,
   IC_COUNT
 } FmIcon;
 

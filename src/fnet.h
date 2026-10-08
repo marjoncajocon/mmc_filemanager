@@ -18,6 +18,12 @@ typedef struct FmNetResp {
   size_t len;
   char type[96];       /* Content-Type */
   char error[160];     /* transport error text */
+  /* filled before the body arrives (net_get_stream's head callback sees them) */
+  i64 length;          /* Content-Length, -1 when unknown (live streams) */
+  i64 total;           /* whole resource from Content-Range "bytes a-b/TOTAL", 0 = not given */
+  bool ranges;         /* byte ranges accepted (Accept-Ranges: bytes, or a 206 reply) */
+  int icy_metaint;     /* SHOUTcast/Icecast metadata interval, 0 = none */
+  char icy_name[96];   /* station name from icy-name */
 } FmNetResp;
 
 /* progress(user, done, total(0 = unknown)); return false to cancel */
@@ -32,6 +38,15 @@ FmErr net_get(const char *url, const char *headers, size_t max_bytes, FmNetResp 
 FmErr net_download(const char *url, const char *headers, const char *path, FmNetProgress cb, void *user,
                    FmNetResp *out, volatile int *cancel);
 void  net_resp_free(FmNetResp *r);
+
+/* Streaming GET: `head` runs once the response headers are in (status,
+** length, ranges, icy fields), then `data` for every chunk as it arrives;
+** data returning false stops the transfer (FM_ERR_CANCEL). For readers that
+** play while downloading (fnetstream.c). */
+typedef void (*FmNetHead)(void *user, const FmNetResp *r);
+typedef bool (*FmNetData)(void *user, const u8 *p, size_t n);
+FmErr net_get_stream(const char *url, const char *headers, FmNetHead head, FmNetData data, void *user,
+                     FmNetResp *out, volatile int *cancel);
 
 /* Percent-encodes s for a query string (spaces become %20). */
 void  net_urlencode(const char *s, char *out, size_t cap);

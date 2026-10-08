@@ -30,5 +30,8 @@ int test_vsrc(const char *tmp);       /* ftest_vsrc.c: online video sources (MMC
 int test_online_ui(const char *tmp);  /* ftest_online.c: online videos view: formatting, recent searches */
 int test_psrc(const char *tmp);       /* ftest_psrc.c: online photo sources (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
 int test_photo_ui(const char *tmp);   /* ftest_photo.c: online photos view: rows, albums file, recent searches */
+int test_asrc(const char *tmp);       /* ftest_asrc.c: online audio sources, XML reader (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
+int test_aonline_ui(const char *tmp); /* ftest_aonline.c: online audio view: item lines, library file (MMCFM_AONLINE_PLAY) */
+int test_soft(const char *tmp);       /* ftest_soft.c: built-in VP9 + Opus WebM backend (MMCFM_SOFT_BENCH) */
 
 #endif

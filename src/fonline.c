@@ -402,7 +402,7 @@ static void play_item(const FmVsrc *s, const FmVsrcItem *it) {
   S.prep_src = s;
   S.prep_err[0] = 0;
   S.prep_frac = -1;
-  fm_strlcpy(S.prep_status, "Finding the video stream\xE2\x80\xA6", sizeof S.prep_status);
+  fm_strlcpy(S.prep_status, "Opening\xE2\x80\xA6", sizeof S.prep_status);
   if ((s->flags & VSRC_YTDLP) && !otools(false)->ytdlp) {
     prep_fail("Playing from this site needs yt-dlp, a free helper program. Get it with one click, or watch "
               "the video in your browser.");
@@ -422,7 +422,9 @@ static void take_prep(void) {
   if (!otask_done(t)) return;
   S.prep = NULL;
   if (t->err == FM_OK) {
-    if (video_open_stream(S.prep_item.title, t->stream.video, t->stream.audio[0] ? t->stream.audio : NULL)) {
+    /* streams and cache files alike: the player gets the quality list and
+    ** handles expired links and the cache fallback itself */
+    if (video_open_online(S.prep_src, &t->conf, &S.prep_item, &t->stream, t->t0)) {
       S.prep_open = false;
     } else {
       prep_fail("The player could not open the stream.");
@@ -1426,9 +1428,15 @@ static void draw_prep(void) {
     y += ls + DP(10);
     ui_progress(FM_RECT(c.x, y, cw, DP(6)), S.prep_frac);
     y += DP(14);
+    /* a stream opens in a few seconds; only sites without a stream this
+    ** app can read (HLS) download first, and then progress shows */
     if (slow)
       font_draw_wrap(FONT_REGULAR, ui.m.font_small, c.x, y, cw,
-                     "yt-dlp fetches the video into the cache first; this usually takes 5 to 15 seconds.", T.text3, true);
+                     S.prep_frac >= 0 ? "This site has no stream the player can read directly, so yt-dlp downloads "
+                                        "the video into the cache first."
+                                      : "yt-dlp is finding the stream; playback starts as soon as the first seconds "
+                                        "arrive.",
+                     T.text3, true);
     view_wake_in(1000);                 /* the seconds counter */
   }
   /* buttons */

@@ -526,6 +526,36 @@ void icon_draw(FmIcon ic, FmRect r, FmColor c) {
         L(10.5f, 10, 17.5f, 10);
       }
       break;
+    /* online audio */
+    case IC_RADIO:      /* a broadcast tower: a mast with waves either side */
+      DOT(12, 8.5f, 2.0f);
+      L(12, 11, 8.5f, 21); L(12, 11, 15.5f, 21); L(9.6f, 17.5f, 14.4f, 17.5f);
+      ARC(12, 8.5f, 4.6f, 140, 220); ARC(12, 8.5f, 4.6f, -40, 40);
+      ARC(12, 8.5f, 8.6f, 145, 215); ARC(12, 8.5f, 8.6f, -35, 35);
+      break;
+    case IC_PODCAST:    /* a microphone on the air */
+      FILL(9.6f, 4, 4.8f, 9, 2.4f);
+      ARC(12, 10, 5.5f, 15, 165);
+      L(12, 15.5f, 12, 20.5f);
+      ARC(12, 9, 9.5f, 140, 220); ARC(12, 9, 9.5f, -40, 40);
+      break;
+    case IC_WAVEFORM:   /* sound bars of different heights */
+      L(4, 10.5f, 4, 13.5f); L(8, 7, 8, 17); L(12, 3.5f, 12, 20.5f); L(16, 8, 16, 16); L(20, 10.5f, 20, 13.5f);
+      break;
+    case IC_RSS:        /* subscribe: a dot and two quarter rings */
+      DOT(6, 18, 2.1f);
+      ARC(5, 19, 7, -90, 0);
+      ARC(5, 19, 13, -90, 0);
+      break;
+    case IC_TRENDING:   /* a rising zig-zag with an arrow head */
+      POLY(false, 3, 17, 9, 11, 13, 15, 20.5f, 7.5f);
+      POLY(false, 15, 7.5f, 20.5f, 7.5f, 20.5f, 13);
+      break;
+    case IC_MIC:
+      RR(9, 3, 6, 11, 3);
+      ARC(12, 11, 6, 0, 180);
+      L(12, 17, 12, 21); L(9, 21, 15, 21);
+      break;
   }
 }
 

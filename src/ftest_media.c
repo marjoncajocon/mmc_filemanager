@@ -533,7 +533,7 @@ static void test_video_url(void) {
 static void test_video_pair(void) {
   const char *spec = getenv("MMCFM_PAIR_TEST");
   if (!spec || !strchr(spec, '|')) return;
-  char vpath[FM_PATH_MAX];
+  char vpath[4096];                      /* stream URLs run past FM_PATH_MAX */
   fm_strlcpy(vpath, spec, FM_MIN(sizeof vpath, (size_t)(strchr(spec, '|') - spec) + 1));
   const char *apath = strchr(spec, '|') + 1;
   FmErr err;
@@ -568,6 +568,55 @@ static void test_video_pair(void) {
   vid_close(v);
 }
 
+/* MMCFM_AUDIO_URL=<url>[|<url>...]: plays online audio through the HTTP
+** stream reader (radio and tracks): 3 s of sound, the ICY title for radio,
+** a seek for finite files. Off by default (needs the network). */
+static void test_audio_url_one(const char *url) {
+  u64 t0 = plat_now_ms();
+  FmErr err;
+  FmAudio *a = aud_open(url, &err);
+  TEST_CHECK(a != NULL);
+  if (!a) { printf("  audio url: cannot open %.60s (err %d)\n", url, (int)err); return; }
+  u64 t1 = plat_now_ms();
+  int rate = aud_rate(a), ch = aud_channels(a);
+  float buf[4096 * 2];
+  int total = 0, got;
+  double peak = 0;
+  while (total < rate * 3 && (got = aud_read(a, buf, 4096)) > 0) {
+    for (int i = 0; i < got * ch; i++) peak = FM_MAX(peak, fabs(buf[i]));
+    total += got;
+  }
+  u64 t2 = plat_now_ms();
+  char now[256];
+  aud_now_playing(a, now, sizeof now);
+  bool live = aud_is_live(a);
+  bool sk = true;
+  if (!live && aud_length(a) > (u64)rate * 20) {
+    sk = aud_seek(a, aud_length(a) / 2);
+    got = sk ? aud_read(a, buf, 4096) : 0;
+    sk = sk && got > 0 && aud_tell(a) > aud_length(a) / 3;
+  }
+  printf("  audio url: %s %dHz %dch %s len %.0fs, 3 s decoded (peak %.2f) open %dms read %dms, seek %s%s%s\n",
+         aud_codec(a), rate, ch, live ? "LIVE" : "file", (double)aud_length(a) / FM_MAX(rate, 1), peak,
+         (int)(t1 - t0), (int)(t2 - t1), live ? "n/a" : sk ? "ok" : "FAIL", now[0] ? ", now: " : "", now);
+  TEST_CHECK(total >= rate * 3 && peak > 0.001);
+  TEST_CHECK(sk);
+  aud_close(a);
+}
+
+static void test_audio_url(void) {
+  const char *spec = getenv("MMCFM_AUDIO_URL");
+  if (!spec || !*spec) return;
+  char one[2048];
+  while (*spec) {
+    size_t n = strcspn(spec, "|");
+    fm_strlcpy(one, spec, FM_MIN(n + 1, sizeof one));
+    test_audio_url_one(one);
+    spec += n;
+    if (*spec == '|') spec++;
+  }
+}
+
 int test_media(const char *tmp) {
   int before = g_test_fail;
   test_wav(tmp);
@@ -580,6 +629,7 @@ int test_media(const char *tmp) {
   test_video_samples();
   test_video_url();
   test_video_pair();
+  test_audio_url();
   test_text(tmp);
   return g_test_fail - before;
 }

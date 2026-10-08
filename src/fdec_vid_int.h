@@ -1,9 +1,11 @@
 /* fdec_vid_int.h -- the plug-in interface for OS video decoders.
 **
 ** fdec_vid.c tries, in order: pl_mpeg (MPEG-1), FFmpeg (when its libraries
-** are found), then the OS backend for this platform:
-**   - fdec_vid_mf.c:  Windows Media Foundation (Windows 7+, loaded at run time)
-**   - fdec_vid_amc.c: Android MediaCodec (libmediandk, loaded at run time)
+** are found), the OS backend for this platform, then the built-in one:
+**   - fdec_vid_mf.c:   Windows Media Foundation (Windows 7+, loaded at run time)
+**   - fdec_vid_amc.c:  Android MediaCodec (libmediandk, loaded at run time)
+**   - fdec_vid_soft.c: VP9 + Opus in WebM in portable C (every target)
+** MMCFM_VIDEO_BACKEND=soft|os|ffmpeg makes vid_open try only that one.
 **
 ** A backend fills FmVidInfo on open and then hands out exactly what the
 ** public API promises: video as YUV420P planes, audio as interleaved float
@@ -34,6 +36,13 @@ extern const FmVidBackend g_vid_mf;
 extern const FmVidBackend g_vid_amc;
 #  define FM_VID_OS_BACKEND g_vid_amc
 #endif
+
+/* Built in everywhere: nestegg + libvpx (VP9) + libopus. */
+extern const FmVidBackend g_vid_soft;
+
+/* For tests: "soft", "os", "ffmpeg" or NULL (default order, or the
+** MMCFM_VIDEO_BACKEND environment variable). */
+void vid_force_backend(const char *name);
 
 /* Shared helpers for backends (fdec_vid.c). */
 /* NV12 (interleaved UV) -> separate U and V planes. */

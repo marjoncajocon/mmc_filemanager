@@ -25,6 +25,20 @@
 **     plus an optional separate sound track opened with vid_open_pair; the
 **     title comes from the caller and the library heart and Share are left
 **     out, since there is no file of the user's to star or share.
+**   - Online videos (video_open_online) keep the adapter's quality list. A
+**     quality switch, a reconnect and the cache fallback all restart only
+**     the decoder worker at the current position: the window, the last
+**     picture (shown under a spinner until the new one decodes), pause,
+**     volume, visualizer and equalizer stay. Frames before the position are
+**     decoded but dropped, so playback resumes where it was rather than at
+**     the key frame before it.
+**   - A stream that fails (open error, decode error, or an end well before
+**     the duration) is re-resolved once, since stream links expire after a
+**     few hours; if that fails too, the adapter downloads into the cache.
+**   - Buffering: when the decoder starves while playing, the clock stops
+**     instead of running ahead and dropping every late frame, and a spinner
+**     says "Buffering". The seek bar shows how far ahead the stream reader
+**     (fnetstream) holds data.
 */
 #include "fview_int.h"
 #include "flib.h"
@@ -33,6 +47,9 @@
 #include "fdec_vid.h"
 #include "fviz.h"
 #include "feq.h"
+#include "fvsrc.h"
+#include "fnetstream.h"
+#include "fonline_int.h"
 
 #define QN 3
 #define AUDIO_AHEAD 1.0      /* seconds of decoded audio kept queued */
@@ -123,7 +140,66 @@ static struct {
   u64 lock_hint_until;     /* unlock button visible until then */
   bool viz_panel;          /* settings shown */
   FmEq eq;                 /* equalizer state (callback, under mx) */
+  /* streams */
+  int open_flags;          /* VID_OPEN_* for the worker */
+  double drop_before;      /* worker: drop decoded items before this time (resume after a reopen) */
+  bool dec_error;          /* worker: the decoder reported an error */
+  u64 starve_t;            /* when the queue ran dry while playing, 0 = it is not */
+  bool buffering;
 } V;
+
+/* ---- online streams (video_open_online) ------------------------------------------- */
+
+typedef struct VOnline {
+  const FmVsrc *src;
+  FmVsrcConf conf;
+  FmVsrcItem item;
+  FmVsrcStream st;           /* the qualities; st.audio is the sound for video-only ones */
+  bool retried, cached;      /* failure steps taken: re-resolved once, then the cache */
+  u64 ok_since;              /* playing without trouble since (re-arms the reconnect) */
+  /* resolve worker (re-resolve, cache download, a quality without a kept URL) */
+  SDL_Thread *thr;
+  SDL_atomic_t done;
+  volatile int cancel;
+  FmVsrcConf rconf;
+  FmVsrcStream *res;
+  FmErr rerr;
+  char rerrtext[256];
+  SDL_SpinLock lk;
+  float frac;
+  char status[128];
+  double resume_at;
+  int want;                  /* the quality asked for, -1 = whatever resolve picks */
+  char note[64];             /* what the spinner says */
+  char fail[256];            /* the last error, for the error card */
+  /* time to first frame */
+  u64 t_click, t_open;
+  bool ttff_done;
+  bool gave_up;              /* every step failed: the error card stays */
+  /* MMCFM_STREAM_TEST / --demo-quality-menu */
+  int test_step, test_t2;
+  u64 test_t;
+  bool demo_menu;
+  bool demo_chrome;          /* --demo-chrome: the controls stay up (buffer bar screenshots) */
+  bool demo_seeks;           /* --demo-stream-seeks: jump ahead after each second of smooth play */
+  u64 demo_smooth;
+} VOnline;
+static VOnline *g_on;
+
+/* MMCFM_STREAM_LOG=<file>: measurement lines for the stream test (appended). */
+static void stream_test_log(const char *fmt, ...) FM_PRINTF(1, 2);
+static void stream_test_log(const char *fmt, ...) {
+  const char *path = getenv("MMCFM_STREAM_LOG");
+  if (!path || !*path) return;
+  FILE *f = fm_fopen(path, "ab");
+  if (!f) return;
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(f, fmt, ap);
+  va_end(ap);
+  fputc('\n', f);
+  fclose(f);
+}
 
 /* ---- audio callback ------------------------------------------------------------- */
 
@@ -185,7 +261,7 @@ static double audio_queued(void) {
 static int worker(void *u) {
   FM_UNUSED(u);
   FmErr err;
-  FmVid *vid = V.audio[0] ? vid_open_pair(V.path, V.audio, 0, &err) : vid_open(V.path, 0, &err);
+  FmVid *vid = V.audio[0] ? vid_open_pair(V.path, V.audio, V.open_flags, &err) : vid_open(V.path, V.open_flags, &err);
   SDL_LockMutex(V.mx);
   if (!vid) {
     V.state = VS_ERROR;
@@ -231,6 +307,12 @@ static int worker(void *u) {
     int ev = vid_decode(vid, &vf, &pc);
     SDL_LockMutex(V.mx);
     if (V.seek_req) continue;
+    if (V.drop_before > 0) {
+      /* resuming after a reopen: decode up to the position, show nothing before it */
+      double t = ev == VID_EV_VIDEO ? vf.t : ev == VID_EV_AUDIO ? pc.t : 1e300;
+      if ((ev == VID_EV_VIDEO || ev == VID_EV_AUDIO) && t >= 0 && t < V.drop_before - 0.02) continue;
+      if (ev == VID_EV_VIDEO || !V.info.has_video || ev <= 0) V.drop_before = 0;
+    }
     if (ev == VID_EV_VIDEO) {
       if (vf.w > 0 && vf.h > 0 && V.qcount < QN) {
         VFrame *d = &V.q[(V.qhead + V.qcount) % QN];
@@ -249,6 +331,7 @@ static int worker(void *u) {
       }
     } else {
       V.eof = true;
+      if (ev == VID_EV_ERROR) V.dec_error = true;
       if (V.ast) SDL_AudioStreamFlush(V.ast);
       SDL_UnlockMutex(V.mx);
       app_wake();
@@ -311,6 +394,8 @@ static void set_volume(float v) {
 
 /* The system player; a stream URL goes through SDL (plat_open_external takes paths). */
 static void open_outside(void) {
+  /* an online video: its web page (the stream URL expires and plays nowhere else) */
+  if (g_on && g_on->item.page[0] && SDL_OpenURL(g_on->item.page) == 0) return;
   if (V.stream && strstr(V.path, "://") && SDL_OpenURL(V.path) == 0) return;
   plat_open_external(V.path);
 }
@@ -342,7 +427,7 @@ static void start_playback(void) {
         V.ast = SDL_NewAudioStream(AUDIO_F32SYS, (Uint8)V.info.channels, V.info.rate, AUDIO_F32SYS, 2, V.dev_rate);
         SDL_UnlockMutex(V.mx);
         eq_follow(&V.eq, V.dev_rate, V.mx);
-        if (V.ast) SDL_PauseAudioDevice(V.dev, 0);
+        if (V.ast) SDL_PauseAudioDevice(V.dev, V.paused ? 1 : 0);   /* a reopen keeps the pause */
       }
     }
   }
@@ -354,7 +439,20 @@ static void start_playback(void) {
 
 /* ---- open / close ------------------------------------------------------------------ */
 
+static void online_free(void) {
+  VOnline *o = g_on;
+  if (!o) return;
+  g_on = NULL;
+  if (o->thr) {
+    o->cancel = 1;                 /* yt-dlp is killed through the cancel flag */
+    SDL_WaitThread(o->thr, NULL);
+  }
+  fm_free(o->res);
+  fm_free(o);
+}
+
 static void vid_view_close(void) {
+  online_free();
   if (!V.open) return;
   if (V.thr) {
     SDL_LockMutex(V.mx);
@@ -418,6 +516,254 @@ bool video_open_stream(const char *title, const char *video, const char *audio) 
   return true;
 }
 
+/* Stops the decoder worker and the sound (the window, picture and settings stay). */
+static void stop_worker(void) {
+  if (V.thr) {
+    SDL_LockMutex(V.mx);
+    V.quit = true;
+    SDL_CondBroadcast(V.cv);
+    SDL_UnlockMutex(V.mx);
+    SDL_WaitThread(V.thr, NULL);
+    V.thr = NULL;
+  }
+  if (V.dev) { SDL_CloseAudioDevice(V.dev); V.dev = 0; }
+  SDL_LockMutex(V.mx);
+  if (V.ast) { SDL_FreeAudioStream(V.ast); V.ast = NULL; }
+  SDL_UnlockMutex(V.mx);
+}
+
+/* Opens other sources in the same player at `at` seconds: a quality switch,
+** a reconnect, the cache file. The last picture stays up until a new one. */
+static void restart_worker(const char *video, const char *audio, int flags, double at) {
+  stop_worker();
+  SDL_LockMutex(V.mx);
+  fm_strlcpy(V.path, video, sizeof V.path);
+  fm_strlcpy(V.audio, audio ? audio : "", sizeof V.audio);
+  V.open_flags = flags;
+  V.quit = false;
+  V.state = VS_OPENING;
+  V.err = FM_OK;
+  V.started = false;
+  V.eof = V.ended = V.dec_error = false;
+  V.qhead = V.qcount = 0;
+  V.out_frames = V.base_out = 0;
+  V.base_set = false;
+  V.last_audio_ms = 0;
+  V.clock = at > 0 ? at : 0;
+  V.clock_set = false;
+  V.seek_req = at > 0.5;
+  V.seek_to = V.clock;
+  V.drop_before = at > 0.5 ? at : 0;
+  V.have_frame = false;
+  V.starve_t = 0;
+  V.buffering = false;
+  SDL_UnlockMutex(V.mx);
+  if (g_on) {
+    g_on->t_open = SDL_GetTicks64();
+    g_on->ttff_done = false;
+    g_on->ok_since = 0;
+    g_on->gave_up = false;
+    g_on->fail[0] = 0;
+  }
+  V.thr = fm_thread_create(worker, "video", NULL);
+  if (!V.thr) { V.state = VS_ERROR; V.err = FM_ERR_NOMEM; }
+  ui_redraw();
+}
+
+/* Where playback is (or was going to resume). */
+static double play_pos(void) {
+  if (g_on && g_on->thr) return g_on->resume_at;
+  if (V.seek_req || !V.clock_set) return V.seek_req ? V.seek_to : V.clock;
+  return V.clock;
+}
+
+static bool on_progress(void *u, float frac, const char *status) {
+  VOnline *o = (VOnline *)u;
+  SDL_AtomicLock(&o->lk);
+  o->frac = frac;
+  fm_strlcpy(o->status, status ? status : "", sizeof o->status);
+  SDL_AtomicUnlock(&o->lk);
+  app_wake();
+  return !o->cancel;
+}
+
+static int on_resolve(void *u) {
+  VOnline *o = (VOnline *)u;
+  o->rerr = o->src && o->src->resolve
+                ? o->src->resolve(&o->rconf, &o->item, o->res, on_progress, o, o->rerrtext, sizeof o->rerrtext,
+                                  &o->cancel)
+                : FM_ERR_UNSUPPORTED;
+  SDL_AtomicSet(&o->done, 1);
+  app_wake();
+  return 0;
+}
+
+/* Asks the adapter again on a worker: height 0 = the current setting. */
+static bool online_resolve(int height, bool cache, int want, const char *note) {
+  VOnline *o = g_on;
+  if (!o || o->thr) return false;
+  o->resume_at = play_pos();
+  o->rconf = o->conf;
+  if (height >= 144) o->rconf.max_height = height;
+  o->rconf.force_cache = cache;
+  fm_free(o->res);
+  o->res = (FmVsrcStream *)fm_calloc(1, sizeof *o->res);
+  o->cancel = 0;
+  o->rerrtext[0] = 0;
+  SDL_AtomicSet(&o->done, 0);
+  o->frac = -1;
+  o->status[0] = 0;
+  o->want = want;
+  fm_strlcpy(o->note, note, sizeof o->note);
+  stop_worker();                     /* nothing plays meanwhile; the picture stays */
+  SDL_LockMutex(V.mx);
+  V.state = VS_OPENING;
+  SDL_UnlockMutex(V.mx);
+  o->thr = fm_thread_create(on_resolve, "vid-resolve", o);
+  if (!o->thr) {
+    SDL_LockMutex(V.mx);
+    V.state = VS_ERROR;
+    V.err = FM_ERR_NOMEM;
+    SDL_UnlockMutex(V.mx);
+    return false;
+  }
+  ui_redraw();
+  return true;
+}
+
+static int cur_height(void) {
+  const VOnline *o = g_on;
+  if (o && o->st.cur >= 0 && o->st.cur < o->st.nq && o->st.q[o->st.cur].height > 0) return o->st.q[o->st.cur].height;
+  return o ? o->conf.max_height : 0;
+}
+
+static bool is_url(const char *s) { return strstr(s, "://") != NULL; }
+
+/* The stream broke: reconnect once (links expire), then the cache. false =
+** nothing left to try. */
+static bool online_failed(const char *why) {
+  VOnline *o = g_on;
+  if (!o || o->thr || !o->src) return false;
+  fm_log("stream: failed (%s) at %.1f s", why, play_pos());
+  if (!is_url(V.path)) return false;             /* a cache file that fails is just broken */
+  if (!o->retried) {
+    o->retried = true;
+    return online_resolve(cur_height(), false, -1, "Reconnecting\xE2\x80\xA6");
+  }
+  if (!o->cached) {
+    o->cached = true;
+    ui_toast("Streaming failed; downloading into the cache first");
+    return online_resolve(cur_height(), true, -1, "Downloading\xE2\x80\xA6");
+  }
+  return false;
+}
+
+/* Main thread, every frame: a finished resolve opens its result. */
+static void on_pump(void) {
+  VOnline *o = g_on;
+  if (!o || !o->thr || !SDL_AtomicGet(&o->done)) return;
+  SDL_WaitThread(o->thr, NULL);
+  o->thr = NULL;
+  FmVsrcStream *r = o->res;
+  o->res = NULL;
+  if (o->rerr == FM_OK && r->video[0]) {
+    if (r->nq == 0) {                            /* a cache hit lists nothing: keep the old list */
+      r->nq = o->st.nq;
+      memcpy(r->q, o->st.q, sizeof r->q);
+      r->cur = o->want >= 0 ? o->want : o->st.cur;
+    }
+    bool aonly = o->want >= 0 && o->want < r->nq && r->q[o->want].audio_only && !r->local && r->q[o->want].url[0];
+    if (aonly) r->cur = o->want;
+    o->st = *r;
+    if (r->local) o->cached = true;
+    fm_log("stream: resolved %s %s, resuming at %.1f s", r->local ? "into the cache" : "a stream",
+           r->cur >= 0 ? r->q[r->cur].label : "", o->resume_at);
+    if (aonly) restart_worker(r->q[o->want].url, "", VID_OPEN_AUDIO_ONLY, o->resume_at);
+    else restart_worker(r->video, r->audio, 0, o->resume_at);
+  } else if (o->rerr == FM_ERR_CANCEL) {
+    SDL_LockMutex(V.mx);
+    V.state = VS_ERROR;
+    V.err = FM_ERR_CANCEL;
+    SDL_UnlockMutex(V.mx);
+  } else {
+    fm_strlcpy(o->fail, o->rerrtext[0] ? o->rerrtext : fm_err_str(o->rerr), sizeof o->fail);
+    fm_log("stream: resolve failed: %s", o->fail);
+    /* a reconnect that failed goes on to the cache; the cache failing is the end */
+    bool next = false;
+    if (!o->rconf.force_cache && !o->cached) {
+      o->cached = true;
+      ui_toast("Streaming failed; downloading into the cache first");
+      next = online_resolve(o->rconf.max_height, true, o->want, "Downloading\xE2\x80\xA6");
+    }
+    if (!next) {
+      SDL_LockMutex(V.mx);
+      V.state = VS_ERROR;
+      V.err = o->rerr;
+      SDL_UnlockMutex(V.mx);
+    }
+  }
+  fm_free(r);
+  ui_redraw();
+}
+
+/* The quality menu's choice: reuse the kept URL, else ask the adapter. */
+static void quality_pick(int i) {
+  VOnline *o = g_on;
+  if (!o || o->thr || i < 0 || i >= o->st.nq || i == o->st.cur) return;
+  const FmVsrcQuality *q = &o->st.q[i];
+  if (!q->playable && !q->cache_only) return;
+  if (!q->audio_only && q->height >= 144 && q->height <= 2160 && conf.online_height != q->height) {
+    conf.online_height = q->height;       /* remembered for the next video */
+    online_conf_dirty();
+  }
+  double at = play_pos();
+  char note[64];
+  fm_snprintf(note, sizeof note, q->cache_only ? "Downloading %s\xE2\x80\xA6" : "Switching to %s\xE2\x80\xA6",
+              q->label);
+  o->retried = false;
+  fm_log("stream: quality %s -> %s at %.1f s", o->st.cur >= 0 ? o->st.q[o->st.cur].label : "?", q->label, at);
+  if (q->playable && q->url[0]) {
+    o->st.cur = i;
+    fm_strlcpy(o->note, note, sizeof o->note);
+    if (q->audio_only) restart_worker(q->url, "", VID_OPEN_AUDIO_ONLY, at);
+    else restart_worker(q->url, q->muxed ? "" : o->st.audio, 0, at);
+  } else {
+    online_resolve(q->audio_only ? 0 : q->height, q->cache_only, i, note);
+  }
+}
+
+bool video_open_online(const FmVsrc *src, const FmVsrcConf *c, const FmVsrcItem *item, const FmVsrcStream *st,
+                       u64 t_click) {
+  if (!st || !st->video[0]) return false;
+  if (app.viewer && app.viewer->close) app.viewer->close();
+  app.viewer = NULL;
+  open_impl(st->video, st->audio[0] ? st->audio : NULL, item ? item->title : NULL, true);
+  VOnline *o = (VOnline *)fm_calloc(1, sizeof *o);
+  o->src = src;
+  if (c) o->conf = *c;
+  if (item) o->item = *item;
+  o->st = *st;
+  o->cached = st->local;
+  o->t_click = t_click ? t_click : SDL_GetTicks64();
+  o->t_open = SDL_GetTicks64();
+  o->want = -1;
+  if (st->cur >= 0 && st->cur < st->nq)
+    fm_snprintf(o->note, sizeof o->note, "Opening %s\xE2\x80\xA6", st->q[st->cur].label);
+  for (int i = 1; i < app.argc; i++)
+    if (!strcmp(app.argv[i], "--demo-quality-menu")) o->demo_menu = true;
+    else if (!strcmp(app.argv[i], "--demo-chrome")) o->demo_chrome = true;
+    else if (!strcmp(app.argv[i], "--demo-stream-seeks")) o->demo_seeks = true;
+  for (int i = 0; i < st->nq; i++)
+    stream_test_log("quality %c %s %s %d kb/s%s%s%s", i == st->cur ? '*' : ' ', st->q[i].label, st->q[i].codec,
+                    st->q[i].kbps, st->q[i].playable ? " stream" : "", st->q[i].cache_only ? " cache" : "",
+                    st->q[i].needs_ffmpeg ? " needs-ffmpeg" : "");
+  stream_test_log("open \"%s\" %s", o->item.title, st->local ? "cache file" : "stream");
+  g_on = o;
+  app.viewer = &g_view_video;
+  ui_redraw();
+  return true;
+}
+
 /* ---- frame ---------------------------------------------------------------------- */
 
 static void update_clock(void) {
@@ -425,9 +771,12 @@ static void update_clock(void) {
   SDL_LockMutex(V.mx);
   bool flowing = V.dev && V.base_set && SDL_GetTicks64() - V.last_audio_ms < 150;
   double at = V.base_t + ((double)V.out_frames - (double)V.base_out) / FM_MAX(1, V.dev_rate);
+  /* starved (a stream waiting for data): hold the clock rather than run
+  ** ahead of the picture and drop every frame once data comes */
+  bool starved = !V.eof && (V.info.has_video ? V.qcount == 0 : V.info.has_audio && audio_queued() < 0.02);
   SDL_UnlockMutex(V.mx);
   if (flowing && V.out_frames >= V.base_out) V.clock = at;
-  else V.clock += ui.dt;
+  else if (!(starved && is_url(V.path) && V.starve_t && SDL_GetTicks64() - V.starve_t > 120)) V.clock += ui.dt;
 }
 
 static void present_frame(void) {
@@ -465,6 +814,17 @@ static void present_frame(void) {
     SDL_UpdateYUVTexture(V.tex, NULL, f->plane[0], f->stride[0], f->plane[1], f->stride[1], f->plane[2], f->stride[2]);
     V.have_frame = true;
     V.shown_t = f->t;
+    if (g_on && !g_on->ttff_done) {
+      g_on->ttff_done = true;
+      u64 now = SDL_GetTicks64();
+      g_on->test_t = 0;                  /* the stream test times each quality from here */
+      const FmVsrcStream *st = &g_on->st;
+      fm_log("stream: first frame %s %dx%d at %.1f s: %d ms after open, %d ms after Play (%s)",
+             st->cur >= 0 ? st->q[st->cur].label : "", f->w, f->h, f->t, (int)(now - g_on->t_open),
+             (int)(now - g_on->t_click), is_url(V.path) ? "stream" : "cache file");
+      stream_test_log("ttff %s %d %d %.2f", st->cur >= 0 ? st->q[st->cur].label : "?", (int)(now - g_on->t_open),
+                      (int)(now - g_on->t_click), f->t);
+    }
   }
   SDL_LockMutex(V.mx);
   V.qhead = (V.qhead + 1) % QN;
@@ -486,6 +846,22 @@ static void info_card(void) {
   view_info_dialog(ui_id("vid.info"), "Video info", keys, vals, FM_COUNT(keys), &V.info_open);
 }
 
+/* How far (seconds) the stream reader holds data: the smaller of the video
+** and audio streams, by byte fraction of the duration. < 0 = unknown (a
+** file, or FFmpeg reading the URL itself). */
+static double buffered_end(void) {
+  if (!V.stream || !is_url(V.path) || V.info.duration <= 0) return -1;
+  double best = -1;
+  const char *u[2] = { V.path, V.audio };
+  for (int i = 0; i < 2; i++) {
+    i64 pos, end, size;
+    if (!u[i][0] || !ns_url_buffered(u[i], &pos, &end, &size) || size <= 0) continue;
+    double e = (double)FM_MIN(end, size) / (double)size * V.info.duration;
+    best = best < 0 ? e : FM_MIN(best, e);
+  }
+  return best;
+}
+
 static void vid_seek_bar(FmRect r) {
   u32 id = ui_id("vid.seek");
   double dur = V.info.duration;
@@ -504,12 +880,74 @@ static void vid_seek_bar(FmRect r) {
   t = FM_CLAMP(t, 0.0f, 1.0f);
   float th = DP(4), cy = r.y + r.h * 0.5f;
   gfx_rrect(FM_RECT(r.x, cy - th * 0.5f, r.w, th), th * 0.5f, FM_RGBA(255, 255, 255, 70));
+  /* the buffered range ahead of the play position */
+  double bend = dur > 0 ? buffered_end() : -1;
+  if (bend > 0) {
+    float pt = (float)FM_CLAMP(V.clock / dur, 0.0, 1.0), b1 = (float)FM_CLAMP(bend / dur, 0.0, 1.0);
+    if (b1 > pt) gfx_rrect(FM_RECT(r.x + r.w * pt, cy - th * 0.5f, r.w * (b1 - pt), th), th * 0.5f,
+                           FM_RGBA(255, 255, 255, 150));
+  }
   gfx_rrect(FM_RECT(r.x, cy - th * 0.5f, r.w * t, th), th * 0.5f, T.accent);
   if (dur > 0) gfx_circle(r.x + r.w * t, cy, DP((f & (UI_HELD | UI_HOVER)) || V.seek_drag ? 8 : 6), T.accent);
   if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
 }
 
-enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ, VM_ASPECT, VM_LOCK, VM_AR0 = 100 };
+enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ, VM_ASPECT, VM_LOCK, VM_QUALITY, VM_AR0 = 100, VM_Q0 = 200 };
+
+/* "VP9 · 1.4 Mb/s", or why it cannot be chosen */
+static void quality_detail(const FmVsrcQuality *q, char *out, size_t cap) {
+  if (q->needs_ffmpeg) { fm_strlcpy(out, "needs FFmpeg", cap); return; }
+  if (!q->playable && !q->cache_only) { fm_strlcpy(out, "not available", cap); return; }
+  char rate[24];
+  rate[0] = 0;
+  if (q->kbps >= 1000) fm_snprintf(rate, sizeof rate, "%.1f Mb/s", q->kbps / 1000.0);
+  else if (q->kbps > 0) fm_snprintf(rate, sizeof rate, "%d kb/s", q->kbps);
+  if (q->cache_only) fm_snprintf(out, cap, "%s%sdownloads first", q->codec, q->codec[0] ? " \xC2\xB7 " : "");
+  else fm_snprintf(out, cap, "%s%s%s", q->codec, q->codec[0] && rate[0] ? " \xC2\xB7 " : "", rate);
+}
+
+/* The quality list as a popup at x,y (it opens upward near the bottom). */
+static void quality_menu(float x, float y) {
+  const VOnline *o = g_on;
+  if (!o || !o->st.nq) return;
+  FmMenuItem it[VSRC_QMAX];
+  char det[VSRC_QMAX][48];
+  int n = 0;
+  for (int i = 0; i < o->st.nq && n < VSRC_QMAX; i++) {
+    const FmVsrcQuality *q = &o->st.q[i];
+    quality_detail(q, det[n], sizeof det[n]);
+    it[n].id = VM_Q0 + i;
+    it[n].icon = i == o->st.cur ? IC_CHECK : q->audio_only ? IC_MUSIC : IC_NONE;
+    it[n].label = q->label;
+    it[n].shortcut = det[n];
+    it[n].flags = q->playable || q->cache_only ? 0 : UI_MI_DISABLED;
+    n++;
+  }
+  ui_menu_open(ui_id("vid.qmenu"), x, y, it, n);
+}
+
+/* The chip in the bottom bar: the current quality; a click lists them all. */
+static void quality_chip(FmRect *row, FmColor fg, FmColor fg2) {
+  const VOnline *o = g_on;
+  if (!o || !o->st.nq) return;
+  const FmVsrcQuality *cq = o->st.cur >= 0 && o->st.cur < o->st.nq ? &o->st.q[o->st.cur] : NULL;
+  const char *l = !cq ? "Quality" : cq->audio_only ? "Audio" : cq->label;
+  float tw = font_width(FONT_BOLD, ui.m.font_small, l, -1);
+  float w = tw + DP(20), h = DP(26);
+  FmRect cell = rect_cut_right(row, w + DP(12));
+  FmRect b = rect_center(cell, w, h);
+  u32 id = ui_id("vid.quality");
+  int f = ui_hit(id, rect_inset2(b, -DP(4), -DP(6)));
+  if (f & (UI_HOVER | UI_HELD)) gfx_rrect(b, DP(6), col_alpha(VIEW_FG, 0.14f * fg.a / 255.0f));
+  gfx_rrect_line(b, DP(6), DP(1.5f), fg2);
+  font_draw_center(FONT_BOLD, ui.m.font_small, b, l, fg);
+  if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
+  if (f & UI_CLICK) quality_menu(b.x, b.y - DP(4));
+  if (o->demo_menu && V.have_frame && !ui_menu_is_open()) {
+    g_on->demo_menu = false;
+    quality_menu(b.x, b.y - DP(4));
+  }
+}
 
 /* Where the picture goes in `area` and which part of the texture shows. */
 static void place_picture(FmRect area, double sar, FmRect *dst, FmRect *src) {
@@ -625,8 +1063,128 @@ static FmRect viz_panel_rect(FmRect area) {
   return rect_inset(r, DP(12));
 }
 
+/* Spinner with a line under it (and a bar when frac >= 0), over the picture. */
+static void busy_overlay(FmRect area, const char *what, float frac) {
+  float s = DP(44);
+  FmRect sp = rect_center(area, s, s);
+  gfx_circle(sp.x + s * 0.5f, sp.y + s * 0.5f, s * 0.75f, col_alpha(VIEW_SCRIM, 0.7f));
+  ui_spinner(sp, VIEW_FG);
+  if (!what || !what[0]) return;
+  float lh = font_line_h(ui.m.font_small);
+  float w = FM_MIN(area.w - DP(32), font_width(FONT_BOLD, ui.m.font_small, what, -1) + DP(28));
+  FmRect pill = { area.x + (area.w - w) * 0.5f, sp.y + s + DP(16), w, lh + DP(12) + (frac >= 0 ? DP(12) : 0) };
+  gfx_rrect(pill, DP(10), col_alpha(VIEW_SCRIM, 0.8f));
+  font_draw_center(FONT_BOLD, ui.m.font_small, FM_RECT(pill.x, pill.y + DP(6), pill.w, lh), what, VIEW_FG);
+  if (frac >= 0) ui_progress(FM_RECT(pill.x + DP(14), pill.y + lh + DP(12), pill.w - DP(28), DP(4)), frac);
+}
+
+/* Online streams: failures, buffering, the measurement script. */
+static void stream_checks(int *state, bool *ready) {
+  VOnline *o = g_on;
+  bool playing = *ready && !V.paused && !V.ended;
+  /* buffering: the decoder starved while playing */
+  if (playing && V.stream && V.have_frame) {   /* after a seek too: the picture waits for data */
+    SDL_LockMutex(V.mx);
+    bool starved = !V.eof && (V.info.has_video ? V.qcount == 0 : V.info.has_audio && audio_queued() < 0.02);
+    SDL_UnlockMutex(V.mx);
+    if (!starved) V.starve_t = 0;
+    else if (!V.starve_t) V.starve_t = ui.now;
+    bool was = V.buffering;
+    V.buffering = V.starve_t && ui.now - V.starve_t > 250;
+    if (V.starve_t && !V.buffering) view_wake_in(260);
+    if (V.buffering && !was) { fm_log("stream: buffering at %.1f s", V.clock); stream_test_log("buffering %.2f", V.clock); }
+  } else {
+    V.starve_t = 0;
+    V.buffering = false;
+  }
+  if (o && o->demo_chrome) view_chrome_poke(&V.chrome);
+  if (o && o->demo_seeks && playing && V.have_frame && V.info.duration > 60) {
+    if (V.buffering || V.starve_t || !V.clock_set) o->demo_smooth = 0;
+    else if (!o->demo_smooth) o->demo_smooth = ui.now;
+    else if (ui.now - o->demo_smooth > 400) {
+      o->demo_smooth = 0;
+      double to = V.clock + V.info.duration * 0.2;
+      if (to > V.info.duration - 20) to = 30;
+      stream_test_log("demo seek %.1f -> %.1f", V.clock, to);
+      seek_to(to);
+    }
+    view_wake_in(100);
+  }
+  if (!o || o->thr) return;
+  if (playing && V.have_frame && !V.buffering) {
+    if (!o->ok_since) o->ok_since = ui.now;
+    else if (ui.now - o->ok_since > 60000) o->retried = false;   /* a minute fine: links may expire again */
+  }
+  /* failures: re-resolve once, then the cache (online_failed) */
+  SDL_LockMutex(V.mx);
+  bool dec_err = V.dec_error;
+  V.dec_error = false;
+  SDL_UnlockMutex(V.mx);
+  const char *why = NULL;
+  if (*state == VS_ERROR && V.err != FM_ERR_CANCEL && V.err != FM_ERR_NOMEM) why = "open";
+  else if (*ready && dec_err) why = "decode error";
+  else if (*ready && V.ended && V.info.duration > 0 && V.clock < V.info.duration - 3 && is_url(V.path))
+    why = "ended early";
+  if (why && !o->gave_up) {
+    bool was_ended = V.ended;
+    if (was_ended) { V.ended = false; V.paused = false; }   /* it stopped by itself, not by the user */
+    if (online_failed(why)) {
+      *state = VS_OPENING;
+      *ready = false;
+    } else if (was_ended) {
+      o->gave_up = true;
+      V.ended = V.paused = true;
+    } else if (*state != VS_ERROR) {
+      o->gave_up = true;
+      SDL_LockMutex(V.mx);
+      V.state = *state = VS_ERROR;
+      V.err = FM_ERR_IO;
+      SDL_UnlockMutex(V.mx);
+      *ready = false;
+    } else {
+      o->gave_up = true;
+    }
+  }
+  /* MMCFM_STREAM_TEST="360,720,1080": play each for a while (switching at the
+  ** position), then seek to the middle, log, and quit. */
+  const char *test = getenv("MMCFM_STREAM_TEST");
+  if (test && *test && *ready && V.have_frame && !o->thr) {
+    if (!o->test_t) o->test_t = ui.now;
+    view_wake_in(200);
+    if (ui.now - o->test_t < 6000) return;
+    o->test_t = ui.now;
+    int step = o->test_step++;
+    const char *p = test;
+    for (int i = 0; i < step && p; i++) { p = strchr(p, ','); if (p) p++; }
+    stream_test_log("pos %s %.2f buffered %.2f", o->st.cur >= 0 ? o->st.q[o->st.cur].label : "?", V.clock,
+                    buffered_end());
+    if (p && *p) {
+      int h = atoi(p);
+      for (int i = 0; i < o->st.nq; i++)
+        if (o->st.q[i].height == h && !o->st.q[i].audio_only) {
+          stream_test_log("switch %s -> %s at %.2f", o->st.cur >= 0 ? o->st.q[o->st.cur].label : "?",
+                          o->st.q[i].label, V.clock);
+          if (i == o->st.cur) break;
+          quality_pick(i);
+          return;
+        }
+      return;
+    }
+    if (!o->test_t2) {
+      o->test_t2 = 1;
+      double to = V.info.duration * 0.5;
+      stream_test_log("seek %.2f -> %.2f", V.clock, to);
+      seek_to(to);
+      return;
+    }
+    stream_test_log("done %.2f", V.clock);
+    app.quit = true;
+  }
+}
+
 static void vid_view_frame(FmRect area) {
   gfx_rect(area, VIEW_BG);
+  on_pump();
   int state;
   SDL_LockMutex(V.mx);
   state = V.state;
@@ -647,6 +1205,7 @@ static void vid_view_frame(FmRect area) {
       view_chrome_poke(&V.chrome);
     }
   }
+  if (g_on) stream_checks(&state, &ready);
   bool playing = ready && !V.paused && !V.ended;
   screensaver(playing);
   float chrome = view_chrome(&V.chrome, ui_id("vid.chrome"), playing && !V.seek_drag && !V.viz_panel);
@@ -675,7 +1234,7 @@ static void vid_view_frame(FmRect area) {
     gfx_clip_pop();
     pic = rect_intersect(pic, area);
     if (viz_shown) viz_overlay(pic);
-  } else if (state == VS_OPENING || (ready && V.info.has_video && !V.have_frame && !audio_only)) {
+  } else if (!V.stream && (state == VS_OPENING || (ready && V.info.has_video && !V.have_frame && !audio_only))) {
     ui_spinner(rect_center(area, DP(40), DP(40)), VIEW_FG2);
   } else if (ready && viz_shown) {
     viz_alone(area, vpanel);
@@ -683,12 +1242,33 @@ static void vid_view_frame(FmRect area) {
     float is = DP(96);
     icon_draw(IC_MUSIC, rect_center(area, is, is), VIEW_FG2);
   }
+  /* streams: opening, switching, reconnecting, downloading, buffering */
+  if (V.stream && state != VS_ERROR) {
+    bool resolving = g_on && g_on->thr;
+    bool opening = state == VS_OPENING || (ready && V.info.has_video && !V.have_frame && !audio_only);
+    if (resolving) {
+      char st[128];
+      float fr;
+      SDL_AtomicLock(&g_on->lk);
+      fm_strlcpy(st, g_on->status, sizeof st);
+      fr = g_on->frac;
+      SDL_AtomicUnlock(&g_on->lk);
+      /* "Downloading video + audio 42%" while the cache fallback runs */
+      busy_overlay(area, g_on->rconf.force_cache && st[0] ? st : g_on->note, g_on->rconf.force_cache ? fr : -1.0f);
+      view_wake_in(250);
+    } else if (opening) {
+      busy_overlay(area, g_on && g_on->note[0] ? g_on->note : "Opening\xE2\x80\xA6", -1.0f);
+    } else if (V.buffering) {
+      busy_overlay(area, "Buffering\xE2\x80\xA6", -1.0f);
+    }
+  }
   if (state == VS_ERROR) {
     /* the system decoders (Media Foundation / MediaCodec) cover the common
     ** formats; FFmpeg is the way to the rest (FLV, RealMedia, odd codecs) */
-    bool need_ff = (V.err == FM_ERR_UNSUPPORTED || V.err == FM_ERR_FORMAT) && !ff_available();
+    bool need_ff = (V.err == FM_ERR_UNSUPPORTED || V.err == FM_ERR_FORMAT) && !ff_available() && !(g_on && g_on->fail[0]);
     const char *msg = need_ff ? "Your system's decoders cannot play it. Put the FFmpeg 4 to 8 libraries next to the "
                                 "app (or use a build made with --with-ffmpeg), or open it with the system player."
+                      : g_on && g_on->fail[0] ? g_on->fail
                       : V.stream ? "The video could not be opened. Check the internet connection, or pick another "
                                    "quality in Settings > Online videos."
                                  : "The file could not be decoded. It may be damaged, or use a codec that is not "
@@ -779,6 +1359,7 @@ static void vid_view_frame(FmRect area) {
   if (view_bar_btn(&act, ui_id("vid.more"), IC_MORE, "More", VIEW_BAR_MEDIA, chrome, false)) {
     FmMenuItem items[] = {
       { VM_INFO, IC_INFO, "Video info", NULL, ready ? 0 : UI_MI_DISABLED },
+      { VM_QUALITY, IC_SETTINGS, "Quality", NULL, 0 },
       { VM_SHARE, IC_SHARE, "Share", NULL, V.stream ? UI_MI_DISABLED : 0 },
       { VM_OPEN, IC_OPEN_WITH, "Open with system player", NULL, 0 },
       { VM_VIZ, IC_EQUALIZER, "Visualizer settings", NULL, V.info.has_audio ? 0 : UI_MI_DISABLED },
@@ -794,7 +1375,14 @@ static void vid_view_frame(FmRect area) {
       { VM_AR0 + AR_9_16, g_aspect == AR_9_16 ? IC_CHECK : IC_NONE, "9:16 (vertical)", NULL, 0 },
       { VM_AR0 + AR_ORIGINAL, g_aspect == AR_ORIGINAL ? IC_CHECK : IC_NONE, "Original size", NULL, 0 },
     };
-    ui_menu_open(mid, act.x + act.w, area.y + ui.m.bar_h, items, FM_COUNT(items));
+    int nitems = FM_COUNT(items);
+    if (!g_on || !g_on->st.nq) {             /* Quality: online videos only */
+      memmove(&items[1], &items[2], sizeof items[0] * (size_t)(nitems - 2));
+      nitems--;
+    } else if (g_on->st.cur >= 0) {
+      items[1].shortcut = g_on->st.q[g_on->st.cur].label;
+    }
+    ui_menu_open(mid, act.x + act.w, area.y + ui.m.bar_h, items, nitems);
   }
 #ifndef FM_MOBILE
   if (view_bar_btn(&act, ui_id("vid.fs"), IC_FULLSCREEN, "Fullscreen (F)", VIEW_BAR_MEDIA, chrome, V.fullscreen_set))
@@ -823,8 +1411,11 @@ static void vid_view_frame(FmRect area) {
     case VM_OPEN: set_paused(true); open_outside(); break;
     case VM_VIZ: V.viz_panel = true; viz_panel_tab(0); break;
     case VM_EQ: V.viz_panel = true; viz_panel_tab(1); break;
+    case VM_QUALITY: quality_menu(act.x + act.w, area.y + ui.m.bar_h); break;
     default: break;
   }
+  int qres = ui_menu_result(ui_id("vid.qmenu"));
+  if (qres >= VM_Q0) quality_pick(qres - VM_Q0);
 
   /* bottom controls */
   if (ready && chrome > 0.01f) {
@@ -850,6 +1441,7 @@ static void vid_view_frame(FmRect area) {
     rect_cut_left(&row, DP(8));
     float tw = font_width(FONT_REGULAR, ui.m.font_small, tb, -1);
     ui_label(rect_cut_left(&row, tw + DP(4)), tb, FONT_REGULAR, ui.m.font_small, fg2, UI_LEFT);
+    quality_chip(&row, fg, fg2);
     /* picture shape cycles (the ⋮ menu lists them all); touch lock on phones */
     if (ui_icon_btn(ui_id("vid.aspect"), rect_cut_right(&row, s), IC_FIT, fg, "Picture shape (A)"))
       set_aspect(g_aspect + 1);

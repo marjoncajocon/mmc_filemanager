@@ -12,6 +12,8 @@
 **     are buffered here so aud_read can hand out any count of frames.
 */
 #include "fdec_aud.h"
+#include "fnetstream.h"
+#include "fsdl.h"
 #include "fdec_vid.h"
 #include "fplat.h"
 
@@ -27,6 +29,12 @@ enum { AK_NONE, AK_MP3, AK_FLAC, AK_WAV, AK_VORBIS, AK_FF };
 struct FmAudio {
   int kind;
   FILE *f;
+  /* http(s): the stream reader replaces the FILE for the dr_libs callbacks */
+  FmNetStream *ns;
+  i64 audio_start;       /* bytes before the first MPEG frame (ID3v2) */
+  i64 budget;            /* >= 0: bytes the decoder may still read (finding the first frame) */
+  bool live;             /* an endless stream, kept when it moves to the FFmpeg / MF path */
+  int kbps;              /* first frame's bitrate, for length and seek estimates */
   drmp3 *mp3;
   drmp3_seek_point *seek_pts;
   drflac *flac;
@@ -46,24 +54,45 @@ struct FmAudio {
 
 /* ---- file callbacks for dr_libs --------------------------------------------- */
 
-static size_t f_read(void *u, void *out, size_t n) { return fread(out, 1, n, ((FmAudio *)u)->f); }
+static size_t f_read(void *u, void *out, size_t n) {
+  FmAudio *a = (FmAudio *)u;
+  if (a->ns) {
+    /* an endless stream that is not really MP3 must not keep dr_mp3
+    ** searching for a frame forever: it gets a budget while it starts */
+    if (a->budget >= 0) {
+      if (a->budget == 0) return 0;
+      if ((i64)n > a->budget) n = (size_t)a->budget;
+      size_t got = ns_read(a->ns, out, n);
+      a->budget -= (i64)got;
+      return got;
+    }
+    return ns_read(a->ns, out, n);
+  }
+  return fread(out, 1, n, a->f);
+}
 
 static int f_seek_any(FmAudio *a, int off, int origin) {
+  if (a->ns) {
+    i64 to = origin == 0 ? off : origin == 1 ? ns_tell(a->ns) + off : ns_size(a->ns) + off;
+    return (origin != 2 || ns_size(a->ns) >= 0) && ns_seek(a->ns, to);
+  }
   int wh = origin == 0 ? SEEK_SET : origin == 1 ? SEEK_CUR : SEEK_END;
   return fm_fseek64(a->f, off, wh) == 0;
 }
+
+static i64 f_tell(FmAudio *a) { return a->ns ? ns_tell(a->ns) : fm_ftell64(a->f); }
 static drmp3_bool32 mp3_seek(void *u, int off, drmp3_seek_origin o) {
   return (drmp3_bool32)f_seek_any((FmAudio *)u, off, o == DRMP3_SEEK_SET ? 0 : o == DRMP3_SEEK_CUR ? 1 : 2);
 }
-static drmp3_bool32 mp3_tell(void *u, drmp3_int64 *c) { *c = fm_ftell64(((FmAudio *)u)->f); return *c >= 0; }
+static drmp3_bool32 mp3_tell(void *u, drmp3_int64 *c) { *c = f_tell((FmAudio *)u); return *c >= 0; }
 static drflac_bool32 flac_seek(void *u, int off, drflac_seek_origin o) {
   return (drflac_bool32)f_seek_any((FmAudio *)u, off, o == DRFLAC_SEEK_SET ? 0 : o == DRFLAC_SEEK_CUR ? 1 : 2);
 }
-static drflac_bool32 flac_tell(void *u, drflac_int64 *c) { *c = fm_ftell64(((FmAudio *)u)->f); return *c >= 0; }
+static drflac_bool32 flac_tell(void *u, drflac_int64 *c) { *c = f_tell((FmAudio *)u); return *c >= 0; }
 static drwav_bool32 wav_seek(void *u, int off, drwav_seek_origin o) {
   return (drwav_bool32)f_seek_any((FmAudio *)u, off, o == DRWAV_SEEK_SET ? 0 : o == DRWAV_SEEK_CUR ? 1 : 2);
 }
-static drwav_bool32 wav_tell(void *u, drwav_int64 *c) { *c = fm_ftell64(((FmAudio *)u)->f); return *c >= 0; }
+static drwav_bool32 wav_tell(void *u, drwav_int64 *c) { *c = f_tell((FmAudio *)u); return *c >= 0; }
 
 /* ---- open ---------------------------------------------------------------------- */
 
@@ -100,6 +129,7 @@ static void aud_free(FmAudio *a) {
   if (a->vorb) stb_vorbis_close(a->vorb);
   if (a->vid) vid_close(a->vid);
   if (a->f) fclose(a->f);
+  if (a->ns) ns_close(a->ns);
   fm_free(a->tmp);
   fm_free(a->left);
   fm_free(a);
@@ -107,13 +137,28 @@ static void aud_free(FmAudio *a) {
 
 static bool open_mp3(FmAudio *a) {
   a->mp3 = (drmp3 *)fm_calloc(1, sizeof(drmp3));
-  if (!drmp3_init(a->mp3, f_read, mp3_seek, mp3_tell, NULL, a, NULL)) {
+  /* Over HTTP dr_mp3 gets no seek callback: it would probe the end of the
+  ** file for ID3v1/APE tags (a request each way, seconds on slow hosts), and
+  ** live radio cannot seek at all. Network seeks go through net_mp3_seek. */
+  bool can_seek = !a->ns;
+  a->budget = a->ns ? 512 * 1024 : -1;
+  bool inited = drmp3_init(a->mp3, f_read, can_seek ? mp3_seek : NULL, can_seek ? mp3_tell : NULL, NULL, a, NULL);
+  a->budget = -1;
+  if (!inited) {
     fm_free(a->mp3);
     a->mp3 = NULL;
     return false;
   }
   a->src_ch = (int)a->mp3->channels;
   a->rate = (int)a->mp3->sampleRate;
+  if (a->ns) {
+    /* counting frames would download everything: estimate from the first
+    ** frame's bitrate (exact for CBR, close for VBR); live radio has none */
+    i64 size = ns_size(a->ns);
+    if (size > a->audio_start && a->kbps > 0)
+      a->len = (u64)((double)(size - a->audio_start) * 8.0 / (a->kbps * 1000.0) * a->rate);
+    return true;
+  }
   i64 fsize = fm_fsize(a->f);
   if (fsize > 0 && fsize <= 64ll * 1024 * 1024) {
     drmp3_uint64 nmp3 = 0, npcm = 0;
@@ -134,14 +179,85 @@ static bool open_mp3(FmAudio *a) {
   return true;
 }
 
-FmAudio *aud_open(const char *path, FmErr *err) {
+/* ID3v2 tag length (header included), 0 when none */
+static i64 id3_size(const u8 *b, size_t n) {
+  if (n < 10 || memcmp(b, "ID3", 3) != 0) return 0;
+  i64 sz = ((i64)(b[6] & 0x7F) << 21) | ((b[7] & 0x7F) << 14) | ((b[8] & 0x7F) << 7) | (b[9] & 0x7F);
+  return sz + 10 + ((b[5] & 0x10) ? 10 : 0);
+}
+
+/* bitrate (kbps) of the first MPEG audio frame header found in b */
+static int mpeg_kbps(const u8 *b, size_t n) {
+  static const short v1l3[16] = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0 };
+  static const short v1l2[16] = { 0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0 };
+  static const short v2l3[16] = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0 };
+  for (size_t i = 0; i + 4 <= n; i++) {
+    if (b[i] != 0xFF || (b[i + 1] & 0xE0) != 0xE0) continue;
+    int ver = (b[i + 1] >> 3) & 3, layer = (b[i + 1] >> 1) & 3, idx = b[i + 2] >> 4;
+    if (ver == 1 || layer == 0 || idx == 0 || idx == 15) continue;
+    if (ver == 3) return layer == 1 ? v1l3[idx] : v1l2[idx];
+    return v2l3[idx];
+  }
+  return 0;
+}
+
+static bool is_url(const char *p) { return !fm_strnicmp(p, "http://", 7) || !fm_strnicmp(p, "https://", 8); }
+
+FmAudio *aud_open(const char *path, FmErr *err) { return aud_open_msg(path, NULL, err, NULL, 0); }
+
+FmAudio *aud_open_ex(const char *path, const char *headers, FmErr *err) {
+  return aud_open_msg(path, headers, err, NULL, 0);
+}
+
+FmAudio *aud_open_msg(const char *path, const char *headers, FmErr *err, char *msg, size_t cap) {
+  if (msg && cap) msg[0] = 0;
   FmAudio *a = (FmAudio *)fm_calloc(1, sizeof *a);
-  a->f = fm_fopen(path, "rb");
-  if (!a->f) { fm_free(a); *err = FM_ERR_NOT_FOUND; return NULL; }
+  a->budget = -1;                      /* no read limit */
   u8 head[64];
-  size_t hn = fread(head, 1, sizeof head, a->f);
-  fm_fseek64(a->f, 0, SEEK_SET);
+  size_t hn;
+  if (is_url(path)) {
+    char e[160];
+    a->ns = ns_open(path, headers, e, sizeof e);
+    if (!a->ns) {
+      fm_log("audio: %s: %s", path, e);
+      if (msg) fm_strlcpy(msg, e, cap);
+      fm_free(a);
+      *err = FM_ERR_IO;
+      return NULL;
+    }
+    /* sniff without consuming: radio cannot rewind */
+    enum { PEEK = 16384, PEEK_MAX = 128 * 1024 };
+    u8 *peek = (u8 *)fm_alloc(PEEK_MAX);
+    size_t pn = ns_peek(a->ns, peek, PEEK);
+    a->audio_start = id3_size(peek, pn);
+    /* a big ID3 tag (cover art) hides the first frame: look further */
+    if (a->audio_start > 0 && a->audio_start + 4096 > (i64)pn && a->audio_start + 4096 <= PEEK_MAX)
+      pn = ns_peek(a->ns, peek, (size_t)a->audio_start + 4096);
+    hn = FM_MIN(pn, sizeof head);
+    memcpy(head, peek, hn);
+    if (a->audio_start < (i64)pn) a->kbps = mpeg_kbps(peek + a->audio_start, pn - (size_t)a->audio_start);
+    fm_free(peek);
+  } else {
+    a->f = fm_fopen(path, "rb");
+    if (!a->f) { fm_free(a); *err = FM_ERR_NOT_FOUND; return NULL; }
+    hn = fread(head, 1, sizeof head, a->f);
+    fm_fseek64(a->f, 0, SEEK_SET);
+  }
   a->kind = sniff_audio(head, hn, path);
+  /* radio joins mid-frame, so the first byte is rarely a sync: trust the
+  ** server's type, or a frame header found in the first 16 KB */
+  if (a->ns && a->kind == AK_FF) {
+    const char *ct = ns_content_type(a->ns);
+    /* a frame sync found in the scan only counts when the server did not
+    ** name another audio type: AAC data can contain one by chance */
+    bool named_other = strstr(ct, "aac") || strstr(ct, "ogg") || strstr(ct, "opus") || strstr(ct, "flac") ||
+                       strstr(ct, "mp4") || strstr(ct, "wav");
+    if (strstr(ct, "audio/mpeg") || strstr(ct, "audio/mp3") || (a->kbps > 0 && !named_other)) a->kind = AK_MP3;
+  }
+  if (a->ns) fm_log("audio: stream kind %d, %d kbps, %s, '%s'", a->kind, a->kbps, ns_live(a->ns) ? "live" : "file",
+                    ns_content_type(a->ns));
+  /* Vorbis over HTTP: stb_vorbis wants a FILE, so FFmpeg / Media Foundation */
+  if (a->ns && a->kind == AK_VORBIS) a->kind = AK_FF;
   bool ok = false;
   switch (a->kind) {
     case AK_MP3:
@@ -190,8 +306,9 @@ FmAudio *aud_open(const char *path, FmErr *err) {
       break;
   }
   if (!ok) {
-    /* last resort: FFmpeg, when installed */
+    /* last resort: FFmpeg (or Media Foundation for URLs), when installed */
     if (a->f) { fclose(a->f); a->f = NULL; }
+    if (a->ns) { a->live = ns_live(a->ns); ns_close(a->ns); a->ns = NULL; }
     FmErr ve;
     a->vid = vid_open(path, VID_OPEN_AUDIO_ONLY, &ve);
     if (a->vid && vid_info(a->vid)->has_audio) {
@@ -207,6 +324,9 @@ FmAudio *aud_open(const char *path, FmErr *err) {
   if (!ok || a->rate <= 0 || a->src_ch <= 0 || a->rate > 768000) {
     aud_free(a);
     *err = ff_available() ? FM_ERR_FORMAT : FM_ERR_UNSUPPORTED;
+    if (msg && !msg[0] && is_url(path))
+      fm_strlcpy(msg, *err == FM_ERR_UNSUPPORTED ? "This stream's format needs FFmpeg" : "Not an audio stream this player reads",
+                 cap);
     return NULL;
   }
   a->ch = a->src_ch >= 2 ? 2 : 1;
@@ -219,6 +339,13 @@ int aud_rate(const FmAudio *a) { return a->rate; }
 u64 aud_length(const FmAudio *a) { return a->len; }
 u64 aud_tell(const FmAudio *a) { return a->pos; }
 const char *aud_codec(const FmAudio *a) { return a->codec; }
+
+void aud_now_playing(const FmAudio *a, char *out, size_t cap) {
+  if (a && a->ns) ns_now_playing(a->ns, out, cap);
+  else if (cap) out[0] = 0;
+}
+
+bool aud_is_live(const FmAudio *a) { return a && (a->live || (a->ns && ns_live(a->ns))); }
 
 void aud_close(FmAudio *a) {
   if (a) aud_free(a);
@@ -301,10 +428,25 @@ int aud_read(FmAudio *a, float *out, int frames) {
   return got;
 }
 
+/* Over HTTP a sample-exact MP3 seek would decode from the start (download
+** everything): jump to the proportional byte instead and let the decoder
+** find the next frame there. */
+static bool net_mp3_seek(FmAudio *a, u64 frame) {
+  i64 size = ns_size(a->ns);
+  if (!ns_seekable(a->ns) || size <= a->audio_start || !a->len) return false;
+  double f = FM_CLAMP((double)frame / (double)a->len, 0.0, 0.999);
+  i64 at = a->audio_start + (i64)(f * (double)(size - a->audio_start));
+  if (!ns_seek(a->ns, at)) return false;
+  drmp3_uninit(a->mp3);
+  memset(a->mp3, 0, sizeof *a->mp3);
+  if (!drmp3_init(a->mp3, f_read, mp3_seek, mp3_tell, NULL, a, NULL)) return false;
+  return true;
+}
+
 bool aud_seek(FmAudio *a, u64 frame) {
   bool ok = false;
   switch (a->kind) {
-    case AK_MP3: ok = drmp3_seek_to_pcm_frame(a->mp3, frame) != 0; break;
+    case AK_MP3: ok = a->ns ? net_mp3_seek(a, frame) : drmp3_seek_to_pcm_frame(a->mp3, frame) != 0; break;
     case AK_FLAC: ok = drflac_seek_to_pcm_frame(a->flac, frame) != 0; break;
     case AK_WAV: ok = drwav_seek_to_pcm_frame(a->wav, frame) != 0; break;
     case AK_VORBIS: ok = stb_vorbis_seek(a->vorb, (unsigned)frame) != 0; break;

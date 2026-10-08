@@ -21,6 +21,9 @@
 **     used for pixel formats other than YUV420P.
 **   - One pull loop (vid_decode) interleaves video and audio exactly as the
 **     demuxer delivers them; the caller does the clocking.
+**   - After pl_mpeg and FFmpeg come the plug-in backends (fdec_vid_int.h):
+**     the OS decoders, then the built-in VP9 + Opus WebM decoder, so online
+**     video plays on every target even without FFmpeg.
 */
 #include "fdec_vid.h"
 #include "fdec_vid_int.h"
@@ -456,7 +459,8 @@ struct FmVid {
   double skip_until;
   float *pcm;
   int pcm_cap;
-  /* OS backend (Media Foundation / MediaCodec) */
+  /* plug-in backend: the OS one (Media Foundation / MediaCodec) or the
+  ** built-in one (fdec_vid_soft.c) */
   const FmVidBackend *os;
   void *os_st;
   /* seek fallback for streams without an index (MPEG-TS with sparse key
@@ -874,33 +878,67 @@ static bool ff_seek(FmVid *v, double t) {
 
 /* ---- public API -------------------------------------------------------------------- */
 
+/* Which backends vid_open may try (MMCFM_VIDEO_BACKEND, for testing). */
+enum { BK_MPEG1 = 1, BK_FFMPEG = 2, BK_OS = 4, BK_SOFT = 8, BK_ALL = 15 };
+static const char *g_vid_force;
+
+void vid_force_backend(const char *name) { g_vid_force = name; }
+
+static int backends_allowed(void) {
+  const char *e = g_vid_force ? g_vid_force : getenv("MMCFM_VIDEO_BACKEND");
+  if (!e || !*e) return BK_ALL;
+  if (!fm_stricmp(e, "soft") || !fm_stricmp(e, "built-in")) return BK_SOFT;
+  if (!fm_stricmp(e, "os")) return BK_OS;
+  if (!fm_stricmp(e, "ffmpeg")) return BK_FFMPEG;
+  return BK_ALL;
+}
+
+static bool plugin_open(FmVid *v, const FmVidBackend *b, const char *path, int flags) {
+  memset(&v->info, 0, sizeof v->info);
+  v->os_st = b->open(path, flags, &v->info);
+  if (!v->os_st) {
+    memset(&v->info, 0, sizeof v->info);
+    v->info.sar = 1.0;
+    return false;
+  }
+  v->os = b;
+  if (!v->info.sar) v->info.sar = 1.0;
+  return true;
+}
+
 FmVid *vid_open(const char *path, int flags, FmErr *err) {
   FmVid *v = (FmVid *)fm_calloc(1, sizeof *v);
+  int allow = backends_allowed();
   v->flags = flags;
   v->info.sar = 1.0;
-  if (vid_is_mpeg1(path) && pl_open(v, path)) { *err = FM_OK; return v; }
+  if ((allow & BK_MPEG1) && vid_is_mpeg1(path) && pl_open(v, path)) { *err = FM_OK; return v; }
   if (v->plm) { plm_destroy(v->plm); v->plm = NULL; }
   memset(&v->info, 0, sizeof v->info);
   v->info.sar = 1.0;
   *err = FM_ERR_UNSUPPORTED;
 #ifdef FM_FFMPEG
-  if (ff_open(v, path)) { *err = FM_OK; return v; }
-  ff_close(v);
-  memset(&v->info, 0, sizeof v->info);
-  v->info.sar = 1.0;
-  if (ff.major) *err = FM_ERR_FORMAT;
+  if (allow & BK_FFMPEG) {
+    if (ff_open(v, path)) { *err = FM_OK; return v; }
+    ff_close(v);
+    memset(&v->info, 0, sizeof v->info);
+    v->info.sar = 1.0;
+    v->fmt = v->vctx = v->actx = NULL;
+    v->pkt = NULL;
+    v->frm = NULL;
+    if (ff.major) *err = FM_ERR_FORMAT;
+  }
 #endif
 #ifdef FM_VID_OS
   /* the decoders the OS ships: most phone/camera/web formats */
-  v->os_st = FM_VID_OS_BACKEND.open(path, flags, &v->info);
-  if (v->os_st) {
-    v->os = &FM_VID_OS_BACKEND;
-    if (!v->info.sar) v->info.sar = 1.0;
-    *err = FM_OK;
-    return v;
+  if (allow & BK_OS) {
+    if (plugin_open(v, &FM_VID_OS_BACKEND, path, flags)) { *err = FM_OK; return v; }
+    if (*err == FM_ERR_UNSUPPORTED) *err = FM_ERR_FORMAT;
   }
-  if (*err == FM_ERR_UNSUPPORTED) *err = FM_ERR_FORMAT;
 #endif
+  /* built in: VP9 + Opus in WebM, where nothing above could */
+  if (allow & BK_SOFT) {
+    if (plugin_open(v, &g_vid_soft, path, flags)) { *err = FM_OK; return v; }
+  }
   fm_free(v);
   return NULL;
 }
@@ -935,10 +973,32 @@ static int pair_decode(FmVid *v, FmVidFrame *vf, FmVidPcm *pc) {
   return VID_EV_ERROR;
 }
 
+/* The audio half opens on its own thread while the video half opens here:
+** for streams each open is a network round trip or two, and one after the
+** other they added up. */
+typedef struct HalfOpen { const char *path; FmVid *v; FmErr err; } HalfOpen;
+
+static int half_open_thread(void *u) {
+  HalfOpen *h = (HalfOpen *)u;
+  h->v = vid_open(h->path, VID_OPEN_AUDIO_ONLY, &h->err);
+  return 0;
+}
+
 FmVid *vid_open_pair(const char *video, const char *audio, int flags, FmErr *err) {
   FmErr e1 = FM_OK, e2 = FM_OK;
+  HalfOpen ho = { audio, NULL, FM_OK };
+  SDL_Thread *th = NULL;
+  bool want_a = !(flags & VID_OPEN_NO_AUDIO);
+  if (want_a && !(flags & VID_OPEN_AUDIO_ONLY)) th = fm_thread_create(half_open_thread, "vid-pair-audio", &ho);
   FmVid *hv = (flags & VID_OPEN_AUDIO_ONLY) ? NULL : vid_open(video, VID_OPEN_NO_AUDIO, &e1);
-  FmVid *ha = (flags & VID_OPEN_NO_AUDIO) ? NULL : vid_open(audio, VID_OPEN_AUDIO_ONLY, &e2);
+  FmVid *ha = NULL;
+  if (th) {
+    SDL_WaitThread(th, NULL);
+    ha = ho.v;
+    e2 = ho.err;
+  } else if (want_a) {
+    ha = vid_open(audio, VID_OPEN_AUDIO_ONLY, &e2);
+  }
   if (!hv && !ha) { *err = e1 != FM_OK ? e1 : e2; return NULL; }
   if (!hv || !ha) {                    /* one half is enough to play */
     *err = FM_OK;

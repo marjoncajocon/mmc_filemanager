@@ -14,9 +14,13 @@ mmcfm itself is under the MIT licence (`LICENSE`). It includes the following cod
 | dr_mp3, dr_flac, dr_wav | `vendor/` | MIT-0 or public domain (your choice) |
 | pl_mpeg | `vendor/pl_mpeg.h` | MIT |
 | nanosvg, nanosvgrast | `vendor/` | zlib |
+| nestegg (git 767aab2) | `vendor/nestegg/` | ISC (`vendor/nestegg/LICENSE`) |
+| libvpx 1.17.0 (VP9 decoder) | `vendor/libvpx/` | BSD-3-Clause (`vendor/libvpx/LICENSE`) with the WebM Project's patent grant (`vendor/libvpx/PATENTS`) |
+| libopus 1.6.1 (decoder) | `vendor/opus/` | BSD-3-Clause (`vendor/opus/COPYING`) |
 | Poppins font | `assets/fonts/` | SIL Open Font License 1.1 (`assets/fonts/OFL.txt`) |
 | RAR decoding in `src/frar.c` | derived from libarchive | BSD-2-Clause (notice kept in the file) |
 | RAR test fixtures | `tests/fixtures/` | from libarchive's test suite, BSD-2-Clause |
+| `tests/fixtures/vp9_opus.webm` | `tests/fixtures/` | made for mmcfm with FFmpeg's `testsrc2` and `sine` generators; MIT like mmcfm |
 
 ## Optional run-time components
 

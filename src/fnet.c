@@ -45,9 +45,14 @@ typedef struct Body {
   size_t len, cap, max;
   FILE *f;
   bool over;
+  /* streaming: chunks go to `sink` instead; `head` runs once before them */
+  FmNetHead head;
+  FmNetData sink;
+  void *su;
 } Body;
 
 static bool body_put(Body *b, const void *p, size_t n) {
+  if (b->sink) return b->sink(b->su, (const u8 *)p, n);
   if (b->f) return fwrite(p, 1, n, b->f) == n;
   if (b->len + n > b->max) { b->over = true; return false; }
   if (b->len + n + 1 > b->cap) {
@@ -63,7 +68,7 @@ static bool body_put(Body *b, const void *p, size_t n) {
   return true;
 }
 #else
-typedef struct Body { u8 *data; size_t len, cap, max; FILE *f; bool over; } Body;
+typedef struct Body { u8 *data; size_t len, cap, max; FILE *f; bool over; FmNetHead head; FmNetData sink; void *su; } Body;
 #endif
 
 /* ============================================================================ */
@@ -91,7 +96,7 @@ enum {
   WH_QUERY_STATUS = 19, WH_QUERY_CTYPE = 1, WH_QUERY_CLEN = 5, WH_QUERY_NUMBER = 0x20000000,
   WH_OPT_SECURE_PROTOCOLS = 84, WH_TLS11 = 0x200, WH_TLS12 = 0x800, WH_TLS13 = 0x2000,
   WH_OPT_DECOMPRESSION = 118, WH_DECOMP_ALL = 3, WH_OPT_REDIRECT_POLICY = 88, WH_REDIRECT_ALWAYS_SAFE = 1,
-  WH_ADDREQ_ADD = 0x20000000,
+  WH_ADDREQ_ADD = 0x20000000, WH_QUERY_CUSTOM = 65535,
 };
 
 static struct {
@@ -194,6 +199,32 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
   DWORD clen = 0;
   sz = sizeof clen;
   u64 total = wh.qhdr(req, WH_QUERY_CLEN | WH_QUERY_NUMBER, NULL, &clen, &sz, NULL) ? clen : 0;
+  out->length = total ? (i64)total : -1;
+  {
+    wchar_t hv[128];
+    char a[128];
+    sz = sizeof hv;
+    if (wh.qhdr(req, WH_QUERY_CUSTOM, L"Accept-Ranges", hv, &sz, NULL)) {
+      WideCharToMultiByte(CP_UTF8, 0, hv, -1, a, (int)sizeof a, NULL, NULL);
+      out->ranges = fm_strnicmp(a, "bytes", 5) == 0;
+    }
+    if (status == 206) out->ranges = true;
+    sz = sizeof hv;
+    if (wh.qhdr(req, WH_QUERY_CUSTOM, L"Content-Range", hv, &sz, NULL)) {
+      WideCharToMultiByte(CP_UTF8, 0, hv, -1, a, (int)sizeof a, NULL, NULL);
+      const char *sl = strchr(a, '/');
+      if (sl && sl[1] != '*') out->total = (i64)_atoi64(sl + 1);
+    }
+    sz = sizeof hv;
+    if (wh.qhdr(req, WH_QUERY_CUSTOM, L"icy-metaint", hv, &sz, NULL)) {
+      WideCharToMultiByte(CP_UTF8, 0, hv, -1, a, (int)sizeof a, NULL, NULL);
+      out->icy_metaint = atoi(a);
+    }
+    sz = sizeof hv;
+    if (wh.qhdr(req, WH_QUERY_CUSTOM, L"icy-name", hv, &sz, NULL))
+      WideCharToMultiByte(CP_UTF8, 0, hv, -1, out->icy_name, (int)sizeof out->icy_name, NULL, NULL);
+  }
+  if (b->head) b->head(b->su, out);
   u8 chunk[16384];
   u64 done_bytes = 0;
   for (;;) {
@@ -240,7 +271,8 @@ enum {
   CURLOPT_HTTPHEADER_ = 10023, CURLOPT_USERAGENT_ = 10018, CURLOPT_XFERINFOFUNCTION_ = 20219,
   CURLOPT_XFERINFODATA_ = 10057, CURLOPT_NOPROGRESS_ = 43, CURLOPT_CONNECTTIMEOUT_ = 78,
   CURLOPT_LOW_SPEED_TIME_ = 20, CURLOPT_LOW_SPEED_LIMIT_ = 19, CURLOPT_ACCEPT_ENCODING_ = 10102,
-  CURLOPT_MAXREDIRS_ = 68, CURLOPT_NOSIGNAL_ = 99,
+  CURLOPT_MAXREDIRS_ = 68, CURLOPT_NOSIGNAL_ = 99, CURLOPT_HEADERFUNCTION_ = 20079,
+  CURLOPT_HEADERDATA_ = 10029, CURLOPT_HTTP09_ALLOWED_ = 285,
   CURLINFO_RESPONSE_CODE_ = 0x200002, CURLINFO_CONTENT_TYPE_ = 0x100012,
 };
 
@@ -291,10 +323,55 @@ const char *net_backend(void) {
   return cu.version ? cu.version() : "libcurl";
 }
 
-typedef struct CuCtx { Body *b; FmNetProgress cb; void *user; volatile int *cancel; bool stop; } CuCtx;
+typedef struct CuCtx {
+  Body *b; FmNetProgress cb; void *user; volatile int *cancel; bool stop;
+  CURL *h; FmNetResp *out; bool head_sent;
+} CuCtx;
+
+/* one response header line; a new status line (redirects) starts over */
+static size_t cu_header(char *p, size_t sz, size_t n, void *u) {
+  CuCtx *c = (CuCtx *)u;
+  size_t len = sz * n;
+  char line[256];
+  fm_strlcpy(line, p, FM_MIN(len + 1, sizeof line));
+  line[strcspn(line, "\r\n")] = 0;
+  FmNetResp *o = c->out;
+  if (!fm_strnicmp(line, "HTTP/", 5) || !fm_strnicmp(line, "ICY ", 4)) {
+    o->length = -1;
+    o->ranges = false;
+    o->icy_metaint = 0;
+    const char *sp = strchr(line, ' ');
+    if (sp && atoi(sp + 1) == 206) o->ranges = true;
+  } else if (!fm_strnicmp(line, "content-length:", 15)) {
+    o->length = (i64)strtoll(line + 15, NULL, 10);
+  } else if (!fm_strnicmp(line, "accept-ranges:", 14)) {
+    const char *v = line + 14;
+    while (*v == ' ') v++;
+    if (!fm_strnicmp(v, "bytes", 5)) o->ranges = true;
+  } else if (!fm_strnicmp(line, "content-range:", 14)) {
+    const char *sl = strchr(line, '/');
+    if (sl && sl[1] != '*') o->total = (i64)strtoll(sl + 1, NULL, 10);
+  } else if (!fm_strnicmp(line, "icy-metaint:", 12)) {
+    o->icy_metaint = atoi(line + 12);
+  } else if (!fm_strnicmp(line, "icy-name:", 9)) {
+    const char *v = line + 9;
+    while (*v == ' ') v++;
+    fm_strlcpy(o->icy_name, v, sizeof o->icy_name);
+  }
+  return len;
+}
 
 static size_t cu_write(char *p, size_t sz, size_t n, void *u) {
   CuCtx *c = (CuCtx *)u;
+  if (!c->head_sent) {
+    c->head_sent = true;
+    long st = 0;
+    cu.getinfo(c->h, CURLINFO_RESPONSE_CODE_, &st);
+    c->out->status = (int)st;
+    char *ct = NULL;
+    if (cu.getinfo(c->h, CURLINFO_CONTENT_TYPE_, &ct) == 0 && ct) fm_strlcpy(c->out->type, ct, sizeof c->out->type);
+    if (c->b->head) c->b->head(c->b->su, c->out);
+  }
   if ((c->cancel && *c->cancel) || !body_put(c->b, p, sz * n)) { c->stop = true; return 0; }
   return sz * n;
 }
@@ -314,7 +391,15 @@ static FmErr cu_request(const char *url, const char *headers, Body *b, FmNetProg
   if (!cu_load()) { fm_strlcpy(out->error, "libcurl is not installed", sizeof out->error); return FM_ERR_UNSUPPORTED; }
   CURL *h = cu.init();
   if (!h) return FM_ERR_NOMEM;
-  CuCtx ctx = { b, cb, user, cancel, false };
+  CuCtx ctx;
+  memset(&ctx, 0, sizeof ctx);
+  ctx.b = b;
+  ctx.cb = cb;
+  ctx.user = user;
+  ctx.cancel = cancel;
+  ctx.h = h;
+  ctx.out = out;
+  out->length = -1;
   struct curl_slist *hl = NULL;
   if (headers) {
     const char *p = headers;
@@ -336,6 +421,9 @@ static FmErr cu_request(const char *url, const char *headers, Body *b, FmNetProg
   cu.setopt(h, CURLOPT_ACCEPT_ENCODING_, "");
   cu.setopt(h, CURLOPT_WRITEFUNCTION_, (CurlWriteFn)cu_write);
   cu.setopt(h, CURLOPT_WRITEDATA_, (void *)&ctx);
+  cu.setopt(h, CURLOPT_HEADERFUNCTION_, (CurlWriteFn)cu_header);
+  cu.setopt(h, CURLOPT_HEADERDATA_, (void *)&ctx);
+  cu.setopt(h, CURLOPT_HTTP09_ALLOWED_, 1L);   /* SHOUTcast v1 answers "ICY 200 OK" */
   cu.setopt(h, CURLOPT_XFERINFOFUNCTION_, (CurlXferFn)cu_xfer);
   cu.setopt(h, CURLOPT_XFERINFODATA_, (void *)&ctx);
   cu.setopt(h, CURLOPT_NOPROGRESS_, 0L);
@@ -391,6 +479,19 @@ FmErr net_get(const char *url, const char *headers, size_t max_bytes, FmNetResp 
   if (err != FM_OK) { fm_free(b.data); b.data = NULL; b.len = 0; }
   out->data = b.data;
   out->len = b.len;
+  return err;
+}
+
+FmErr net_get_stream(const char *url, const char *headers, FmNetHead head, FmNetData data, void *user,
+                     FmNetResp *out, volatile int *cancel) {
+  Body b;
+  memset(&b, 0, sizeof b);
+  b.head = head;
+  b.sink = data;
+  b.su = user;
+  FmErr err = REQUEST(url, headers, &b, NULL, NULL, out, cancel);
+  out->data = NULL;
+  out->len = 0;
   return err;
 }
 

@@ -37,6 +37,7 @@
 #include <propvarutil.h>
 
 #include "fdec_vid_int.h"
+#include "fnetstream.h"
 #include "fsdl.h"
 #include "fplat.h"
 
@@ -47,6 +48,9 @@ typedef HRESULT (WINAPI *MFShutdownFn)(void);
 typedef HRESULT (WINAPI *MFCreateAttributesFn)(IMFAttributes **, UINT32);
 typedef HRESULT (WINAPI *MFCreateMediaTypeFn)(IMFMediaType **);
 typedef HRESULT (WINAPI *MFCreateReaderFn)(LPCWSTR, IMFAttributes *, IMFSourceReader **);
+typedef HRESULT (WINAPI *MFCreateReaderBsFn)(IMFByteStream *, IMFAttributes *, IMFSourceReader **);
+typedef HRESULT (WINAPI *MFCreateAsyncResultFn)(IUnknown *, IMFAsyncCallback *, IUnknown *, IMFAsyncResult **);
+typedef HRESULT (WINAPI *MFInvokeCallbackFn)(IMFAsyncResult *);
 
 static struct {
   int state;                 /* 0 untried, 1 ok, -1 missing */
@@ -55,6 +59,9 @@ static struct {
   MFCreateAttributesFn create_attributes;
   MFCreateMediaTypeFn create_media_type;
   MFCreateReaderFn create_reader;
+  MFCreateReaderBsFn create_reader_bs;     /* streaming through our byte stream */
+  MFCreateAsyncResultFn create_async;
+  MFInvokeCallbackFn invoke;
 } mf;
 
 static SDL_SpinLock g_mf_lock;
@@ -73,6 +80,10 @@ static bool mf_load(void) {
       mf.create_media_type = (MFCreateMediaTypeFn)(void (*)(void))GetProcAddress(plat, "MFCreateMediaType");
       mf.create_reader =
           (MFCreateReaderFn)(void (*)(void))GetProcAddress(rw, "MFCreateSourceReaderFromURL");
+      mf.create_reader_bs =
+          (MFCreateReaderBsFn)(void (*)(void))GetProcAddress(rw, "MFCreateSourceReaderFromByteStream");
+      mf.create_async = (MFCreateAsyncResultFn)(void (*)(void))GetProcAddress(plat, "MFCreateAsyncResult");
+      mf.invoke = (MFInvokeCallbackFn)(void (*)(void))GetProcAddress(plat, "MFInvokeCallback");
     }
     mf.state = (mf.startup && mf.shutdown && mf.create_attributes && mf.create_media_type &&
                 mf.create_reader) ? 1 : -1;
@@ -84,6 +95,318 @@ static bool mf_load(void) {
 /* IMF2DBuffer gives the real row pitch; declared here so no uuid lib is needed. */
 DEFINE_GUID(FM_IID_IMF2DBuffer, 0x7dc9d5f9, 0x9ed9, 0x44ec, 0x9b, 0xbf, 0x06, 0x00, 0xbb, 0x58, 0x9f, 0xbb);
 
+/* ---- streaming: an IMFByteStream over FmNetStream ------------------------------ */
+
+/* Media Foundation's own HTTP stack gets throttled by some hosts and cannot
+** take our headers; reading through FmNetStream (ring buffer, range seeks)
+** lets the source reader play while the data arrives.
+** BeginRead must not block: it runs on Media Foundation's shared work-queue
+** threads, and a network wait there starved the other reader of a
+** video+audio pair. So each byte stream has its own reader thread; BeginRead
+** queues the request and returns, the thread reads and invokes the callback. */
+
+typedef struct NsBS {
+  IMFByteStreamVtbl *lpVtbl;
+  LONG ref;
+  FmNetStream *ns;
+  IMFAttributes *attrs;      /* content type + origin name: the URL has no extension */
+  bool eof;
+  /* async reads */
+  SDL_Thread *thr;
+  SDL_mutex *mx;
+  SDL_cond *cv;
+  bool quit;
+  /* queued reads, served strictly in order: Media Foundation does overlap
+  ** them, and reading two at once interleaved the bytes (corrupt stream) */
+  struct { BYTE *buf; ULONG cb; IMFAsyncResult *res; QWORD pos; } q[8];
+  int qhead, qcount;
+  /* Media Foundation's view of the position: each read starts where the
+  ** previous one ended *when it was issued*, even while earlier reads are
+  ** still queued, and SetCurrentPosition may come in between. Reading from
+  ** whatever FmNetStream happened to be at fed it the wrong bytes. */
+  QWORD cursor;
+  /* live streams cannot rewind, but Media Foundation's AAC/MP3 sources probe
+  ** the first bytes and seek back (MF_E_BYTESTREAM_NOT_SEEKABLE otherwise):
+  ** the last HIST bytes read are kept so such seeks are served from memory */
+  u8 *hist;
+  size_t hist_len;
+  QWORD hist_start;          /* stream position of hist[0] */
+  QWORD live_pos;            /* how far the live stream has been read */
+} NsBS;
+
+#define HIST (512u * 1024u)
+
+typedef struct ReadRes {
+  IUnknownVtbl *lpVtbl;
+  LONG ref;
+  ULONG got;
+} ReadRes;
+
+static HRESULT STDMETHODCALLTYPE rr_qi(IUnknown *u, REFIID iid, void **out) {
+  if (IsEqualIID(iid, &IID_IUnknown)) { *out = u; u->lpVtbl->AddRef(u); return S_OK; }
+  *out = NULL;
+  return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE rr_addref(IUnknown *u) { return (ULONG)InterlockedIncrement(&((ReadRes *)u)->ref); }
+static ULONG STDMETHODCALLTYPE rr_release(IUnknown *u) {
+  ReadRes *r = (ReadRes *)u;
+  LONG n = InterlockedDecrement(&r->ref);
+  if (!n) fm_free(r);
+  return (ULONG)n;
+}
+static IUnknownVtbl g_rr_vtbl = { rr_qi, rr_addref, rr_release };
+
+#define BS(p) ((NsBS *)(p))
+
+static HRESULT STDMETHODCALLTYPE bs_qi(IMFByteStream *p, REFIID iid, void **out) {
+  if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IMFByteStream)) {
+    *out = p;
+    InterlockedIncrement(&BS(p)->ref);
+    return S_OK;
+  }
+  if (IsEqualIID(iid, &IID_IMFAttributes) && BS(p)->attrs)
+    return IMFAttributes_QueryInterface(BS(p)->attrs, iid, out);
+  *out = NULL;
+  return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE bs_addref(IMFByteStream *p) { return (ULONG)InterlockedIncrement(&BS(p)->ref); }
+static ULONG STDMETHODCALLTYPE bs_release(IMFByteStream *p) {
+  NsBS *b = BS(p);
+  LONG n = InterlockedDecrement(&b->ref);
+  if (!n) {
+    if (b->thr) {
+      SDL_LockMutex(b->mx);
+      b->quit = true;
+      SDL_CondBroadcast(b->cv);
+      SDL_UnlockMutex(b->mx);
+      SDL_WaitThread(b->thr, NULL);
+    }
+    for (int i = 0; i < b->qcount; i++) IMFAsyncResult_Release(b->q[(b->qhead + i) % 8].res);
+    if (b->cv) SDL_DestroyCond(b->cv);
+    if (b->mx) SDL_DestroyMutex(b->mx);
+    if (b->attrs) IMFAttributes_Release(b->attrs);
+    ns_close(b->ns);
+    fm_free(b->hist);
+    fm_free(b);
+  }
+  return (ULONG)n;
+}
+static HRESULT STDMETHODCALLTYPE bs_caps(IMFByteStream *p, DWORD *caps) {
+  /* live streams seek inside the rewind window (see NsBS.hist) */
+  *caps = MFBYTESTREAM_IS_READABLE | MFBYTESTREAM_IS_SEEKABLE;
+  FM_UNUSED(p);
+  return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE bs_getlen(IMFByteStream *p, QWORD *len) {
+  i64 n = ns_size(BS(p)->ns);
+  *len = n >= 0 ? (QWORD)n : (QWORD)-1;
+  return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE bs_setlen(IMFByteStream *p, QWORD len) { FM_UNUSED(p); FM_UNUSED(len); return E_NOTIMPL; }
+static HRESULT STDMETHODCALLTYPE bs_getpos(IMFByteStream *p, QWORD *pos) {
+  SDL_LockMutex(BS(p)->mx);
+  *pos = BS(p)->cursor;
+  SDL_UnlockMutex(BS(p)->mx);
+  return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE bs_setpos(IMFByteStream *p, QWORD pos) {
+  i64 size = ns_size(BS(p)->ns);
+  if (size >= 0 && (i64)pos > size) return E_INVALIDARG;
+  if (BS(p)->hist && pos < BS(p)->hist_start) return E_FAIL;   /* fell out of the window */
+  SDL_LockMutex(BS(p)->mx);
+  BS(p)->cursor = pos;                        /* reads seek there when they run */
+  BS(p)->eof = false;
+  SDL_UnlockMutex(BS(p)->mx);
+  return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE bs_iseos(IMFByteStream *p, BOOL *eos) { *eos = BS(p)->eof; return S_OK; }
+/* Live: reads cb bytes at `at` through the rewind window. */
+static ULONG read_live(NsBS *b, QWORD at, BYTE *buf, ULONG cb) {
+  if (at < b->hist_start) return 0;
+  ULONG done = 0;
+  while (done < cb) {
+    QWORD p = at + done;
+    if (p < b->hist_start + b->hist_len) {            /* already read: from memory */
+      size_t off = (size_t)(p - b->hist_start);
+      size_t take = FM_MIN((size_t)(cb - done), b->hist_len - off);
+      memcpy(buf + done, b->hist + off, take);
+      done += (ULONG)take;
+      continue;
+    }
+    /* read on from the live position into the window, then copy */
+    u8 tmp[16384];
+    size_t got = ns_read(b->ns, tmp, sizeof tmp);
+    if (!got) break;
+    if (b->hist_len + got > HIST) {                   /* slide: drop the oldest */
+      size_t drop = b->hist_len + got - HIST;
+      memmove(b->hist, b->hist + drop, b->hist_len - drop);
+      b->hist_len -= drop;
+      b->hist_start += drop;
+    }
+    memcpy(b->hist + b->hist_len, tmp, got);
+    b->hist_len += got;
+    b->live_pos += got;
+  }
+  return done;
+}
+
+/* Reads cb bytes at `at` (only the reader thread or Read calls this). */
+static ULONG read_at(NsBS *b, QWORD at, BYTE *buf, ULONG cb) {
+  if (b->hist) return read_live(b, at, buf, cb);
+  if (ns_tell(b->ns) != (i64)at && !ns_seek(b->ns, (i64)at)) return 0;
+  size_t n = 0, r;
+  while (n < cb && (r = ns_read(b->ns, buf + n, cb - n)) > 0) n += r;
+  return (ULONG)n;
+}
+
+static HRESULT STDMETHODCALLTYPE bs_read(IMFByteStream *p, BYTE *buf, ULONG cb, ULONG *got) {
+  NsBS *b = BS(p);
+  SDL_LockMutex(b->mx);
+  QWORD at = b->cursor;
+  b->cursor += cb;
+  SDL_UnlockMutex(b->mx);
+  *got = read_at(b, at, buf, cb);
+  SDL_LockMutex(b->mx);
+  if (*got < cb) { b->eof = true; b->cursor = at + *got; }
+  SDL_UnlockMutex(b->mx);
+  return S_OK;
+}
+/* The byte stream's reader thread: one queued read at a time. */
+static int bs_reader(void *u) {
+  NsBS *b = (NsBS *)u;
+  SDL_LockMutex(b->mx);
+  while (!b->quit) {
+    if (!b->qcount) { SDL_CondWait(b->cv, b->mx); continue; }
+    IMFAsyncResult *res = b->q[b->qhead].res;
+    BYTE *buf = b->q[b->qhead].buf;
+    ULONG cb = b->q[b->qhead].cb;
+    QWORD at = b->q[b->qhead].pos;
+    b->qhead = (b->qhead + 1) % 8;
+    b->qcount--;
+    SDL_UnlockMutex(b->mx);
+    IUnknown *u2 = NULL;
+    ULONG got = read_at(b, at, buf, cb);
+    if (got < cb) {
+      SDL_LockMutex(b->mx);
+      b->eof = true;
+      if (b->cursor == at + cb) b->cursor = at + got;   /* nothing was issued after it */
+      SDL_UnlockMutex(b->mx);
+    }
+    if (SUCCEEDED(IMFAsyncResult_GetObject(res, &u2)) && u2) {
+      ((ReadRes *)u2)->got = got;
+      u2->lpVtbl->Release(u2);
+    }
+    IMFAsyncResult_SetStatus(res, S_OK);
+    mf.invoke(res);
+    IMFAsyncResult_Release(res);
+    SDL_LockMutex(b->mx);
+  }
+  SDL_UnlockMutex(b->mx);
+  return 0;
+}
+
+static HRESULT STDMETHODCALLTYPE bs_beginread(IMFByteStream *p, BYTE *buf, ULONG cb, IMFAsyncCallback *cbk,
+                                              IUnknown *state) {
+  NsBS *b = BS(p);
+  ReadRes *rr = (ReadRes *)fm_calloc(1, sizeof *rr);
+  rr->lpVtbl = &g_rr_vtbl;
+  rr->ref = 1;
+  IMFAsyncResult *res = NULL;
+  HRESULT hr = mf.create_async((IUnknown *)rr, cbk, state, &res);
+  rr_release((IUnknown *)rr);                 /* the result holds it now */
+  if (FAILED(hr)) return hr;
+  SDL_LockMutex(b->mx);
+  if (b->qcount == 8) {                       /* far more than Media Foundation uses */
+    SDL_UnlockMutex(b->mx);
+    IMFAsyncResult_Release(res);
+    return E_FAIL;
+  }
+  int slot = (b->qhead + b->qcount) % 8;
+  b->q[slot].buf = buf;
+  b->q[slot].cb = cb;
+  b->q[slot].res = res;                       /* the reader thread releases it */
+  b->q[slot].pos = b->cursor;                 /* where this read starts */
+  b->cursor += cb;
+  b->qcount++;
+  SDL_CondSignal(b->cv);
+  SDL_UnlockMutex(b->mx);
+  return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE bs_endread(IMFByteStream *p, IMFAsyncResult *res, ULONG *got) {
+  FM_UNUSED(p);
+  IUnknown *u = NULL;
+  *got = 0;
+  if (SUCCEEDED(IMFAsyncResult_GetObject(res, &u)) && u) {
+    *got = ((ReadRes *)u)->got;
+    u->lpVtbl->Release(u);
+  }
+  return IMFAsyncResult_GetStatus(res);
+}
+static HRESULT STDMETHODCALLTYPE bs_write(IMFByteStream *p, const BYTE *b, ULONG n, ULONG *w) {
+  FM_UNUSED(p); FM_UNUSED(b); FM_UNUSED(n); *w = 0; return E_NOTIMPL;
+}
+static HRESULT STDMETHODCALLTYPE bs_beginwrite(IMFByteStream *p, const BYTE *b, ULONG n, IMFAsyncCallback *c,
+                                               IUnknown *st) {
+  FM_UNUSED(p); FM_UNUSED(b); FM_UNUSED(n); FM_UNUSED(c); FM_UNUSED(st); return E_NOTIMPL;
+}
+static HRESULT STDMETHODCALLTYPE bs_endwrite(IMFByteStream *p, IMFAsyncResult *r, ULONG *w) {
+  FM_UNUSED(p); FM_UNUSED(r); *w = 0; return E_NOTIMPL;
+}
+static HRESULT STDMETHODCALLTYPE bs_seek(IMFByteStream *p, MFBYTESTREAM_SEEK_ORIGIN o, LONGLONG off, DWORD flags,
+                                         QWORD *cur) {
+  FM_UNUSED(flags);
+  QWORD now;
+  bs_getpos(p, &now);
+  i64 to = o == msoBegin ? off : (i64)now + off;
+  HRESULT hr = to < 0 ? E_INVALIDARG : bs_setpos(p, (QWORD)to);
+  if (cur) bs_getpos(p, cur);
+  return hr;
+}
+static HRESULT STDMETHODCALLTYPE bs_flush(IMFByteStream *p) { FM_UNUSED(p); return S_OK; }
+static HRESULT STDMETHODCALLTYPE bs_close(IMFByteStream *p) { FM_UNUSED(p); return S_OK; }
+
+static IMFByteStreamVtbl g_bs_vtbl = {
+  bs_qi, bs_addref, bs_release, bs_caps, bs_getlen, bs_setlen, bs_getpos, bs_setpos, bs_iseos, bs_read,
+  bs_beginread, bs_endread, bs_write, bs_beginwrite, bs_endwrite, bs_seek, bs_flush, bs_close
+};
+
+/* A byte stream for an http(s) URL, or NULL (err says why). */
+static IMFByteStream *net_bytestream(const char *url, char *err, size_t errcap) {
+  if (!mf.create_reader_bs || !mf.create_async || !mf.invoke) return NULL;
+  FmNetStream *ns = ns_open(url, NULL, err, errcap);
+  if (!ns) return NULL;
+  NsBS *b = (NsBS *)fm_calloc(1, sizeof *b);
+  b->lpVtbl = &g_bs_vtbl;
+  b->ref = 1;
+  b->ns = ns;
+  if (!ns_seekable(ns)) b->hist = (u8 *)fm_alloc(HIST);   /* live: rewind window */
+  b->mx = SDL_CreateMutex();
+  b->cv = SDL_CreateCond();
+  b->thr = b->mx && b->cv ? fm_thread_create(bs_reader, "mf-bytestream", b) : NULL;
+  if (!b->thr) {
+    bs_release((IMFByteStream *)b);
+    return NULL;
+  }
+  if (SUCCEEDED(mf.create_attributes(&b->attrs, 2))) {
+    /* the source resolver picks the container from these */
+    const char *ct = ns_content_type(ns);
+    char type[96];
+    fm_strlcpy(type, ct && *ct ? ct : "video/mp4", sizeof type);
+    type[strcspn(type, ";")] = 0;
+    /* raw AAC radio (ADTS) is ".aac" to Windows; MP4/M4A boxes are not */
+    const wchar_t *origin = strstr(type, "webm") ? L"stream.webm"
+                            : strstr(type, "mpeg") && strstr(type, "audio") ? L"stream.mp3"
+                            : strstr(type, "aac") ? L"stream.aac"
+                            : strstr(type, "mp2t") ? L"stream.ts"
+                            : strstr(type, "audio") ? L"stream.m4a" : L"stream.mp4";
+    wchar_t wtype[96];
+    MultiByteToWideChar(CP_UTF8, 0, type, -1, wtype, 96);
+    IMFAttributes_SetString(b->attrs, &MF_BYTESTREAM_CONTENT_TYPE, wtype);
+    IMFAttributes_SetString(b->attrs, &MF_BYTESTREAM_ORIGIN_NAME, origin);
+  }
+  return (IMFByteStream *)b;
+}
+
 /* ---- state ---------------------------------------------------------------- */
 
 enum { PIX_NONE, PIX_NV12, PIX_I420, PIX_YV12, PIX_RGB32 };
@@ -91,6 +414,7 @@ enum { PIX_NONE, PIX_NV12, PIX_I420, PIX_YV12, PIX_RGB32 };
 typedef struct MfVid {
   IMFSourceReader *rd;
   bool com_init, started;
+  DWORD com_thread;          /* COM is per thread: undo it only where it was done */
   DWORD vs, as;              /* selected streams (reader aliases), (DWORD)-1 = none */
   DWORD vi, ai;              /* their real indexes, as ReadSample reports them */
   int pix;
@@ -278,29 +602,36 @@ static void mf_close(void *st) {
   if (!m) return;
   sr(m->rd);
   if (m->started) mf.shutdown();
-  if (m->com_init) CoUninitialize();
+  if (m->com_init && m->com_thread == GetCurrentThreadId()) CoUninitialize();
   for (int i = 0; i < 3; i++) fm_free(m->plane[i]);
   fm_free(m->pcm);
   fm_free(m->path);
   fm_free(m);
 }
 
-static IMFSourceReader *make_reader(const wchar_t *url, bool advanced) {
+static IMFSourceReader *make_reader(const wchar_t *url, IMFByteStream *bs, bool advanced) {
   IMFAttributes *a = NULL;
   IMFSourceReader *rd = NULL;
   if (FAILED(mf.create_attributes(&a, 2))) return NULL;
   IMFAttributes_SetUINT32(a, advanced ? &MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING
                                       : &MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
-  if (FAILED(mf.create_reader(url, a, &rd))) rd = NULL;
+  HRESULT hr = bs ? mf.create_reader_bs(bs, a, &rd) : mf.create_reader(url, a, &rd);
+  if (FAILED(hr)) {
+    if (bs) fm_log("video: Media Foundation refused the stream (0x%08lx)", (unsigned long)hr);
+    rd = NULL;
+  }
   sr(a);
   return rd;
 }
+
+static bool is_url(const char *p) { return !fm_strnicmp(p, "http://", 7) || !fm_strnicmp(p, "https://", 8); }
 
 static void *mf_open(const char *path, int flags, FmVidInfo *info) {
   if (!mf_load()) return NULL;
   MfVid *m = (MfVid *)fm_calloc(1, sizeof *m);
   HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
   m->com_init = SUCCEEDED(hr);           /* RPC_E_CHANGED_MODE: COM is already up */
+  m->com_thread = GetCurrentThreadId();
   if (FAILED(mf.startup(MF_VERSION_WIN7, 0))) { mf_close(m); return NULL; }
   m->started = true;
 
@@ -310,8 +641,15 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
   MultiByteToWideChar(CP_UTF8, 0, path, -1, url, n);
   /* Windows 8+: the advanced processor converts to NV12/I420; Windows 7 only
   ** knows the basic one (RGB32 output) */
-  m->rd = make_reader(url, true);
-  if (!m->rd) m->rd = make_reader(url, false);
+  IMFByteStream *bs = NULL;
+  if (is_url(path)) {
+    char e[160];
+    bs = net_bytestream(path, e, sizeof e);
+    if (!bs) fm_log("video: %s: %s", path, e);
+  }
+  m->rd = make_reader(url, bs, true);
+  if (!m->rd) m->rd = make_reader(url, bs, false);
+  if (bs) IMFByteStream_Release(bs);          /* the reader keeps its own reference */
   fm_free(url);
   if (!m->rd) { mf_close(m); return NULL; }
 
@@ -523,7 +861,7 @@ static int mf_decode(void *st, FmVidFrame *vf, FmVidPcm *pc) {
     LONGLONG t = 0;
     IMFSample *s = NULL;
     HRESULT hr = IMFSourceReader_ReadSample(m->rd, MF_SOURCE_READER_ANY_STREAM, 0, &idx, &fl, &t, &s);
-    if (FAILED(hr)) return VID_EV_ERROR;
+    if (FAILED(hr)) { fm_log("video: Media Foundation read failed (0x%08lx)", (unsigned long)hr); return VID_EV_ERROR; }
     bool is_v = m->vs != NO_STREAM && !m->vdone && idx == m->vi;
     bool is_a = m->as != NO_STREAM && !m->adone && idx == m->ai;
     if (fl & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
