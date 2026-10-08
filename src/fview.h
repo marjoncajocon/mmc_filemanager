@@ -31,6 +31,16 @@ extern const FmViewer g_view_text;    /* fview_txt.c: text with hex mode */
 /* Viewer for a file type, or NULL when the system should open it. */
 const FmViewer *view_for(FmType t, const char *path);
 
+/* Opens the video player on a stream (online videos): `video` is a URL or a
+** local file, `audio` an optional separate sound track (URL or file) played
+** with it. No file checks, no favorites or recents for it. True when the
+** player took over the window. */
+bool video_open_stream(const char *title, const char *video, const char *audio);
+
+/* The next image viewer opened on a single file shows `title` in its bar
+** instead of the file name (online photos open a cached file). NULL clears. */
+void image_view_title(const char *title);
+
 /* ---- background audio (mini player) ------------------------------------ */
 
 bool audio_mini_active(void);          /* something loaded and the viewer is closed */

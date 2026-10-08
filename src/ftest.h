@@ -23,7 +23,12 @@ int test_archives2(const char *tmp);  /* ftest_arc2.c: 7z and rar */
 int test_media(const char *tmp);      /* ftest_media.c: decoders on generated data */
 int test_fs(const char *tmp);         /* ftest_fs.c: copy/move/delete engine, vfs */
 int test_themes(const char *tmp);     /* ftest_theme.c: every theme readable */
+int test_net(const char *tmp);        /* ftest_net.c: json, processes, https (MMCFM_NET_TEST=1) */
 int test_viz(const char *tmp);        /* ftest_viz.c: visualizer bands, smoothing, presets, conf */
 int test_library(const char *tmp);    /* ftest_lib.c: media library scan, favorites, persistence */
+int test_vsrc(const char *tmp);       /* ftest_vsrc.c: online video sources (MMCFM_NET_TEST=1, MMCFM_YTDLP=path) */
+int test_online_ui(const char *tmp);  /* ftest_online.c: online videos view: formatting, recent searches */
+int test_psrc(const char *tmp);       /* ftest_psrc.c: online photo sources (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
+int test_photo_ui(const char *tmp);   /* ftest_photo.c: online photos view: rows, albums file, recent searches */
 
 #endif

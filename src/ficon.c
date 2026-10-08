@@ -493,6 +493,39 @@ void icon_draw(FmIcon ic, FmRect r, FmColor c) {
       RING(12, 8, 4);
       ARC(12, 22, 8, 200, 340);
       break;
+    case IC_PLAY_BADGE: /* video site: a rounded screen with a play mark */
+      RR(2.5f, 5, 19, 14, 4.5f);
+      SHAPE(10, 9, 15.5f, 12, 10, 15);
+      break;
+    case IC_LINK:
+      gfx_arc(X(8.5f), Y(15.5f), 4.2f * S, SW, 0.79f + PI_F * 0.5f, 0.79f + PI_F * 1.5f, C);
+      gfx_arc(X(15.5f), Y(8.5f), 4.2f * S, SW, 0.79f - PI_F * 0.5f, 0.79f + PI_F * 0.5f, C);
+      L(5.5f, 12.5f, 11.5f, 6.5f); L(11.5f, 6.5f, 12.5f, 5.5f);
+      L(12.5f, 18.5f, 18.5f, 12.5f); L(11.5f, 19.5f, 12.5f, 18.5f);
+      L(9.5f, 14.5f, 14.5f, 9.5f);
+      break;
+    case IC_TV:
+      RR(3, 6, 18, 13, 3);
+      L(8.5f, 2.5f, 12, 6); L(15.5f, 2.5f, 12, 6);
+      break;
+    case IC_LANDMARK:   /* an archive building: roof, columns, base */
+      SHAPE(12, 2.5f, 21, 7.5f, 3, 7.5f);
+      L(6, 10.5f, 6, 17); L(10, 10.5f, 10, 17); L(14, 10.5f, 14, 17); L(18, 10.5f, 18, 17);
+      L(3.5f, 20.5f, 20.5f, 20.5f);
+      break;
+    /* online photos */
+    case IC_ALBUM:      /* a stack of photos: a picture with hills and a sun over a second one */
+    case IC_ALBUM_ADD:  /* the same stack with a plus instead of the picture */
+      POLY(false, 3, 8, 3, 21, 16, 21);
+      RR(7, 3, 14, 14, 2.5f);
+      if (ic == IC_ALBUM) {
+        POLY(false, 7.8f, 14.5f, 11.2f, 11, 13.8f, 13.6f, 15.8f, 11.8f, 20.2f, 15.8f);
+        DOT(16.6f, 7.4f, 1.5f);
+      } else {
+        L(14, 6.5f, 14, 13.5f);
+        L(10.5f, 10, 17.5f, 10);
+      }
+      break;
   }
 }
 

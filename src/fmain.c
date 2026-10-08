@@ -12,6 +12,7 @@
 #include "fapp.h"
 #include "fsdl.h"
 #include "ftest.h"
+#include "fperf.h"
 
 #ifdef __EMSCRIPTEN__
 #  include <emscripten.h>
@@ -220,6 +221,12 @@ int main(int argc, char **argv) {
     else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) sscanf(argv[++i], "%dx%d", &shot_w, &shot_h);
     else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) shot_frames = atoi(argv[++i]);
   }
+  /* --perf: the measured tour of the screens (fperf.c) */
+  bool perf = !shot && perf_wanted(argc, argv);
+  if (perf) {
+    if (!perf_prepare(&app.argc, &app.argv)) return 1;
+    perf_mark("start");
+  }
 
   SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight Portrait PortraitUpsideDown");
   SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
@@ -237,12 +244,13 @@ int main(int argc, char **argv) {
     fatal_box(err);
     return 1;
   }
+  if (perf) perf_mark("sdl");
 
   Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #ifdef FM_MOBILE
   flags |= SDL_WINDOW_FULLSCREEN;
 #endif
-  if (shot) flags &= ~(Uint32)(SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
+  if (shot || perf) flags &= ~(Uint32)(SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI);
   app.win = SDL_CreateWindow("MMC File Manager", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              shot_w, shot_h, flags | SDL_WINDOW_HIDDEN);
   if (!app.win) {
@@ -261,14 +269,17 @@ int main(int argc, char **argv) {
   }
   app.ev_wake = SDL_RegisterEvents(1);
   wait_init();
+  if (perf) perf_mark("window");
 
   if (!font_init()) {
     fatal_box("The built-in fonts could not be loaded.");
     return 1;
   }
+  if (perf) perf_mark("fonts");
   ui_init(app.win);
   app_init();           /* restores window size, theme, panels */
-  if (shot) {
+  if (perf) perf_mark("app_init");
+  if (shot || perf) {
     SDL_SetWindowSize(app.win, shot_w, shot_h);   /* app_init may restore another size */
   }
   SDL_ShowWindow(app.win);
@@ -281,10 +292,12 @@ int main(int argc, char **argv) {
     return rc;
   }
 
+  int rc = 0;
 #ifdef __EMSCRIPTEN__
   emscripten_set_main_loop(web_frame, 0, 1);
 #else
-  while (!app.quit) frame();
+  if (perf) rc = perf_run(frame);
+  else while (!app.quit) frame();
 #endif
 
   app_shutdown();
@@ -295,7 +308,7 @@ int main(int argc, char **argv) {
   SDL_DestroyRenderer(app.ren);
   SDL_DestroyWindow(app.win);
   SDL_Quit();
-  return 0;
+  return rc;
 }
 
 void app_wake(void) {

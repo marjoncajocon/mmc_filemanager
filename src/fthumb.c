@@ -5,11 +5,21 @@
 **     decoded first, and asking again for a queued file moves it to the
 **     top. When the stack is full the oldest request is dropped; the panel
 **     simply asks again if the row is still visible.
-**   - Workers return downscaled RGBA only; textures are created on the main
-**     thread (thumb_get or thumb_pump) and kept in an LRU bounded by bytes.
-**     Textures used in the last two frames are never evicted, so a screen
-**     with more thumbnails than the budget degrades to icons instead of
-**     thrashing.
+**   - Workers return downscaled RGBA only; textures are made on the main
+**     thread (thumb_get or thumb_pump).
+**   - Thumbnails share atlas pages: 512x512 textures cut into equal cells of
+**     one size class each (34, 42, 50 ... 194 px, a 1 px border of copied
+**     edge pixels around every image so filtering never bleeds). thumb_get
+**     returns a view of the cell (gfx_view_new), which the panels draw and
+**     query like a texture. On Windows every texture costs about 80 KB of
+**     driver memory whatever its size, so 400 list thumbnails took ~32 MB as
+**     separate textures and take a few MB as pages; they also draw in fewer
+**     batches. Images bigger than the largest class keep a texture each.
+**   - Memory is bounded by the bytes of pages (and big textures), evicted a
+**     whole page at a time, least recently drawn first; new thumbnails fill
+**     the fullest page of their class, so stale pages empty out. Pages used
+**     in the last two frames are never evicted, so a screen with more
+**     thumbnails than the budget degrades to icons instead of thrashing.
 **   - The disk cache stores raw RGBA with a 12-byte header under
 **     PLACE_CACHE/thumbs, named by a 64-bit hash of path, size, mtime and
 **     edge. Only expensive decodes are stored (big images, videos, audio
@@ -34,6 +44,22 @@
 
 enum { TS_FREE = 0, TS_QUEUED, TS_WORKING, TS_READY, TS_TEX, TS_FAILED };
 
+/* atlas pages */
+#define TH_PAGE 512
+#define TH_PAGES 48
+#define TH_CELLS 256
+static const u8 kClass[] = { 32, 40, 48, 64, 80, 96, 128, 160, 192 };   /* image edge */
+#define TH_NCLASS ((int)sizeof kClass)
+
+typedef struct ThPage {
+  SDL_Texture *tex;        /* NULL: free slot */
+  int cls;                 /* index into kClass, -1: one big image */
+  int cols, ncells, used;
+  size_t bytes;
+  u32 last;                /* frame of the last thumb_get of any cell */
+  u8 busy[TH_CELLS];
+} ThPage;
+
 typedef struct ThEntry {
   u64 key;
   int state;
@@ -44,8 +70,8 @@ typedef struct ThEntry {
   int px;
   FmType type;
   FmImage img;             /* READY */
-  SDL_Texture *tex;        /* TEX (main thread only) */
-  size_t bytes;
+  SDL_Texture *tex;        /* TEX (main thread only): a view, or a page's texture */
+  int page, cell;          /* TEX: where it lives */
   u32 used;                /* frame of the last thumb_get */
 } ThEntry;
 
@@ -60,7 +86,8 @@ static struct {
   int bucket[TH_BUCKETS];
   int stack[TH_STACK];
   int nstack;
-  size_t tex_bytes;
+  ThPage pages[TH_PAGES];
+  size_t tex_bytes;        /* pages + big textures */
   u32 frame;
   char cache_dir[FM_PATH_MAX];
   bool cache_ok;
@@ -97,12 +124,108 @@ static void unlink_entry(int i) {
   }
 }
 
+/* ---- atlas pages (main thread, g.mx held) ------------------------------------ */
+
+static void page_release(int p, int cell) {
+  ThPage *pg = &g.pages[p];
+  if (!pg->tex) return;
+  if (cell >= 0 && cell < pg->ncells && pg->busy[cell]) { pg->busy[cell] = 0; pg->used--; }
+  if (pg->used > 0) return;
+  SDL_DestroyTexture(pg->tex);
+  g.tex_bytes -= pg->bytes;
+  memset(pg, 0, sizeof *pg);
+}
+
+static int class_for(int w, int h) {
+  int m = FM_MAX(w, h);
+  for (int c = 0; c < TH_NCLASS; c++)
+    if (m <= kClass[c]) return c;
+  return -1;
+}
+
+static int page_new(int cls, int w, int h) {
+  int p = -1;
+  for (int i = 0; i < TH_PAGES; i++)
+    if (!g.pages[i].tex) { p = i; break; }
+  if (p < 0) return -1;
+  int tw = cls < 0 ? w : TH_PAGE, th = cls < 0 ? h : TH_PAGE;
+  SDL_Texture *t = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, tw, th);
+  if (!t) return -1;
+  SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+  SDL_SetTextureScaleMode(t, SDL_ScaleModeLinear);
+  ThPage *pg = &g.pages[p];
+  memset(pg, 0, sizeof *pg);
+  pg->tex = t;
+  pg->cls = cls;
+  pg->cols = cls < 0 ? 1 : TH_PAGE / (kClass[cls] + 2);
+  pg->ncells = FM_MIN(pg->cols * pg->cols, TH_CELLS);
+  pg->bytes = (size_t)tw * th * 4;
+  pg->last = g.frame;
+  g.tex_bytes += pg->bytes;
+  return p;
+}
+
+/* Puts the image into a cell (or its own texture); sets e->tex/page/cell. */
+static bool place(ThEntry *e) {
+  int w = e->img.w, h = e->img.h, cls = class_for(w, h);
+  if (cls < 0) {
+    int p = page_new(-1, w, h);
+    if (p < 0) return false;
+    ThPage *pg = &g.pages[p];
+    SDL_UpdateTexture(pg->tex, NULL, e->img.px, w * 4);
+    pg->busy[0] = 1;
+    pg->used = 1;
+    e->tex = pg->tex;
+    e->page = p;
+    e->cell = 0;
+    return true;
+  }
+  /* the fullest page of the class with room, so others can empty out */
+  int p = -1;
+  for (int i = 0; i < TH_PAGES; i++) {
+    ThPage *pg = &g.pages[i];
+    if (pg->tex && pg->cls == cls && pg->used < pg->ncells && (p < 0 || pg->used > g.pages[p].used)) p = i;
+  }
+  if (p < 0 && (p = page_new(cls, 0, 0)) < 0) return false;
+  ThPage *pg = &g.pages[p];
+  int c = 0;
+  while (c < pg->ncells && pg->busy[c]) c++;
+  if (c == pg->ncells) return false;
+  int cs = kClass[cls] + 2, cx = (c % pg->cols) * cs, cy = (c / pg->cols) * cs;
+  /* the image with a 1 px frame copied from its edges */
+  int bw = w + 2, bh = h + 2;
+  u32 *buf = (u32 *)fm_alloc((size_t)bw * bh * 4);
+  if (!buf) { page_release(p, -1); return false; }
+  const u32 *src = (const u32 *)(const void *)e->img.px;
+  for (int y = 0; y < bh; y++) {
+    int sy = FM_CLAMP(y - 1, 0, h - 1);
+    for (int x = 0; x < bw; x++) {
+      int sx = FM_CLAMP(x - 1, 0, w - 1);
+      buf[y * bw + x] = src[sy * w + sx];
+    }
+  }
+  SDL_Rect r = { cx, cy, bw, bh };
+  SDL_UpdateTexture(pg->tex, &r, buf, bw * 4);
+  fm_free(buf);
+  SDL_Texture *v = gfx_view_new(pg->tex, cx + 1, cy + 1, w, h);
+  if (!v) { page_release(p, -1); return false; }
+  pg->busy[c] = 1;
+  pg->used++;
+  e->tex = v;
+  e->page = p;
+  e->cell = c;
+  return true;
+}
+
 /* Main thread (destroys textures) with g.mx held. */
 static void free_entry(int i) {
   ThEntry *e = &g.e[i];
   if (e->state == TS_FREE) return;
   unlink_entry(i);
-  if (e->tex) { SDL_DestroyTexture(e->tex); g.tex_bytes -= e->bytes; }
+  if (e->tex) {
+    if (g.pages[e->page].cls >= 0) gfx_view_free(e->tex);
+    page_release(e->page, e->cell);
+  }
   img_free(&e->img);
   fm_free(e->path);
   memset(e, 0, sizeof *e);
@@ -321,12 +444,12 @@ bool thumb_supported(FmType t) {
 
 /* Main thread, g.mx held. */
 static void upload(ThEntry *e) {
-  e->tex = view_tex_rgba(e->img.px, e->img.w, e->img.h);
-  if (e->tex) {
-    e->bytes = (size_t)e->img.w * e->img.h * 4;
-    g.tex_bytes += e->bytes;
+  e->tex = NULL;
+  if (e->img.px && e->img.w > 0 && e->img.h > 0 && place(e)) {
     e->state = TS_TEX;
+    g.pages[e->page].last = g.frame;
   } else {
+    e->tex = NULL;
     e->state = TS_FAILED;
   }
   img_free(&e->img);
@@ -347,7 +470,10 @@ SDL_Texture *thumb_get(const char *path, i64 mtime, u64 size, int px) {
     ThEntry *e = &g.e[i];
     e->used = g.frame;
     if (e->state == TS_READY) { upload(e); ui_redraw(); }
-    if (e->state == TS_TEX) tex = e->tex;
+    if (e->state == TS_TEX) {
+      tex = e->tex;
+      g.pages[e->page].last = g.frame;
+    }
     else if (e->state == TS_QUEUED) {
       /* asked again: most recent first */
       stack_remove(i);
@@ -388,16 +514,17 @@ void thumb_pump(void) {
   g.frame++;
   for (int i = 0; i < TH_ENTRIES; i++)
     if (g.e[i].state == TS_READY) { upload(&g.e[i]); any = true; }
-  /* evict least recently used textures over the budget */
+  /* over the budget: empty the least recently drawn page */
   while (g.tex_bytes > TH_BUDGET) {
     int victim = -1;
-    for (int i = 0; i < TH_ENTRIES; i++) {
-      ThEntry *e = &g.e[i];
-      if (e->state != TS_TEX || g.frame - e->used < 2) continue;
-      if (victim < 0 || (g.frame - e->used) > (g.frame - g.e[victim].used)) victim = i;
+    for (int p = 0; p < TH_PAGES; p++) {
+      ThPage *pg = &g.pages[p];
+      if (!pg->tex || g.frame - pg->last < 2) continue;
+      if (victim < 0 || (g.frame - pg->last) > (g.frame - g.pages[victim].last)) victim = p;
     }
     if (victim < 0) break;
-    free_entry(victim);
+    for (int i = 0; i < TH_ENTRIES && g.pages[victim].tex; i++)
+      if (g.e[i].state == TS_TEX && g.e[i].page == victim) free_entry(i);
   }
   SDL_UnlockMutex(g.mx);
   if (any) ui_redraw();

@@ -465,6 +465,12 @@ struct FmVid {
   double seek_t;
   bool seek_watch;
   double drop_until;
+  /* a pair: picture and sound in separate files (online sources), merged
+  ** by time; each half keeps its item pending until it is the earlier one */
+  FmVid *half_v, *half_a;
+  int pend_v, pend_a;          /* VID_EV_VIDEO / VID_EV_AUDIO pending, 0 none, -1 ended */
+  FmVidFrame vf_v;
+  FmVidPcm pc_a;
 };
 
 #define SEEK_REPLAY_MAX 120.0           /* seconds decoded forward at most */
@@ -899,7 +905,63 @@ FmVid *vid_open(const char *path, int flags, FmErr *err) {
   return NULL;
 }
 
+static int pair_decode(FmVid *v, FmVidFrame *vf, FmVidPcm *pc) {
+  for (int guard = 0; guard < 64; guard++) {
+    if (!v->pend_v) {
+      FmVidPcm dummy;
+      int ev;
+      do ev = vid_decode(v->half_v, &v->vf_v, &dummy); while (ev == VID_EV_AUDIO);
+      v->pend_v = ev == VID_EV_VIDEO ? ev : (ev == VID_EV_END ? -1 : -2);
+    }
+    if (!v->pend_a) {
+      FmVidFrame dummy;
+      int ev;
+      do ev = vid_decode(v->half_a, &dummy, &v->pc_a); while (ev == VID_EV_VIDEO);
+      v->pend_a = ev == VID_EV_AUDIO ? ev : (ev == VID_EV_END ? -1 : -2);
+    }
+    if (v->pend_v == -2 && v->pend_a < 0) return VID_EV_ERROR;
+    bool hv = v->pend_v > 0, ha = v->pend_a > 0;
+    if (!hv && !ha) return VID_EV_END;
+    /* the earlier one goes first; audio wins ties so the clock starts early */
+    if (ha && (!hv || v->pc_a.t <= v->vf_v.t)) {
+      *pc = v->pc_a;
+      v->pend_a = 0;
+      return VID_EV_AUDIO;
+    }
+    *vf = v->vf_v;
+    v->pend_v = 0;
+    return VID_EV_VIDEO;
+  }
+  return VID_EV_ERROR;
+}
+
+FmVid *vid_open_pair(const char *video, const char *audio, int flags, FmErr *err) {
+  FmErr e1 = FM_OK, e2 = FM_OK;
+  FmVid *hv = (flags & VID_OPEN_AUDIO_ONLY) ? NULL : vid_open(video, VID_OPEN_NO_AUDIO, &e1);
+  FmVid *ha = (flags & VID_OPEN_NO_AUDIO) ? NULL : vid_open(audio, VID_OPEN_AUDIO_ONLY, &e2);
+  if (!hv && !ha) { *err = e1 != FM_OK ? e1 : e2; return NULL; }
+  if (!hv || !ha) {                    /* one half is enough to play */
+    *err = FM_OK;
+    return hv ? hv : ha;
+  }
+  FmVid *v = (FmVid *)fm_calloc(1, sizeof *v);
+  v->flags = flags;
+  v->half_v = hv;
+  v->half_a = ha;
+  v->info = hv->info;
+  v->info.has_audio = ha->info.has_audio;
+  v->info.rate = ha->info.rate;
+  v->info.channels = ha->info.channels;
+  fm_strlcpy(v->info.acodec, ha->info.acodec, sizeof v->info.acodec);
+  if (ha->info.duration > v->info.duration) v->info.duration = ha->info.duration;
+  if (strcmp(hv->info.backend, ha->info.backend))
+    fm_snprintf(v->info.backend, sizeof v->info.backend, "%.11s + %.10s", hv->info.backend, ha->info.backend);
+  *err = FM_OK;
+  return v;
+}
+
 static int backend_decode(FmVid *v, FmVidFrame *vf, FmVidPcm *pc) {
+  if (v->half_v) return pair_decode(v, vf, pc);
   if (v->plm) return pl_decode(v, vf, pc);
 #ifdef FM_FFMPEG
   if (v->fmt) return ff_decode(v, vf, pc);
@@ -941,6 +1003,11 @@ bool vid_seek(FmVid *v, double t) {
 }
 
 static bool backend_seek(FmVid *v, double t) {
+  if (v->half_v) {
+    bool a = vid_seek(v->half_v, t), b = vid_seek(v->half_a, t);
+    v->pend_v = v->pend_a = 0;
+    return a && b;
+  }
   if (v->plm) return pl_seek(v, t);
 #ifdef FM_FFMPEG
   if (v->fmt) return ff_seek(v, t);
@@ -951,6 +1018,13 @@ static bool backend_seek(FmVid *v, double t) {
 
 void vid_close(FmVid *v) {
   if (!v) return;
+  if (v->half_v) {
+    vid_close(v->half_v);
+    vid_close(v->half_a);
+    fm_free(v->pcm);
+    fm_free(v);
+    return;
+  }
   if (v->plm) plm_destroy(v->plm);
 #ifdef FM_FFMPEG
   if (v->fmt || v->pkt || v->frm) ff_close(v);

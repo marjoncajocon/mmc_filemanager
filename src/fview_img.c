@@ -482,9 +482,16 @@ static void img_close(void) {
   memset(&g, 0, sizeof g);
 }
 
+/* A title for the next single-file open (online photos), then the current one. */
+static char g_next_title[256], g_title[256];
+
+void image_view_title(const char *title) { fm_strlcpy(g_next_title, title ? title : "", sizeof g_next_title); }
+
 static bool img_open(const char *path, const char *const *list, int n, int index) {
   img_close();
   memset(&g, 0, sizeof g);
+  fm_strlcpy(g_title, (list && n > 1) ? "" : g_next_title, sizeof g_title);
+  g_next_title[0] = 0;
   g.open = true;
   arena_init(&g.arena, 16 * 1024);
   if (list && n > 0 && index >= 0 && index < n) {
@@ -883,7 +890,8 @@ static void img_frame(FmRect area) {
   float ca = chrome * (1.0f - dismiss_t);
   bool narrow = ui.w < DP(520);
   FmRect act;
-  if (view_topbar(area, VIEW_BAR_MEDIA, ca, fm_path_base(g.paths[s->index]), sub, narrow ? 3 : 5, &act)) {
+  const char *title = g_title[0] && g.n == 1 ? g_title : fm_path_base(g.paths[s->index]);
+  if (view_topbar(area, VIEW_BAR_MEDIA, ca, title, sub, narrow ? 3 : 5, &act)) {
     app_close_viewer();
     return;
   }

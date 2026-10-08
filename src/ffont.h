@@ -35,4 +35,14 @@ void  font_draw_center(int face, float size, FmRect r, const char *s, FmColor c)
 float font_draw_wrap(int face, float size, float x, float y, float w, const char *s, FmColor c,
                      bool draw);
 
+/* Glyph cache state for --perf. */
+typedef struct FontStats {
+  int atlas_w, atlas_h;      /* 0 when no atlas exists yet */
+  int used_h;                /* rows of the atlas holding glyphs */
+  int glyphs;                /* cached glyphs */
+  int resets;                /* times the atlas filled up and started over */
+  int rasterized;            /* glyphs rasterized since start */
+} FontStats;
+void  font_get_stats(FontStats *s);
+
 #endif

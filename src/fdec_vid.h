@@ -52,6 +52,9 @@ enum { VID_EV_ERROR = -1, VID_EV_END = 0, VID_EV_VIDEO = 1, VID_EV_AUDIO = 2 };
 typedef struct FmVid FmVid;
 
 FmVid *vid_open(const char *path, int flags, FmErr *err);
+/* Picture and sound from two files (online sources hand out separate
+** streams); behaves like one video. With one file missing it opens the other. */
+FmVid *vid_open_pair(const char *video, const char *audio, int flags, FmErr *err);
 const FmVidInfo *vid_info(const FmVid *v);
 /* Next decoded item; the pointers inside stay valid until the next call. */
 int    vid_decode(FmVid *v, FmVidFrame *vf, FmVidPcm *pcm);

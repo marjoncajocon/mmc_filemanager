@@ -66,6 +66,18 @@ typedef struct FmConf {
   int win_x, win_y, win_w, win_h;
   bool win_max;
   bool system_title;          /* OS window frame instead of the themed title bar */
+  /* online videos (fvsrc*.c, fonline*.c) */
+  char online_source[16];     /* last used source key: "youtube", "archive", ... */
+  char yt_api_key[128];       /* YouTube Data API v3 key, "" = none */
+  char ytdlp_path[FM_PATH_MAX];   /* yt-dlp executable, "" = find it */
+  char js_runtime[FM_PATH_MAX];   /* "node:<path>" / "deno:<path>" for yt-dlp, "" = find it */
+  char ffmpeg_dir[FM_PATH_MAX];   /* folder with ffmpeg(.exe) for merging downloads, "" = none */
+  char online_dl_dir[FM_PATH_MAX];/* downloads, "" = the system Downloads folder */
+  int online_height;          /* preferred quality: 360, 480, 720, 1080 */
+  bool online_safe;           /* safe search */
+  /* online photos (fpsrc*.c, fphoto*.c) */
+  char photo_source[16];      /* last used photo source key */
+  char key_pexels[96], key_unsplash[96], key_pixabay[96];   /* free API keys, "" = none */
   float volume;               /* audio player 0..1 */
   FmVizConf viz;              /* the visualizer as shown */
   FmVizConf viz_saved;        /* the user's own custom setup ("Custom" chip) */

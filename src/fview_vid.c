@@ -21,6 +21,10 @@
 **     shown; the analysis runs on the main thread like in the music player.
 **   - The equalizer (feq.c, shared with the music player) runs in the
 **     callback on the converted audio, before the visualizer copy.
+**   - Streams (online videos, video_open_stream) are a URL or a cached file
+**     plus an optional separate sound track opened with vid_open_pair; the
+**     title comes from the caller and the library heart and Share are left
+**     out, since there is no file of the user's to star or share.
 */
 #include "fview_int.h"
 #include "flib.h"
@@ -55,9 +59,13 @@ static int g_aspect;
 
 #define LOCK_HINT_MS 2500
 
+#define VID_SRC_MAX 4096     /* stream URLs can be long */
+
 static struct {
   bool open;
-  char path[FM_PATH_MAX];
+  char path[VID_SRC_MAX];
+  char audio[VID_SRC_MAX];   /* separate sound track (streams), "" = none */
+  bool stream;               /* opened by video_open_stream */
   char title[256];
   /* worker */
   SDL_Thread *thr;
@@ -139,6 +147,7 @@ static void SDLCALL vid_audio_cb(void *u, Uint8 *stream, int len) {
     }
   }
   float vol = V.volume * V.volume;
+  if (got > 0) SDL_CondSignal(V.cv);     /* room in the audio queue: the worker may decode */
   SDL_UnlockMutex(V.mx);
   float *f = (float *)stream;
   for (int i = 0; i < frames * 2; i++) f[i] *= vol;
@@ -176,7 +185,7 @@ static double audio_queued(void) {
 static int worker(void *u) {
   FM_UNUSED(u);
   FmErr err;
-  FmVid *vid = vid_open(V.path, 0, &err);
+  FmVid *vid = V.audio[0] ? vid_open_pair(V.path, V.audio, 0, &err) : vid_open(V.path, 0, &err);
   SDL_LockMutex(V.mx);
   if (!vid) {
     V.state = VS_ERROR;
@@ -210,7 +219,10 @@ static int worker(void *u) {
     bool vfull = V.qcount >= QN;
     bool afull = V.info.has_audio && audio_queued() > AUDIO_AHEAD;
     if ((V.info.has_video && vfull) || (afull && (!V.info.has_video || V.qcount > 0))) {
-      SDL_CondWaitTimeout(V.cv, V.mx, 20);
+      /* the frame presenter and the audio callback signal when they take
+      ** something, so this only sleeps; the timeout is a safety net
+      ** (it used to poll every 20 ms, waking the CPU 50 times a second) */
+      SDL_CondWaitTimeout(V.cv, V.mx, 250);
       continue;
     }
     SDL_UnlockMutex(V.mx);
@@ -297,6 +309,12 @@ static void set_volume(float v) {
   V.vol_shown_until = ui.now + 900;
 }
 
+/* The system player; a stream URL goes through SDL (plat_open_external takes paths). */
+static void open_outside(void) {
+  if (V.stream && strstr(V.path, "://") && SDL_OpenURL(V.path) == 0) return;
+  plat_open_external(V.path);
+}
+
 static void toggle_fullscreen(void) {
 #ifndef FM_MOBILE
   if (!app.win) return;
@@ -359,13 +377,15 @@ static void vid_view_close(void) {
   memset(&V, 0, sizeof V);
 }
 
-static bool vid_view_open(const char *path, const char *const *list, int n, int index) {
-  FM_UNUSED(list); FM_UNUSED(n); FM_UNUSED(index);
+/* Everything the worker reads is set before it starts. */
+static bool open_impl(const char *path, const char *audio, const char *title, bool stream) {
   vid_view_close();
   memset(&V, 0, sizeof V);
   V.open = true;
+  V.stream = stream;
   fm_strlcpy(V.path, path, sizeof V.path);
-  fm_strlcpy(V.title, fm_path_base(path), sizeof V.title);
+  fm_strlcpy(V.audio, audio ? audio : "", sizeof V.audio);
+  fm_strlcpy(V.title, title && title[0] ? title : fm_path_base(path), sizeof V.title);
   V.volume = conf.volume > 0 ? conf.volume : 0.8f;
   V.mx = SDL_CreateMutex();
   V.cv = SDL_CreateCond();
@@ -380,6 +400,21 @@ static bool vid_view_open(const char *path, const char *const *list, int n, int 
     if (!strcmp(app.argv[i], "--demo-lock")) { V.locked = true; V.lock_hint_until = (u64)-1; }
     if (!strcmp(app.argv[i], "--demo-viz-panel") || !strcmp(app.argv[i], "--demo-eq")) V.viz_panel = true;
   }
+  return true;
+}
+
+static bool vid_view_open(const char *path, const char *const *list, int n, int index) {
+  FM_UNUSED(list); FM_UNUSED(n); FM_UNUSED(index);
+  return open_impl(path, NULL, NULL, false);
+}
+
+bool video_open_stream(const char *title, const char *video, const char *audio) {
+  if (!video || !video[0]) return false;
+  if (app.viewer && app.viewer->close) app.viewer->close();
+  app.viewer = NULL;
+  open_impl(video, audio, title, true);
+  app.viewer = &g_view_video;
+  ui_redraw();
   return true;
 }
 
@@ -407,10 +442,13 @@ static void present_frame(void) {
     V.clock_set = true;
   }
   /* drop frames that are already late */
+  int dropped = 0;
   while (V.qcount > 1 && V.q[(V.qhead + 1) % QN].t <= V.clock) {
     V.qhead = (V.qhead + 1) % QN;
     V.qcount--;
+    dropped++;
   }
+  if (dropped) SDL_CondSignal(V.cv);
   VFrame *f = NULL;
   if (V.qcount > 0 && (V.q[V.qhead].t <= V.clock + 0.008 || !V.have_frame)) f = &V.q[V.qhead];
   SDL_UnlockMutex(V.mx);
@@ -649,16 +687,19 @@ static void vid_view_frame(FmRect area) {
     /* the system decoders (Media Foundation / MediaCodec) cover the common
     ** formats; FFmpeg is the way to the rest (FLV, RealMedia, odd codecs) */
     bool need_ff = (V.err == FM_ERR_UNSUPPORTED || V.err == FM_ERR_FORMAT) && !ff_available();
-    view_message(area, IC_VIDEO, need_ff ? "This format needs FFmpeg" : "Cannot play this video",
-                 need_ff ? "Your system's decoders cannot play it. Put the FFmpeg 4 to 8 libraries next to the "
-                           "app (or use a build made with --with-ffmpeg), or open it with the system player."
-                         : "The file could not be decoded. It may be damaged, or use a codec that is not "
-                           "installed.",
-                 VIEW_FG, VIEW_FG2);
+    const char *msg = need_ff ? "Your system's decoders cannot play it. Put the FFmpeg 4 to 8 libraries next to the "
+                                "app (or use a build made with --with-ffmpeg), or open it with the system player."
+                      : V.stream ? "The video could not be opened. Check the internet connection, or pick another "
+                                   "quality in Settings > Online videos."
+                                 : "The file could not be decoded. It may be damaged, or use a codec that is not "
+                                   "installed.";
+    view_message(area, IC_VIDEO, need_ff ? "This format needs FFmpeg" : V.stream ? "Cannot play this stream"
+                                                                                 : "Cannot play this video",
+                 msg, VIEW_FG, VIEW_FG2);
     float bw = DP(240), bh = DP(ui.touch_mode ? 46 : 38);
     if (ui_button(ui_id("vid.ext"), FM_RECT(area.x + (area.w - bw) * 0.5f, area.y + area.h * 0.5f + DP(120), bw, bh),
                   IC_OPEN_WITH, "Open with system player", UI_BTN_TONAL))
-      plat_open_external(V.path);
+      open_outside();
   }
 
   if (locked_frame(area)) return;
@@ -738,7 +779,7 @@ static void vid_view_frame(FmRect area) {
   if (view_bar_btn(&act, ui_id("vid.more"), IC_MORE, "More", VIEW_BAR_MEDIA, chrome, false)) {
     FmMenuItem items[] = {
       { VM_INFO, IC_INFO, "Video info", NULL, ready ? 0 : UI_MI_DISABLED },
-      { VM_SHARE, IC_SHARE, "Share", NULL, 0 },
+      { VM_SHARE, IC_SHARE, "Share", NULL, V.stream ? UI_MI_DISABLED : 0 },
       { VM_OPEN, IC_OPEN_WITH, "Open with system player", NULL, 0 },
       { VM_VIZ, IC_EQUALIZER, "Visualizer settings", NULL, V.info.has_audio ? 0 : UI_MI_DISABLED },
       { VM_EQ, IC_EQUALIZER, "Equalizer", NULL, V.info.has_audio ? 0 : UI_MI_DISABLED },
@@ -759,8 +800,8 @@ static void vid_view_frame(FmRect area) {
   if (view_bar_btn(&act, ui_id("vid.fs"), IC_FULLSCREEN, "Fullscreen (F)", VIEW_BAR_MEDIA, chrome, V.fullscreen_set))
     toggle_fullscreen();
 #endif
-  /* favorite: the media library's heart */
-  {
+  /* favorite: the media library's heart (not for streams) */
+  if (!V.stream) {
     bool fav = lib_is_fav(V.path);
     if (view_bar_btn(&act, ui_id("vid.favbtn"), fav ? IC_HEART_FILL : IC_HEART,
                      fav ? "Remove from favorites" : "Add to favorites", VIEW_BAR_MEDIA, chrome, fav))
@@ -779,7 +820,7 @@ static void vid_view_frame(FmRect area) {
   switch (mres) {
     case VM_INFO: V.info_open = true; break;
     case VM_SHARE: plat_share(V.path); break;
-    case VM_OPEN: set_paused(true); plat_open_external(V.path); break;
+    case VM_OPEN: set_paused(true); open_outside(); break;
     case VM_VIZ: V.viz_panel = true; viz_panel_tab(0); break;
     case VM_EQ: V.viz_panel = true; viz_panel_tab(1); break;
     default: break;

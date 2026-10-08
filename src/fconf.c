@@ -23,6 +23,10 @@ FmConf conf;
 
 void conf_defaults(void) {
   memset(&conf, 0, sizeof conf);
+  fm_strlcpy(conf.online_source, "youtube", sizeof conf.online_source);
+  conf.online_height = 720;
+  fm_strlcpy(conf.photo_source, "openverse", sizeof conf.photo_source);
+  conf.online_safe = true;
   conf.theme = 0;
   conf.dark = true;
   conf.accent = -1;
@@ -135,6 +139,18 @@ static void set_key(const char *k, const char *raw) {
   if (!strcmp(k, "theme")) conf.theme = to_int(v, 0, THEME_COUNT - 1, 0);
   else if (!strcmp(k, "dark")) conf.dark = to_bool(v);
   else if (!strcmp(k, "system_title")) conf.system_title = to_bool(v);
+  else if (!strcmp(k, "online_source")) fm_strlcpy(conf.online_source, v, sizeof conf.online_source);
+  else if (!strcmp(k, "yt_api_key")) fm_strlcpy(conf.yt_api_key, v, sizeof conf.yt_api_key);
+  else if (!strcmp(k, "ytdlp_path")) fm_strlcpy(conf.ytdlp_path, v, sizeof conf.ytdlp_path);
+  else if (!strcmp(k, "js_runtime")) fm_strlcpy(conf.js_runtime, v, sizeof conf.js_runtime);
+  else if (!strcmp(k, "ffmpeg_dir")) fm_strlcpy(conf.ffmpeg_dir, v, sizeof conf.ffmpeg_dir);
+  else if (!strcmp(k, "online_dl_dir")) fm_strlcpy(conf.online_dl_dir, v, sizeof conf.online_dl_dir);
+  else if (!strcmp(k, "online_height")) conf.online_height = to_int(v, 144, 2160, 720);
+  else if (!strcmp(k, "online_safe")) conf.online_safe = to_bool(v);
+  else if (!strcmp(k, "photo_source")) fm_strlcpy(conf.photo_source, v, sizeof conf.photo_source);
+  else if (!strcmp(k, "key_pexels")) fm_strlcpy(conf.key_pexels, v, sizeof conf.key_pexels);
+  else if (!strcmp(k, "key_unsplash")) fm_strlcpy(conf.key_unsplash, v, sizeof conf.key_unsplash);
+  else if (!strcmp(k, "key_pixabay")) fm_strlcpy(conf.key_pixabay, v, sizeof conf.key_pixabay);
   else if (!strcmp(k, "accent")) conf.accent = to_int(v, -1, UI_ACCENTS - 1, -1);
   else if (!strcmp(k, "zoom")) conf.zoom = to_float(v, 0.75f, 2.0f, 1.0f);
   else if (!strcmp(k, "touch")) conf.touch = to_int(v, -1, 1, -1);
@@ -260,6 +276,18 @@ void conf_save(void) {
   put_i(f, "theme", conf.theme);
   put_i(f, "dark", conf.dark);
   put_i(f, "system_title", conf.system_title);
+  put(f, "online_source", conf.online_source);
+  put(f, "yt_api_key", conf.yt_api_key);
+  put(f, "ytdlp_path", conf.ytdlp_path);
+  put(f, "js_runtime", conf.js_runtime);
+  put(f, "ffmpeg_dir", conf.ffmpeg_dir);
+  put(f, "online_dl_dir", conf.online_dl_dir);
+  put_i(f, "online_height", conf.online_height);
+  put_i(f, "online_safe", conf.online_safe);
+  put(f, "photo_source", conf.photo_source);
+  put(f, "key_pexels", conf.key_pexels);
+  put(f, "key_unsplash", conf.key_unsplash);
+  put(f, "key_pixabay", conf.key_pixabay);
   put_i(f, "accent", conf.accent);
   put_f(f, "zoom", conf.zoom);
   put_i(f, "touch", conf.touch);

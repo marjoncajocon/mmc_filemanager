@@ -32,6 +32,10 @@ typedef enum FmIcon {
   IC_MOON, IC_SUN, IC_KEY, IC_EQUALIZER,
   /* media library (flib) */
   IC_HEART, IC_HEART_FILL, IC_LIBRARY, IC_PERSON,
+  /* online videos (fonline) */
+  IC_PLAY_BADGE, IC_LINK, IC_TV, IC_LANDMARK,
+  /* online photos (fphoto) */
+  IC_ALBUM, IC_ALBUM_ADD,
   IC_COUNT
 } FmIcon;
 

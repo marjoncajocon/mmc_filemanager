@@ -78,6 +78,13 @@ void gfx_tex(SDL_Texture *t, const FmRect *src, FmRect dst, FmColor tint);
 void gfx_tex_rounded(SDL_Texture *t, FmRect dst, float radius, FmColor tint);
 /* Raw textured triangles; uv in 0..1. Used by the font module. */
 void gfx_quad_uv(SDL_Texture *t, FmRect dst, float u0, float v0, float u1, float v1, FmColor c);
+/* A texture with an opaque white texel at (u, v), surrounded by white so
+** linear filtering stays white (the glyph atlas). Untextured shapes then
+** draw with it and batch together with text. NULL turns it off. */
+void gfx_set_white(SDL_Texture *t, float u, float v);
+/* Called with the batch texture right before a batch is submitted, so a
+** texture filled lazily (the glyph atlas) can upload what it needs. */
+void gfx_set_upload_hook(void (*fn)(SDL_Texture *t));
 
 /* ---- clip --------------------------------------------------------------- */
 
@@ -85,5 +92,45 @@ void   gfx_clip_push(FmRect r);     /* intersected with the current clip */
 void   gfx_clip_pop(void);
 FmRect gfx_clip(void);
 bool   gfx_visible(FmRect r);       /* overlaps the current clip */
+
+/* ---- statistics (--perf, debug overlay) --------------------------------- */
+
+typedef struct GfxStats {
+  /* the last presented frame */
+  int calls, verts, indices;
+  int flush_tex, flush_clip, flush_full;   /* why batches were split */
+  double present_ms;                       /* time inside SDL_RenderPresent */
+  u32 frames;                              /* frames presented since start */
+  /* every SDL texture the program owns (see the redirect below) */
+  int tex_live, tex_peak;
+  size_t tex_bytes, tex_bytes_peak;
+  u32 tex_created;
+} GfxStats;
+
+void gfx_get_stats(GfxStats *s);
+
+/* Texture accounting in one place: every SDL_CreateTexture and
+** SDL_DestroyTexture in files that include this header goes through these,
+** which keep a count and the bytes of the live textures. They behave
+** exactly like the SDL calls. fgfx.c defines FGFX_IMPL to reach SDL. */
+SDL_Texture *gfx_texture_create(SDL_Renderer *ren, Uint32 format, int access, int w, int h);
+void gfx_texture_destroy(SDL_Texture *t);
+int  gfx_texture_query(SDL_Texture *t, Uint32 *format, int *access, int *w, int *h);
+#ifndef FGFX_IMPL
+#  undef SDL_CreateTexture
+#  undef SDL_DestroyTexture
+#  undef SDL_QueryTexture
+#  define SDL_CreateTexture gfx_texture_create
+#  define SDL_DestroyTexture gfx_texture_destroy
+#  define SDL_QueryTexture gfx_texture_query
+#endif
+
+/* Views: a w x h rectangle of `page` handed out as an SDL_Texture pointer,
+** so many small images (thumbnails) share one GPU texture. A view works
+** with gfx_tex, gfx_tex_rounded, gfx_quad_uv and SDL_QueryTexture (which
+** reports the view's own size); hand it to no other SDL call. Destroying
+** a view (gfx_view_free or SDL_DestroyTexture) never touches the page. */
+SDL_Texture *gfx_view_new(SDL_Texture *page, int x, int y, int w, int h);
+void gfx_view_free(SDL_Texture *view);
 
 #endif

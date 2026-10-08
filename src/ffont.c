@@ -1,9 +1,17 @@
 /* ffont.c -- glyph cache on one atlas texture, with fallback fonts.
 **
 ** Design decisions:
-**   - One 1024x1024 atlas (4 MB). When it fills up, everything is dropped
-**     and re-rasterized on demand: simpler and smaller than an LRU of
-**     shelves, and it only happens on big size or script changes.
+**   - One atlas texture, 256x256 (256 KB) to start: the whole UI in Latin
+**     scripts at 100% fills about half of it. When it fills up it is
+**     replaced by one twice the size, up to 1024x1024 (4 MB; a GPU texture
+**     that size costs about 6 MB of driver memory on Windows), and only when
+**     that fills up too is everything dropped and re-rasterized on demand:
+**     simpler and smaller than an LRU of shelves, and it only happens on big
+**     size or script changes. A scale change (font_reset) starts small again.
+**   - The atlas also holds a white block for untextured shapes (fgfx.c).
+**   - Glyphs go into an 8-bit mirror of the atlas (64 KB at 256x256) and
+**     reach the GPU in one upload per batch, not one per glyph.
+**   - The glyph table is 4096 slots (112 KB).
 **   - Glyphs are rasterized at integer pixel sizes and placed at integer
 **     positions, which keeps small UI text sharp.
 **   - Fallback fonts are memory-mapped files, so a 20 MB CJK font costs
@@ -29,8 +37,9 @@
 #include "gen_font_regular.h"
 #include "gen_font_semibold.h"
 
-#define ATLAS 1024
-#define TABLE 8192          /* power of two */
+#define ATLAS_MIN 256       /* 256 KB; the UI in Latin scripts at 100% fits */
+#define ATLAS_MAX 1024      /* 4 MB, reached only by big or many-script text */
+#define TABLE 4096          /* power of two */
 #define MAX_FONTS 10
 #define NO_FONT 255
 
@@ -61,8 +70,12 @@ static int g_tab_used;
 static SDL_Texture *g_atlas;
 static int g_sx, g_sy, g_row_h;     /* shelf packer */
 static u8 g_gamma[256];
-static u8 *g_scratch;               /* glyph bitmap */
-static u32 *g_rgba;                 /* glyph upload */
+static int g_asz = ATLAS_MIN;       /* atlas edge */
+static u8 *g_mirror;                /* coverage copy of the atlas, g_asz^2 bytes */
+static int g_dx0, g_dy0, g_dx1, g_dy1;  /* part of the mirror not uploaded yet */
+static u32 *g_rgba;                 /* upload buffer */
+static int g_rgba_px;               /* its capacity in pixels */
+static int g_resets, g_rasterized;
 
 /* ---- fonts -------------------------------------------------------------- */
 
@@ -134,8 +147,6 @@ bool font_init(void) {
   if (!font_load_mem(&g_fonts[g_nfonts++], font_regular_ttf, 0, 0)) return false;
   if (!font_load_mem(&g_fonts[g_nfonts++], font_semibold_ttf, 0, 0)) return false;
   g_tab = (Glyph *)fm_calloc(TABLE, sizeof(Glyph));
-  g_scratch = (u8 *)fm_alloc(256 * 256);
-  g_rgba = (u32 *)fm_alloc(256 * 256 * 4);
   /* Slight contrast boost: thin strokes keep their weight on dark themes. */
   for (int i = 0; i < 256; i++) g_gamma[i] = (u8)(powf(i / 255.0f, 0.82f) * 255.0f + 0.5f);
   return true;
@@ -147,30 +158,82 @@ void font_shutdown(void) {
   for (int i = 0; i < g_nfonts; i++)
     if (g_fonts[i].mapped) plat_munmap((void *)g_fonts[i].data, g_fonts[i].mapped);
   g_nfonts = 0;
-  fm_free(g_tab); fm_free(g_scratch); fm_free(g_rgba);
-  g_tab = NULL; g_scratch = NULL; g_rgba = NULL;
+  fm_free(g_tab); fm_free(g_mirror); fm_free(g_rgba);
+  g_tab = NULL; g_mirror = NULL; g_rgba = NULL;
+  g_rgba_px = 0;
+  gfx_set_upload_hook(NULL);
 }
 
-void font_reset(void) {
-  gfx_flush();
+/* Uploads the glyphs rasterized since the last upload, in one call. fgfx
+** calls it right before it submits a batch that samples the atlas. */
+static void upload_dirty(SDL_Texture *t) {
+  if (!g_atlas || t != g_atlas || g_dx1 <= g_dx0 || g_dy1 <= g_dy0) return;
+  int w = g_dx1 - g_dx0, h = g_dy1 - g_dy0, n = w * h;
+  u32 *buf = g_rgba;
+  if (n > 16384) {
+    buf = (u32 *)fm_alloc((size_t)n * 4);            /* the first full upload */
+  } else if (n > g_rgba_px) {
+    u32 *b = (u32 *)fm_realloc(g_rgba, (size_t)16384 * 4);
+    if (b) { g_rgba = b; g_rgba_px = 16384; }
+    buf = b;
+  }
+  if (!buf) return;
+  for (int y = 0; y < h; y++) {
+    const u8 *src = g_mirror + (size_t)(g_dy0 + y) * g_asz + g_dx0;
+    u32 *dst = buf + (size_t)y * w;
+    for (int x = 0; x < w; x++) dst[x] = ((u32)src[x] << 24) | 0xFFFFFFu;
+  }
+  SDL_Rect r = { g_dx0, g_dy0, w, h };
+  SDL_UpdateTexture(g_atlas, &r, buf, w * 4);
+  if (buf != g_rgba) fm_free(buf);
+  g_dx0 = g_dy0 = g_dx1 = g_dy1 = 0;
+}
+
+static void mark_dirty(int x, int y, int w, int h) {
+  if (g_dx1 <= g_dx0) { g_dx0 = x; g_dy0 = y; g_dx1 = x + w; g_dy1 = y + h; return; }
+  if (x < g_dx0) g_dx0 = x;
+  if (y < g_dy0) g_dy0 = y;
+  if (x + w > g_dx1) g_dx1 = x + w;
+  if (y + h > g_dy1) g_dy1 = y + h;
+}
+
+/* Drops every glyph and the atlas; the next glyph makes a new one. */
+static void drop_cache(void) {
+  gfx_flush();                /* uploads what the queued text still needs */
   if (g_tab) memset(g_tab, 0, sizeof(Glyph) * TABLE);
   g_tab_used = 0;
   g_sx = g_sy = g_row_h = 0;
   if (g_atlas) { SDL_DestroyTexture(g_atlas); g_atlas = NULL; }
+  fm_free(g_mirror);
+  g_mirror = NULL;
+  g_dx0 = g_dy0 = g_dx1 = g_dy1 = 0;
+}
+
+void font_reset(void) {
+  drop_cache();
+  g_asz = ATLAS_MIN;          /* a new scale starts small again */
 }
 
 static bool ensure_atlas(void) {
   if (g_atlas) return true;
-  g_atlas = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, ATLAS, ATLAS);
+  int sz = g_asz;
+  g_atlas = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, sz, sz);
   if (!g_atlas) return false;
   SDL_SetTextureBlendMode(g_atlas, SDL_BLENDMODE_BLEND);
-  /* Clear once: glyph rects are uploaded on top. */
-  u32 *z = (u32 *)fm_calloc(ATLAS * 16, 4);
-  for (int y = 0; y < ATLAS; y += 16) {
-    SDL_Rect r = { 0, y, ATLAS, 16 };
-    SDL_UpdateTexture(g_atlas, &r, z, ATLAS * 4);
-  }
-  fm_free(z);
+  /* Glyphs are rasterized into a coverage mirror and uploaded in one call
+  ** per batch (upload_dirty), the first time as a whole: SDL's Direct3D 11
+  ** backend makes a staging texture for every update, and one update per
+  ** glyph (or a clear in strips) left the Intel driver holding 10-16 MB
+  ** more for good. */
+  g_mirror = (u8 *)fm_calloc((size_t)sz * sz, 1);
+  if (!g_mirror) { SDL_DestroyTexture(g_atlas); g_atlas = NULL; return false; }
+  /* a white 4x4 block in the corner: shapes sample its centre, so they
+  ** batch with the text (fgfx.c); glyphs are packed after it */
+  for (int y = 0; y < 4; y++) memset(g_mirror + (size_t)y * sz, 255, 4);
+  mark_dirty(0, 0, sz, sz);
+  gfx_set_upload_hook(upload_dirty);
+  g_sx = 5; g_sy = 0; g_row_h = 4;
+  gfx_set_white(g_atlas, 2.0f / (float)sz, 2.0f / (float)sz);
   return true;
 }
 
@@ -194,6 +257,7 @@ static int pick_font(int face, u32 cp) {
 static Glyph *get_glyph(int face, int size, u32 cp);
 
 static Glyph *rasterize(Glyph *g, int face, int size, u32 cp) {
+  u32 want = cp;
   g->cp = cp; g->size = (u16)size; g->face = (u8)face; g->used = 1;
   int fi = pick_font(face, cp);
   g->font = (u8)fi;
@@ -216,16 +280,22 @@ static Glyph *rasterize(Glyph *g, int face, int size, u32 cp) {
   g->x0 = (i16)x0; g->y0 = (i16)y0;
   if (w <= 0 || h <= 0 || w > 250 || h > 250) { g->w = g->h = 0; return g; }
   if (!ensure_atlas()) { g->w = g->h = 0; return g; }
-  if (g_sx + w + 1 > ATLAS) { g_sx = 0; g_sy += g_row_h + 1; g_row_h = 0; }
-  if (g_sy + h + 1 > ATLAS) {
-    /* Atlas full: start over and retry this glyph in the fresh atlas. */
-    font_reset();
-    return get_glyph(face, size, g->cp);
+  if (g_sx + w + 1 > g_asz) { g_sx = 0; g_sy += g_row_h + 1; g_row_h = 0; }
+  if (g_sy + h + 1 > g_asz) {
+    /* Atlas full: a bigger one if allowed, else start over; either way
+    ** the glyphs are rasterized again on demand. Retry this one (the
+    ** table was cleared, so not from g). */
+    if (g_asz < ATLAS_MAX) g_asz *= 2;
+    else g_resets++;
+    drop_cache();
+    return get_glyph(face, size, want);
   }
-  stbtt_MakeGlyphBitmap(&f->info, g_scratch, w, h, w, scale, scale, gi);
-  for (int i = 0; i < w * h; i++) g_rgba[i] = ((u32)g_gamma[g_scratch[i]] << 24) | 0xFFFFFFu;
-  SDL_Rect r = { g_sx, g_sy, w, h };
-  SDL_UpdateTexture(g_atlas, &r, g_rgba, w * 4);
+  g_rasterized++;
+  u8 *dst = g_mirror + (size_t)g_sy * g_asz + g_sx;
+  stbtt_MakeGlyphBitmap(&f->info, dst, w, h, g_asz, scale, scale, gi);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) dst[(size_t)y * g_asz + x] = g_gamma[dst[(size_t)y * g_asz + x]];
+  mark_dirty(g_sx, g_sy, w, h);
   g->ax = (u16)g_sx; g->ay = (u16)g_sy; g->w = (u16)w; g->h = (u16)h;
   g_sx += w + 1;
   if (h > g_row_h) g_row_h = h;
@@ -234,7 +304,7 @@ static Glyph *rasterize(Glyph *g, int face, int size, u32 cp) {
 
 static Glyph *get_glyph(int face, int size, u32 cp) {
   if (!g_tab) return NULL;
-  if (g_tab_used > TABLE * 3 / 4) font_reset();
+  if (g_tab_used > TABLE * 3 / 4) drop_cache();
   u32 h = hash3(cp, (u32)size, (u32)face);
   for (;;) {
     Glyph *g = &g_tab[h];
@@ -276,8 +346,9 @@ float font_draw(int face, float size, float x, float y, const char *s, int len, 
     if (!g) break;
     if (g->w && c.a) {
       FmRect d = { floorf(pen + 0.5f) + g->x0, base + g->y0, (float)g->w, (float)g->h };
-      gfx_quad_uv(g_atlas, d, (float)g->ax / ATLAS, (float)g->ay / ATLAS,
-                  (float)(g->ax + g->w) / ATLAS, (float)(g->ay + g->h) / ATLAS, c);
+      float k = 1.0f / (float)g_asz;
+      gfx_quad_uv(g_atlas, d, (float)g->ax * k, (float)g->ay * k, (float)(g->ax + g->w) * k,
+                  (float)(g->ay + g->h) * k, c);
     }
     pen += g->adv;
   }
@@ -380,4 +451,13 @@ float font_draw_wrap(int face, float size, float x, float y, float w, const char
     if (*s == '\n') s++;
   }
   return yy - y;
+}
+
+void font_get_stats(FontStats *s) {
+  memset(s, 0, sizeof *s);
+  if (g_atlas) { s->atlas_w = g_asz; s->atlas_h = g_asz; }
+  s->used_h = g_sy + g_row_h;
+  s->glyphs = g_tab_used;
+  s->resets = g_resets;
+  s->rasterized = g_rasterized;
 }

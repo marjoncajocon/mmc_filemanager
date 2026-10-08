@@ -104,7 +104,13 @@ void ui_update_scale(void) {
   m->pad = DP(t ? 14 : 12);
   m->radius = DP(T.radius > 0 || T.row_h > 0 ? T.radius : 14);
   m->hit = DP(t ? 44 : 32);
-  font_reset();
+  /* Glyphs are cached by pixel size, so only a new scale makes the cached
+  ** ones useless; a plain window resize keeps them. */
+  static float s_font_scale;
+  if (ui.scale != s_font_scale) {
+    s_font_scale = ui.scale;
+    font_reset();
+  }
   ui_redraw();
 }
 

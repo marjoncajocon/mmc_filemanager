@@ -496,6 +496,78 @@ static void test_video_samples(void) {
   printf("  video samples: %d of %d played\n", played, files);
 }
 
+/* MMCFM_URL_TEST=<url>: opens a network stream (online video sources) and
+** decodes a few seconds; off by default (needs the network). */
+static void test_video_url(void) {
+  const char *url = getenv("MMCFM_URL_TEST");
+  if (!url || !*url) return;
+  u64 t0 = plat_now_ms();
+  FmErr err;
+  FmVid *v = vid_open(url, 0, &err);
+  TEST_CHECK(v != NULL);
+  if (!v) { printf("  url: cannot open (err %d)\n", (int)err); return; }
+  FmVidInfo in = *vid_info(v);
+  u64 t1 = plat_now_ms();
+  int vf_n = 0, a_n = 0, ev, guard = 0;
+  FmVidFrame vf;
+  FmVidPcm pc;
+  double last = 0;
+  while ((ev = vid_decode(v, &vf, &pc)) > 0 && guard++ < 20000 && vf_n < 90) {
+    if (ev == VID_EV_VIDEO) { vf_n++; last = vf.t; }
+    else a_n++;
+  }
+  bool seek = in.duration < 30 || vid_seek(v, in.duration * 0.5);
+  int after = 0;
+  u64 t2 = plat_now_ms();
+  while (seek && (ev = vid_decode(v, &vf, &pc)) > 0 && guard++ < 40000)
+    if (ev == VID_EV_VIDEO || (!in.has_video && ev == VID_EV_AUDIO)) { after = 1; break; }
+  vid_close(v);
+  printf("  url: %s %s/%s %dx%d %.0fs  v%d a%d (to %.1fs)  open %dms, decode %dms, seek %s %dms\n", in.backend,
+         in.vcodec, in.acodec, in.w, in.h, in.duration, vf_n, a_n, last, (int)(t1 - t0), (int)(t2 - t1),
+         seek && after ? "ok" : "FAIL", (int)(plat_now_ms() - t2));
+  TEST_CHECK((in.has_video ? vf_n > 0 : a_n > 0) && seek && after);
+}
+
+/* MMCFM_PAIR_TEST=<video>|<audio>: separate picture and sound files play as
+** one video with both streams, in time order, and seek together. */
+static void test_video_pair(void) {
+  const char *spec = getenv("MMCFM_PAIR_TEST");
+  if (!spec || !strchr(spec, '|')) return;
+  char vpath[FM_PATH_MAX];
+  fm_strlcpy(vpath, spec, FM_MIN(sizeof vpath, (size_t)(strchr(spec, '|') - spec) + 1));
+  const char *apath = strchr(spec, '|') + 1;
+  FmErr err;
+  FmVid *v = vid_open_pair(vpath, apath, 0, &err);
+  TEST_CHECK(v != NULL);
+  if (!v) return;
+  FmVidInfo in = *vid_info(v);
+  TEST_CHECK(in.has_video && in.has_audio && in.rate > 0);
+  int nv = 0, na = 0, ev, guard = 0, order_bad = 0;
+  double last_v = -1, last_a = -1, last_any = -1;
+  FmVidFrame vf;
+  FmVidPcm pc;
+  while ((ev = vid_decode(v, &vf, &pc)) > 0 && guard++ < 5000 && nv < 120) {
+    double t = ev == VID_EV_VIDEO ? vf.t : pc.t;
+    if (t + 0.25 < last_any) order_bad++;          /* interleaved by time */
+    last_any = FM_MAX(last_any, t);
+    if (ev == VID_EV_VIDEO) { nv++; last_v = vf.t; }
+    else { na++; last_a = pc.t; }
+  }
+  TEST_CHECK(nv > 0 && na > 0 && order_bad == 0);
+  TEST_CHECK(fabs(last_v - last_a) < 1.0);          /* the two halves stay together */
+  bool sk = vid_seek(v, in.duration * 0.5);
+  int sv = 0, sa = 0;
+  guard = 0;
+  while (sk && (ev = vid_decode(v, &vf, &pc)) > 0 && guard++ < 3000 && (!sv || !sa)) {
+    if (ev == VID_EV_VIDEO) { sv = 1; TEST_CHECK(vf.t > in.duration * 0.3); }
+    else sa = 1;
+  }
+  TEST_CHECK(sk && sv && sa);
+  printf("  pair: %s %s+%s %dx%d %.0fs  v%d a%d to %.1f/%.1fs, seek %s\n", in.backend, in.vcodec, in.acodec, in.w,
+         in.h, in.duration, nv, na, last_v, last_a, sk && sv && sa ? "ok" : "FAIL");
+  vid_close(v);
+}
+
 int test_media(const char *tmp) {
   int before = g_test_fail;
   test_wav(tmp);
@@ -506,6 +578,8 @@ int test_media(const char *tmp) {
   test_id3();
   test_video(tmp);
   test_video_samples();
+  test_video_url();
+  test_video_pair();
   test_text(tmp);
   return g_test_fail - before;
 }

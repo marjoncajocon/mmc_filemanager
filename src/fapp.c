@@ -22,6 +22,8 @@
 #include "ftitle.h"
 #include "farc.h"
 #include "flib.h"
+#include "fonline.h"
+#include "fphoto.h"                    /* photos */
 
 /* ---- state -------------------------------------------------------------- */
 
@@ -272,6 +274,8 @@ static void build_places(void) {
   };
   char path[FM_PATH_MAX];
   place_add(IC_LIBRARY, "Media library", "", 1);   /* flib: empty path = the library view */
+  place_add(IC_PLAY_BADGE, "Online videos", "online:", 1);   /* online: the online videos view */
+  place_add(IC_ALBUM, "Online photos", "photos:", 1);        /* photos: the online photos view */
   for (int i = 0; i < FM_COUNT(kPl); i++)
     if (plat_place(kPl[i].p, path, sizeof path) && plat_is_dir(path))
       place_add(kPl[i].ic, kPl[i].label, path, 1);
@@ -296,6 +300,30 @@ static void open_library(int section) {
   lib_ui_open(section, panel_is_local(P()) ? P()->list.loc.path : NULL);
 }
 
+/* online: the online videos view, over the panels like the library */
+static void open_online(void) {
+  if (lib_ui_is_open()) lib_ui_close();
+  if (photo_is_open()) photo_close();   /* photos */
+  online_open(NULL);
+}
+
+static void online_reveal_path(const char *path) {   /* online: "Show in folder" */
+  online_close();
+  panel_go_path(P(), path);
+}
+
+/* photos: the online photos view, over the panels like the online videos */
+static void open_photos(void) {
+  if (lib_ui_is_open()) lib_ui_close();
+  if (online_is_open()) online_close();
+  photo_open(NULL);
+}
+
+static void photo_reveal_path(const char *path) {    /* photos: "Show in folder" */
+  photo_close();
+  panel_go_path(P(), path);
+}
+
 /* "Show in folder" from the library: back to the panels, file selected. */
 static void lib_reveal(const char *path) {
   lib_ui_close();
@@ -306,6 +334,8 @@ static void go_place(int i, int panel) {
   if (i < 0 || i >= g_nplaces) return;
   FmPanel *p = &g_p[panel];
   if (!g_places[i].path[0]) { open_library(LIB_SEC_SONGS); return; }   /* flib */
+  if (!strcmp(g_places[i].path, "online:")) { open_online(); return; }   /* online */
+  if (!strcmp(g_places[i].path, "photos:")) { open_photos(); return; }   /* photos */
   if (!plat_is_dir(g_places[i].path)) {
     ui_toast("%s is not available", g_places[i].label);
     return;
@@ -340,6 +370,8 @@ void app_close_viewer(void) {
 void app_render_reset(void) {
   font_reset();
   thumb_reset();
+  online_render_reset();               /* online */
+  photo_render_reset();                /* photos */
 }
 
 /* ---- dialogs: opening --------------------------------------------------- */
@@ -567,7 +599,7 @@ static void open_settings(void) {
 
 static void open_exit(void) {
   dlg_open(DLG_EXIT, g_active);
-  D.jobs_warn = ops_running(false) > 0;
+  D.jobs_warn = ops_running(false) > 0 || online_downloads_active() > 0 || photo_downloads_active() > 0;   /* photos */
 }
 
 /* ---- operations --------------------------------------------------------- */
@@ -790,7 +822,7 @@ enum {
   CM_SELECT_ALL, CM_LIB_FOLDER, CM_LIB_FAV,
   PM_SORT_NAME = 40, PM_SORT_SIZE, PM_SORT_DATE, PM_SORT_TYPE, PM_DESC, PM_DIRS_FIRST, PM_LIST,
   PM_GRID, PM_HIDDEN, PM_NEWDIR, PM_NEWFILE, PM_PASTE, PM_SELECT_ALL, PM_REFRESH, PM_PROPS,
-  PM_SEARCH, PM_MIRROR, PM_PATH, PM_SELECT_MODE, PM_LIBRARY,
+  PM_SEARCH, PM_MIRROR, PM_PATH, PM_SELECT_MODE, PM_LIBRARY, PM_ONLINE, PM_PHOTOS /* photos */,
   JM_PAUSE = 80, JM_CANCEL
 };
 
@@ -888,6 +920,8 @@ void app_panel_menu(FmPanel *p, float x, float y) {
     item(m, &n, PM_SELECT_MODE, IC_CHECK, "Select items", NULL, p->select_mode ? UI_MI_CHECKED : 0);
   item(m, &n, PM_SEARCH, IC_SEARCH, "Filter", "Ctrl+F", 0);
   item(m, &n, PM_LIBRARY, IC_LIBRARY, "Media library", NULL, 0);   /* flib */
+  item(m, &n, PM_ONLINE, IC_PLAY_BADGE, "Online videos", NULL, 0);   /* online */
+  item(m, &n, PM_PHOTOS, IC_ALBUM, "Online photos", NULL, 0);        /* photos */
   sep(m, &n);
   item(m, &n, PM_MIRROR, IC_SWAP, "Same folder in other panel", NULL, 0);
   item(m, &n, PM_PATH, IC_RENAME, "Go to path", "Ctrl+L", 0);
@@ -1031,6 +1065,8 @@ static void pmenu_action(int id) {
       break;
     case PM_SEARCH: panel_open_search(p); break;
     case PM_LIBRARY: open_library(-1); break;   /* flib */
+    case PM_ONLINE: open_online(); break;       /* online */
+    case PM_PHOTOS: open_photos(); break;       /* photos */
     case PM_MIRROR: {
       FmLoc l = p->list.loc;
       panel_go(&g_p[1 - p->idx], &l, true);
@@ -1846,6 +1882,13 @@ static void dlg_settings(void) {
   float grid_h = theme_grid_h(c.w - DP(6));
   float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 3 + rh * 5 +
                   DP(50) + DP(90);
+  float online_h = online_settings_h(c.w - DP(6));   /* online: its section */
+  static bool online_jump;
+  if (online_settings_focus()) online_jump = true;
+  content += online_h;
+  content += photo_settings_h(c.w - DP(6));          /* photos: its section */
+  static bool photo_jump;
+  if (photo_settings_focus()) photo_jump = true;
   u32 sid = ui_id("dlg.settings.scroll");
   ui_scroll(&D.scroll, sid, c, content);
   gfx_clip_push(c);
@@ -1968,6 +2011,20 @@ static void dlg_settings(void) {
     }
     rect_cut_top(&r, DP(14));
   }
+  /* online: online videos (fonline_set.c); opened from that view it scrolls here */
+  if (online_jump) {
+    D.scroll.y = r.y - c.y + D.scroll.y;
+    online_jump = false;
+    ui_redraw();
+  }
+  online_settings(&r, ui_idn(base, 400));
+  /* photos: online photos (fphoto_set.c); opened from that view it scrolls here */
+  if (photo_jump) {
+    D.scroll.y = r.y - c.y + D.scroll.y;
+    photo_jump = false;
+    ui_redraw();
+  }
+  photo_settings(&r, ui_idn(base, 500));
   small_label(&r, "ABOUT");
   {
     char ver[96];
@@ -1992,10 +2049,10 @@ static void dlg_exit(void) {
   bool cancel;
   FmRect c = ui_dialog_begin(ui_id("dlg.exit"), "Exit MMC File Manager?", 420, dlg_h(ch), &cancel);
   if (D.jobs_warn) {
-    int n = ops_running(false);
+    int n = ops_running(false) + online_downloads_active() + photo_downloads_active();   /* photos */
     char msg[160];
     fm_snprintf(msg, sizeof msg, "%d %s still running. %s will be cancelled.", n,
-                plural(n, "job is", "jobs are"), plural(n, "It", "They"));
+                plural(n, "job or download is", "jobs or downloads are"), plural(n, "It", "They"));
     font_draw_wrap(FONT_REGULAR, ui.m.font, c.x, c.y, c.w, msg, T.warn, true);
   } else {
     font_draw(FONT_REGULAR, ui.m.font, c.x, c.y, "Your folders will be here next time.", -1, T.text2);
@@ -2584,7 +2641,9 @@ static bool arg_flag(const char *name) {
 /* A plain path argument ("mmcfm ~/Downloads", "Open with"): opens in the left panel. */
 static const char *arg_positional(void) {
   static const char *const kVal[] = { "--shot", "--size", "--frames", "--left", "--right",
-                                      "--demo-dialog", "--layout", "--demo-library" };
+                                      "--demo-dialog", "--layout", "--demo-library",
+                                      "--demo-online", "--demo-online-state",
+                                      "--demo-photos", "--demo-photos-state" /* photos */ };
   for (int i = 1; i < app.argc; i++) {
     const char *a = app.argv[i];
     bool val = false;
@@ -2767,6 +2826,16 @@ void app_init(void) {
   thumb_init();
   lib_init(g_shot);                    /* flib: --shot runs never save */
   lib_ui_set_reveal(lib_reveal);
+  online_init(g_shot);                 /* online */
+  {
+    FmOnlineHooks oh = { conf_dirty, open_settings, online_reveal_path };
+    online_set_hooks(&oh);
+  }
+  photo_init(g_shot);                  /* photos */
+  {
+    FmPhotoHooks ph = { conf_dirty, open_settings, photo_reveal_path };
+    photo_set_hooks(&ph);
+  }
   if (!g_shot) restore_window();
   title_apply();
 
@@ -2791,6 +2860,22 @@ void app_init(void) {
   /* flib: --demo-library SECTION shows the library of the --left folder */
   const char *dl = arg_value("--demo-library");
   if (dl) lib_demo(g_p[0].list.loc.path, FM_MAX(0, lib_ui_section(dl)));
+  /* online: --demo-online SOURCE [QUERY] [--demo-online-state STATE] */
+  const char *don = arg_value("--demo-online");
+  if (don) {
+    const char *q = NULL;
+    for (int i = 1; i + 2 < app.argc; i++)
+      if (!strcmp(app.argv[i], "--demo-online") && app.argv[i + 2][0] != '-') q = app.argv[i + 2];
+    online_demo(don, q, arg_value("--demo-online-state"));
+  }
+  /* photos: --demo-photos SOURCE [QUERY] [--demo-photos-state STATE] */
+  const char *dph = arg_value("--demo-photos");
+  if (dph) {
+    const char *q = NULL;
+    for (int i = 1; i + 2 < app.argc; i++)
+      if (!strcmp(app.argv[i], "--demo-photos") && app.argv[i + 2][0] != '-') q = app.argv[i + 2];
+    photo_demo(dph, q, arg_value("--demo-photos-state"));
+  }
   ui_redraw();
 }
 
@@ -2812,11 +2897,14 @@ void app_shutdown(void) {
   panel_free(&g_p[0]);
   panel_free(&g_p[1]);
   lib_shutdown();                      /* flib */
+  photo_shutdown();                    /* photos */
+  online_shutdown();                   /* online */
   thumb_shutdown();
 }
 
 bool app_can_quit(void) {
-  if (ops_running(false) > 0) {
+  /* file jobs and online downloads both ask first */
+  if (ops_running(false) > 0 || online_downloads_active() > 0 || photo_downloads_active() > 0) {   /* photos */
     open_exit();
     return false;
   }
@@ -2866,6 +2954,8 @@ void app_event(const SDL_Event *e) {
 void app_frame(void) {
   thumb_pump();
   lib_pump();                          /* flib: scan results, saving */
+  online_pump();                       /* online: searches, downloads, thumbnails */
+  photo_pump();                        /* photos: searches, full pictures, downloads, albums */
   FmJob *fj;
   while ((fj = ops_take_finished()) != NULL) job_finished(fj);
   conf_flush(false);
@@ -2884,6 +2974,20 @@ void app_frame(void) {
   /* flib: the media library takes the window, under the viewers */
   if (lib_ui_is_open()) {
     lib_ui_frame(FM_RECT(0, 0, ui.w, ui.h));
+    draw_dialogs();
+    title_outline();
+    return;
+  }
+  /* online: the online videos view, also under the viewers */
+  if (online_is_open()) {
+    online_frame(FM_RECT(0, 0, ui.w, ui.h));
+    draw_dialogs();
+    title_outline();
+    return;
+  }
+  /* photos: the online photos view, also under the viewers */
+  if (photo_is_open()) {
+    photo_frame(FM_RECT(0, 0, ui.w, ui.h));
     draw_dialogs();
     title_outline();
     return;

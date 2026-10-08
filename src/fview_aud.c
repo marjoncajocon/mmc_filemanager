@@ -361,7 +361,10 @@ static int decoder(void *u) {
       continue;
     }
     if (!drain_stream(&d, tmp, tmp_frames) || P.ring_frames - (P.r_write - P.r_read) < (u64)CHUNK * 2) {
-      SDL_CondWaitTimeout(P.cv, P.mx, 100);
+      /* the audio callback broadcasts after every read, so this sleeps until
+      ** there is room; paused, nothing reads and the thread stays asleep
+      ** (it used to wake 10 times a second, even paused in the mini player) */
+      SDL_CondWaitTimeout(P.cv, P.mx, P.paused ? 2000 : 500);
       continue;
     }
     unlock();

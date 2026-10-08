@@ -5,8 +5,13 @@
 ** the type icon meanwhile). Finished decodes are uploaded by thumb_pump on
 ** the main thread, which also wakes a redraw.
 **
+** The texture is usually a view of a shared atlas page (gfx_view_new):
+** draw it with gfx_tex / gfx_tex_rounded and size it with SDL_QueryTexture
+** (both understand views); do not pass it to other SDL calls. It stays
+** valid until the next thumb_pump.
+**
 ** Design decisions:
-**   - Memory is bounded: textures live in an LRU capped by total bytes
+**   - Memory is bounded: atlas pages live in an LRU capped by total bytes
 **     (default 12 MB); decoded pixels are downscaled on the worker before
 **     they ever reach the main thread.
 **   - Small JPEG/PNG thumbs are also cached on disk (PLACE_CACHE) keyed by
