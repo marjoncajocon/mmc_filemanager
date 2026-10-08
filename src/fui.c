@@ -1353,3 +1353,9 @@ char *ui_clipboard_get(void) {
   SDL_free(s);
   return r;
 }
+
+/* ---- small exports for other modules ------------------------------------ */
+
+float ui_px_per_pt(void) { return g_px_per_pt; }
+bool ui_pointer_in(FmRect r) { return pointer_in(r); }
+void ui_tip_track(u32 id, int f, const char *tip) { tip_track(id, f, tip); }

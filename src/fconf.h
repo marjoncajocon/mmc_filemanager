@@ -39,6 +39,7 @@ typedef struct FmConf {
   int nhistory;
   int win_x, win_y, win_w, win_h;
   bool win_max;
+  bool system_title;          /* OS window frame instead of the themed title bar */
   float volume;               /* audio player 0..1 */
 } FmConf;
 

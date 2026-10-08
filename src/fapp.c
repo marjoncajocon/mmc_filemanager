@@ -19,6 +19,7 @@
 #include "fconf.h"
 #include "fview.h"
 #include "fthumb.h"
+#include "ftitle.h"
 #include "farc.h"
 
 /* ---- state -------------------------------------------------------------- */
@@ -1790,8 +1791,8 @@ static void dlg_settings(void) {
   float rh = DP(ui.touch_mode ? 50 : 42), sl = font_line_h(ui.m.font_small) + DP(14);
   float seg_h = DP(ui.touch_mode ? 40 : 34);
   float grid_h = theme_grid_h(c.w - DP(6));
-  float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 2 + rh * 5 +
-                  DP(40) + DP(90);
+  float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 3 + rh * 5 +
+                  DP(50) + DP(90);
   u32 sid = ui_id("dlg.settings.scroll");
   ui_scroll(&D.scroll, sid, c, content);
   gfx_clip_push(c);
@@ -1879,6 +1880,13 @@ static void dlg_settings(void) {
     }
     rect_cut_top(&r, DP(10));
   }
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+  if (ui_switch(ui_idn(base, 310), rect_cut_top(&r, rh), "System title bar", &conf.system_title)) {
+    title_apply();
+    conf_dirty();
+  }
+  rect_cut_top(&r, DP(10));
+#endif
   small_label(&r, "FILES");
   {
     bool v = conf.show_hidden;
@@ -1978,9 +1986,13 @@ static void draw_dialogs(void) {
 static void draw_top(FmRect r) {
   u32 base = ui_id("top");
   float bs = DP(ui.touch_mode ? 46 : 38);
-  FmRect in = rect_inset2(r, DP(8), 0);
+  title_bar(r);
+  FmRect in = r;
+  title_buttons(&in);
+  in = rect_inset2(in, DP(8), 0);
   if (g_L.wide && g_L.mode == LAYOUT_SIDE) {
     FmRect b = rect_center(rect_cut_left(&in, bs), bs, bs);
+    title_nodrag(b);
     if (ui_toggle_btn(ui_idn(base, 1), b, IC_PANELS, g_sidebar_open, "Places sidebar"))
       g_sidebar_open = !g_sidebar_open;
     rect_cut_left(&in, DP(4));
@@ -1993,9 +2005,11 @@ static void draw_top(FmRect r) {
   }
   /* right side buttons */
   FmRect b = rect_center(rect_cut_right(&in, bs), bs, bs);
+  title_nodrag(b);
   if (ui_icon_btn(ui_idn(base, 2), b, IC_SETTINGS, T.text2, "Settings")) open_settings();
   if (theme_has_both(conf.theme)) {
     b = rect_center(rect_cut_right(&in, bs), bs, bs);
+    title_nodrag(b);
     if (ui_icon_btn(ui_idn(base, 3), b, T.dark ? IC_SUN : IC_MOON, T.text2,
                     T.dark ? "Light mode" : "Dark mode")) {
       conf.dark = !T.dark;
@@ -2005,9 +2019,11 @@ static void draw_top(FmRect r) {
   }
   if (!g_L.sidebar) {
     b = rect_center(rect_cut_right(&in, bs), bs, bs);
+    title_nodrag(b);
     if (ui_icon_btn(ui_idn(base, 4), b, IC_DRIVE, T.text2, "Places")) app_panel_places(P(), b.x, b.y + b.h);
   }
   b = rect_center(rect_cut_right(&in, bs), bs, bs);
+  title_nodrag(b);
   if (ui_icon_btn(ui_idn(base, 5), b, IC_SEARCH, T.text2, "Filter (Ctrl+F)")) panel_open_search(P());
   /* title, or the active folder on narrow screens */
   if (g_L.narrow) {
@@ -2695,6 +2711,7 @@ void app_init(void) {
   apply_touch();
   thumb_init();
   if (!g_shot) restore_window();
+  title_apply();
 
   char path[FM_PATH_MAX];
   for (int i = 0; i < 2; i++) {
@@ -2795,6 +2812,7 @@ void app_frame(void) {
   if (app.viewer) {
     FmRect full = { 0, 0, ui.w, ui.h };
     int prev = ui_push_layer(UI_LAYER_SHEET);
+    title_bar(FM_RECT(0, 0, 0, 0));    /* viewers own the top edge: no drag area */
     app.viewer->frame(full);
     if (app.viewer && (ui_key(SDLK_ESCAPE, 0) || ui_key(SDLK_AC_BACK, 0))) app_close_viewer();
     ui_pop_layer(prev);
@@ -2823,6 +2841,7 @@ void app_frame(void) {
   draw_drag();
   draw_dialogs();
 
+  title_outline();
   if (g_demo_dialog && ++g_demo_frames == 2) {
     demo_dialog(g_demo_dialog);
     g_demo_dialog = NULL;

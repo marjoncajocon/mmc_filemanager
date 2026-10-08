@@ -98,6 +98,7 @@ static void set_key(const char *k, const char *raw) {
   unesc(raw, v, sizeof v);
   if (!strcmp(k, "theme")) conf.theme = to_int(v, 0, THEME_COUNT - 1, 0);
   else if (!strcmp(k, "dark")) conf.dark = to_bool(v);
+  else if (!strcmp(k, "system_title")) conf.system_title = to_bool(v);
   else if (!strcmp(k, "accent")) conf.accent = to_int(v, -1, UI_ACCENTS - 1, -1);
   else if (!strcmp(k, "zoom")) conf.zoom = to_float(v, 0.75f, 2.0f, 1.0f);
   else if (!strcmp(k, "touch")) conf.touch = to_int(v, -1, 1, -1);
@@ -184,6 +185,7 @@ void conf_save(void) {
   fprintf(f, "# MMC File Manager %s settings\n", FM_VERSION);
   put_i(f, "theme", conf.theme);
   put_i(f, "dark", conf.dark);
+  put_i(f, "system_title", conf.system_title);
   put_i(f, "accent", conf.accent);
   put_f(f, "zoom", conf.zoom);
   put_i(f, "touch", conf.touch);

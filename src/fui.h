@@ -170,6 +170,12 @@ bool ui_key(SDL_Keycode k, u16 mod);
 bool ui_key_any(SDL_Keycode k);  /* any modifiers */
 void ui_set_cursor(int sdl_system_cursor);
 void ui_tooltip(const char *text);
+/* Window points -> renderer pixels (for OS callbacks in points). */
+float ui_px_per_pt(void);
+/* Pointer over r (respects touch and drag state), and the hover tooltip
+** helper the built-in buttons use. */
+bool ui_pointer_in(FmRect r);
+void ui_tip_track(u32 id, int f, const char *tip);
 
 /* ---- widgets ------------------------------------------------------------ */
 
