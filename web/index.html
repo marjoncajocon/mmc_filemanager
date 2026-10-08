@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- index.html: emscripten shell for the web demo of mmcfm.
+     build.sh passes this file as the shell file; {{{ SCRIPT }}} is replaced
+     by the generated loader. The demo browses an in-memory file system. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MMC File Manager</title>
+  <style>
+    :root { --bg: #0f1115; --fg: #e8eaf0; --dim: #9ea5b3; }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) { --bg: #eef1f6; --fg: #161a22; --dim: #5b6372; }
+    }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+      font: 15px system-ui, sans-serif; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; }
+    #status { position: fixed; inset: 0; display: grid; place-items: center; color: var(--dim); }
+  </style>
+</head>
+<body>
+  <div id="status">Loading…</div>
+  <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+  <script>
+    var Module = {
+      canvas: document.getElementById('canvas'),
+      setStatus: function (t) {
+        var s = document.getElementById('status');
+        if (s) { s.textContent = t; s.style.display = t ? 'grid' : 'none'; }
+      },
+      onRuntimeInitialized: function () { Module.setStatus(''); },
+      print: function (t) { console.log(t); },
+      printErr: function (t) { console.warn(t); }
+    };
+    window.addEventListener('resize', function () { Module.canvas.focus(); });
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

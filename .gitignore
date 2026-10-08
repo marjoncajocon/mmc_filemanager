@@ -1,0 +1,34 @@
+# build output
+/build/
+/dist/
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.so
+*.dylib
+*.dll
+*.exe
+*.apk
+*.idsig
+*.dex
+
+# android signing (never commit keys)
+*.keystore
+*.jks
+keystore.properties
+
+# generated
+/src/gen_*.h
+
+# editors / os
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
