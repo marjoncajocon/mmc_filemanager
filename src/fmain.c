@@ -35,6 +35,15 @@ static void fatal_box(const char *msg) {
 }
 
 static bool create_renderer(void) {
+#ifdef FM_WIN
+  /* Direct3D 11 first: on the same GPU it needs about half the driver memory
+  ** of SDL's default Direct3D 9 (82 vs 140-185 MB measured on Intel). SDL
+  ** falls back to the usual order where it is missing (Windows 7 without the
+  ** platform update), and SDL_RENDER_DRIVER in the environment still wins.
+  ** Picking a driver by hint turns SDL's batching off, so turn it back on. */
+  if (!getenv("SDL_RENDER_DRIVER")) SDL_SetHint(SDL_HINT_RENDER_DRIVER, "direct3d11");
+  SDL_SetHint(SDL_HINT_RENDER_BATCHING, "1");
+#endif
   app.ren = SDL_CreateRenderer(app.win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
   if (!app.ren) app.ren = SDL_CreateRenderer(app.win, -1, SDL_RENDERER_ACCELERATED);
   if (!app.ren) app.ren = SDL_CreateRenderer(app.win, -1, SDL_RENDERER_SOFTWARE);
@@ -45,12 +54,62 @@ static bool create_renderer(void) {
   return true;
 }
 
+/* ---- sleeping between events ---------------------------------------------- */
+
+/* SDL 2 only blocks for real on Windows, X11 and Wayland. Elsewhere
+** (Android, macOS) SDL_WaitEventTimeout polls every millisecond, which keeps
+** the CPU awake and drains batteries while nothing changes on screen. There
+** an event watch posts a semaphore for every event SDL queues (input, text,
+** timers, app_wake, lifecycle), and the loop sleeps on that instead. */
+#if !defined(FM_WIN) && !defined(FM_WEB) && !defined(FM_LINUX) && !defined(FM_BSD)
+#  define FM_OWN_WAIT 1
+static SDL_sem *g_wake_sem;
+
+static int SDLCALL wake_watch(void *user, SDL_Event *e) {
+  FM_UNUSED(user);
+  /* SDL queues a sentinel on every poll; waking for it would spin */
+  if (e->type != SDL_POLLSENTINEL) SDL_SemPost(g_wake_sem);
+  return 1;
+}
+#endif
+
+static void wait_init(void) {
+#ifdef FM_OWN_WAIT
+  g_wake_sem = SDL_CreateSemaphore(0);
+  if (g_wake_sem) SDL_AddEventWatch(wake_watch, NULL);
+#endif
+}
+
+static void wait_shutdown(void) {
+#ifdef FM_OWN_WAIT
+  if (!g_wake_sem) return;
+  SDL_DelEventWatch(wake_watch, NULL);
+  SDL_DestroySemaphore(g_wake_sem);
+  g_wake_sem = NULL;
+#endif
+}
+
+static bool wait_event(SDL_Event *e, int ms) {
+#ifdef FM_OWN_WAIT
+  if (g_wake_sem) {
+    if (SDL_PollEvent(e)) return true;          /* pumps, then checks the queue */
+    SDL_SemWaitTimeout(g_wake_sem, (Uint32)ms);
+    while (SDL_SemTryWait(g_wake_sem) == 0) {}  /* one wake covers them all */
+    return SDL_PollEvent(e) != 0;
+  }
+#endif
+  return SDL_WaitEventTimeout(e, ms) != 0;
+}
+
 static void frame(void) {
   SDL_Event e;
   int wait = ui_wait_ms();
   bool got;
-  if (wait == 0 || app.background) got = SDL_PollEvent(&e) != 0;
-  else got = SDL_WaitEventTimeout(&e, wait < 0 ? 1000 : wait) != 0;
+  /* Idle and in the background the thread sleeps in the event wait, so the
+  ** CPU stays asleep until input, a timer or app_wake() arrives. */
+  if (app.background) got = wait_event(&e, 1000);
+  else if (wait == 0) got = SDL_PollEvent(&e) != 0;
+  else got = wait_event(&e, wait < 0 ? 1000 : wait);
   while (got) {
     switch (e.type) {
       case SDL_QUIT:
@@ -79,10 +138,7 @@ static void frame(void) {
     app_event(&e);
     got = SDL_PollEvent(&e) != 0;
   }
-  if (app.background) {
-    SDL_Delay(50);
-    return;
-  }
+  if (app.background) return;            /* nothing is drawn while hidden */
   if (!ui_needs_frame()) return;
   int w, h;
   SDL_GetRendererOutputSize(app.ren, &w, &h);
@@ -204,6 +260,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   app.ev_wake = SDL_RegisterEvents(1);
+  wait_init();
 
   if (!font_init()) {
     fatal_box("The built-in fonts could not be loaded.");
@@ -231,6 +288,7 @@ int main(int argc, char **argv) {
 #endif
 
   app_shutdown();
+  wait_shutdown();
   ui_shutdown();
   font_shutdown();
   gfx_shutdown();

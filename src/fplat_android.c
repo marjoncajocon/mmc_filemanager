@@ -13,6 +13,7 @@
 #include "fcore.h"
 #ifdef FM_ANDROID
 #include "fplat.h"
+#include "fapp.h"
 #include "fsdl.h"
 #include <jni.h>
 
@@ -151,6 +152,20 @@ int plat_android_volumes(FmVolume *out, int max) {
 
 bool plat_open_external(const char *path) { return call_bool_str("fmOpenFile", path); }
 bool plat_share(const char *path) { return call_bool_str("fmShare", path); }
+
+/* ---- soft keyboard -------------------------------------------------------- */
+
+/* FmActivity measures how much of the window the keyboard covers and calls
+** this from the UI thread whenever it changes; the app thread reads it. */
+static SDL_atomic_t g_ime_px;
+
+JNIEXPORT void JNICALL Java_io_github_mmc_filemanager_FmActivity_nativeImeInset(JNIEnv *e, jclass c, jint px) {
+  (void)e; (void)c;
+  SDL_AtomicSet(&g_ime_px, px > 0 ? (int)px : 0);
+  app_wake();                          /* relayout: dialogs move above it */
+}
+
+int plat_ime_inset(void) { return SDL_AtomicGet(&g_ime_px); }
 
 /* ---- SDL's HIDDeviceManager natives -------------------------------------- */
 

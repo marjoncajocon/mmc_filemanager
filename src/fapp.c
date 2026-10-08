@@ -2262,7 +2262,9 @@ static void draw_action_bar(FmRect r, bool vertical) {
   u32 split_id = ui_idn(base, 999);
   int sf = g_L.mode == LAYOUT_SINGLE ? 0 : ui_hit(split_id, r);
   if (sf & UI_HOVER) ui_set_cursor(vertical ? SDL_SYSTEM_CURSOR_SIZEWE : SDL_SYSTEM_CURSOR_SIZENS);
-  if (sf & UI_HELD) {
+  /* only an actual drag claims the pointer: claiming it on press made every
+  ** tap on the buttons above a splitter grab, so they never got their click */
+  if ((sf & UI_DRAG) && (ui.active == split_id || ui.drag_owner == split_id)) {
     ui.drag_owner = split_id;
     float s = layout_split_at(&g_L, ui.mx, ui.my);
     if (fabsf(s - conf.split) > 0.0005f) {

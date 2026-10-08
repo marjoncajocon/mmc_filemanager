@@ -172,6 +172,8 @@ void ui_set_cursor(int sdl_system_cursor);
 void ui_tooltip(const char *text);
 /* Window points -> renderer pixels (for OS callbacks in points). */
 float ui_px_per_pt(void);
+/* Height of the on-screen keyboard over the window bottom, renderer pixels. */
+float ui_keyboard_h(void);
 /* Pointer over r (respects touch and drag state), and the hover tooltip
 ** helper the built-in buttons use. */
 bool ui_pointer_in(FmRect r);

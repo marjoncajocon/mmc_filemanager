@@ -114,6 +114,10 @@ int  plat_cpu_count(void);
 ** app draws its own outline), 0 when nothing was done. */
 int plat_window_corners(bool round, int radius_px, u32 border_rgb, bool maximized);
 
+/* Height in window pixels of the on-screen keyboard covering the bottom of
+** the window (Android); 0 on desktops and while it is hidden. */
+int plat_ime_inset(void);
+
 /* Storage permission (Android 11+: all-files access). Desktop: always true. */
 bool plat_storage_granted(void);
 void plat_storage_request(void);

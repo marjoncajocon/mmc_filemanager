@@ -502,6 +502,8 @@ int plat_cpu_count(void) {
   return (int)si.dwNumberOfProcessors;
 }
 
+int plat_ime_inset(void) { return 0; }
+
 bool plat_storage_granted(void) { return true; }
 void plat_storage_request(void) {}
 

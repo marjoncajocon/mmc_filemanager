@@ -10,6 +10,7 @@
 **     selection, horizontal scroll) is a single static struct.
 */
 #include "fui.h"
+#include "fplat.h"
 #include <math.h>
 
 FmUi ui;
@@ -772,8 +773,13 @@ static bool te_insert(char *buf, int cap, const char *s, int n) {
   int m = 0;
   for (int i = 0; i < n && m < (int)sizeof clean - 1; i++)
     if ((u8)s[i] >= 0x20 && s[i] != 0x7F) clean[m++] = s[i];
-  if (len + m >= cap) m = cap - 1 - len;
-  while (m > 0 && ((u8)clean[m] & 0xC0) == 0x80) m--;   /* never split a code point */
+  /* Shortened to fit: never split a code point. Only then: clean[m] past the
+  ** cleaned text is not initialised, and reading it dropped typed characters
+  ** at random (every key arrives on its own on Android). */
+  if (len + m >= cap) {
+    m = cap - 1 - len;
+    while (m > 0 && ((u8)clean[m] & 0xC0) == 0x80) m--;
+  }
   if (m <= 0) return false;
   memmove(buf + g_te.caret + m, buf + g_te.caret, (size_t)(len - g_te.caret + 1));
   memcpy(buf + g_te.caret, clean, (size_t)m);
@@ -1245,21 +1251,23 @@ FmRect ui_dialog_begin(u32 id, const char *title, float w_dp, float h_dp, bool *
   float t = ui_ease_out(ui_anim(ui_idn(id, 1), 1.0f, 14.0f));
   gfx_rect(FM_RECT(0, 0, ui.w, ui.h), col_alpha(T.scrim, t));
   bool sheet = ui.portrait && ui.w < DP(560);
+  /* lay out in the part of the window the on-screen keyboard leaves free */
+  float vis_h = ui.h - ui_keyboard_h();
   float w = FM_MIN(DP(w_dp), ui.w - DP(24));
-  float h = FM_MIN(DP(h_dp), ui.h - DP(24));
+  float h = FM_MIN(DP(h_dp), vis_h - DP(24));
   float rad = DP(20);
   FmRect r;
   if (sheet) {
     w = ui.w;
-    h = FM_MIN(DP(h_dp) + DP(12), ui.h - DP(40));
-    r = FM_RECT(0, ui.h - h * t, w, h);
+    h = FM_MIN(DP(h_dp) + DP(12), vis_h - DP(40));
+    r = FM_RECT(0, vis_h - h * t, w, h);
     gfx_shadow(r, rad, DP(24), col_alpha(T.shadow, t));
     gfx_rrect4(r, rad, rad, 0, 0, T.surface);
     gfx_rrect(FM_RECT(r.x + r.w * 0.5f - DP(18), r.y + DP(8), DP(36), DP(4)), DP(2), T.text3);
     r.y += DP(10);
     r.h -= DP(10);
   } else {
-    r = rect_center(FM_RECT(0, 0, ui.w, ui.h), w, h);
+    r = rect_center(FM_RECT(0, 0, ui.w, vis_h), w, h);
     r.y += DP(16) * (1 - t);
     gfx_shadow(r, rad, DP(28), col_alpha(T.shadow, t));
     gfx_rrect(r, rad, col_alpha(T.surface, FM_MIN(1.0f, t * 1.5f)));
@@ -1355,6 +1363,14 @@ char *ui_clipboard_get(void) {
 }
 
 /* ---- small exports for other modules ------------------------------------ */
+
+/* Renderer pixels the soft keyboard covers at the bottom (0 when hidden or
+** on desktops). Only counted while text input is on, so a keyboard closing
+** late never leaves a dialog floating. */
+float ui_keyboard_h(void) {
+  if (!SDL_IsTextInputActive()) return 0;
+  return (float)plat_ime_inset() * g_px_per_pt;
+}
 
 float ui_px_per_pt(void) { return g_px_per_pt; }
 bool ui_pointer_in(FmRect r) { return pointer_in(r); }

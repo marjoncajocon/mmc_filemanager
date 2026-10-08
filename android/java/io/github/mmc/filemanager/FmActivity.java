@@ -24,11 +24,16 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.storage.StorageManager;
 import android.os.storage.StorageVolume;
+import android.hardware.Sensor;
 import android.provider.Settings;
+import android.graphics.Rect;
+import android.view.View;
+import android.view.ViewTreeObserver;
 import android.view.WindowManager;
 import android.webkit.MimeTypeMap;
 
 import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLSurface;
 
 import java.io.File;
 import java.lang.reflect.Method;
@@ -44,12 +49,66 @@ public class FmActivity extends SDLActivity {
         return new String[] { "main" };
     }
 
+    /* SDL turns the accelerometer on at every resume (SENSOR_DELAY_GAME, about
+    ** 50 events a second) for games; a file manager never reads it, and the
+    ** stream alone kept the UI thread at ~3% CPU while idle. Rotation still
+    ** arrives through onConfigurationChanged (configChanges in the manifest). */
+    static final class QuietSurface extends SDLSurface {
+        QuietSurface(Context context) { super(context); }
+
+        @Override
+        public void enableSensor(int sensortype, boolean enabled) {
+            if (enabled && sensortype == Sensor.TYPE_ACCELEROMETER) return;
+            super.enableSensor(sensortype, enabled);
+        }
+    }
+
+    @Override
+    protected SDLSurface createSDLSurface(Context context) {
+        return new QuietSurface(context);
+    }
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         /* Draw behind the status/navigation bars only when the app asks for
            fullscreen; keep the default system bars otherwise. */
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        watchKeyboard();
+    }
+
+    /* ---- soft keyboard height ---------------------------------------------- */
+
+    /* SDL's surface keeps its full size when the keyboard opens, so dialogs
+       at the bottom would sit under it. The visible frame of the window says
+       how much the keyboard covers (works from API 26 on, no AndroidX); the
+       native side lays dialogs out above it. */
+    private int mImePx = -1;
+
+    private static native void nativeImeInset(int px);
+
+    private void watchKeyboard() {
+        final View root = getWindow().getDecorView();
+        root.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override
+            public void onGlobalLayout() {
+                Rect vis = new Rect();
+                root.getWindowVisibleDisplayFrame(vis);
+                int full = root.getHeight();
+                int covered = full - vis.bottom;
+                /* small values are the navigation bar, not a keyboard */
+                int px = covered > full * 0.15f ? covered : 0;
+                if (px != mImePx) {
+                    mImePx = px;
+                    try {
+                        nativeImeInset(px);
+                    } catch (UnsatisfiedLinkError e) {
+                        /* native library not loaded yet: the next layout pass retries */
+                        mImePx = -1;
+                    }
+                }
+            }
+        });
     }
 
     /* ---- storage permission -------------------------------------------- */

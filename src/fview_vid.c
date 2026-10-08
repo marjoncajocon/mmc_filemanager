@@ -43,6 +43,18 @@ typedef struct VFrame {
   size_t cap;
 } VFrame;
 
+/* ---- picture shape and touch lock ----------------------------------------- */
+
+/* Aspect modes: fit inside, fill (crop), stretch, a fixed display ratio, or
+** the source pixels 1:1. Kept across videos in a session. */
+enum { AR_FIT, AR_FILL, AR_STRETCH, AR_16_9, AR_4_3, AR_21_9, AR_1_1, AR_9_16, AR_ORIGINAL, AR_COUNT };
+static const char *const kArName[AR_COUNT] = { "Fit", "Fill", "Stretch", "16:9", "4:3", "21:9", "1:1", "9:16",
+                                               "Original" };
+static const double kArRatio[AR_COUNT] = { 0, 0, 0, 16.0 / 9, 4.0 / 3, 21.0 / 9, 1, 9.0 / 16, 0 };
+static int g_aspect;
+
+#define LOCK_HINT_MS 2500
+
 static struct {
   bool open;
   char path[FM_PATH_MAX];
@@ -99,6 +111,8 @@ static struct {
   int viz_pos;
   float viz_snap[VIZ_FFT];
   bool viz_overlay;        /* over the picture (toolbar toggle) */
+  bool locked;             /* touch lock: input ignored until unlocked */
+  u64 lock_hint_until;     /* unlock button visible until then */
   bool viz_panel;          /* settings shown */
   FmEq eq;                 /* equalizer state (callback, under mx) */
 } V;
@@ -362,6 +376,8 @@ static bool vid_view_open(const char *path, const char *const *list, int n, int 
   /* screenshots: --demo-audio FILE --demo-viz-overlay / --demo-viz-panel / --demo-eq N */
   for (int i = 1; i < app.argc; i++) {
     if (!strcmp(app.argv[i], "--demo-viz-overlay")) V.viz_overlay = true;
+    if (!strcmp(app.argv[i], "--demo-aspect") && i + 1 < app.argc) g_aspect = atoi(app.argv[i + 1]) % AR_COUNT;
+    if (!strcmp(app.argv[i], "--demo-lock")) { V.locked = true; V.lock_hint_until = (u64)-1; }
     if (!strcmp(app.argv[i], "--demo-viz-panel") || !strcmp(app.argv[i], "--demo-eq")) V.viz_panel = true;
   }
   return true;
@@ -455,7 +471,72 @@ static void vid_seek_bar(FmRect r) {
   if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
 }
 
-enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ };
+enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ, VM_ASPECT, VM_LOCK, VM_AR0 = 100 };
+
+/* Where the picture goes in `area` and which part of the texture shows. */
+static void place_picture(FmRect area, double sar, FmRect *dst, FmRect *src) {
+  double tw = V.tw, th = V.th;
+  double dw = tw * sar, dh = th;                     /* display shape of the source */
+  *src = FM_RECT(0, 0, (float)tw, (float)th);
+  int m = g_aspect;
+  if (kArRatio[m] > 0) { dw = kArRatio[m]; dh = 1; }  /* forced display ratio */
+  if (m == AR_STRETCH) { *dst = area; return; }
+  if (m == AR_ORIGINAL) {
+    float w = (float)(dw), h = (float)(dh);           /* one texel per pixel */
+    *dst = FM_RECT(area.x + (area.w - w) * 0.5f, area.y + (area.h - h) * 0.5f, w, h);
+    return;
+  }
+  double fit = FM_MIN(area.w / dw, area.h / dh);
+  if (m != AR_FILL) {
+    float w = (float)(dw * fit), h = (float)(dh * fit);
+    *dst = FM_RECT(area.x + (area.w - w) * 0.5f, area.y + (area.h - h) * 0.5f, w, h);
+    return;
+  }
+  /* fill: cover the area and crop the overflow from the texture */
+  double cover = FM_MAX(area.w / dw, area.h / dh);
+  double vis_w = area.w / (dw * cover), vis_h = area.h / (dh * cover);   /* 0..1 of the source */
+  *src = FM_RECT((float)(tw * (1 - vis_w) * 0.5), (float)(th * (1 - vis_h) * 0.5), (float)(tw * vis_w),
+                 (float)(th * vis_h));
+  *dst = area;
+}
+
+static void set_aspect(int m) {
+  g_aspect = ((m % AR_COUNT) + AR_COUNT) % AR_COUNT;
+  ui_toast("Picture: %s", kArName[g_aspect]);
+  ui_redraw();
+}
+
+/* Locked: the picture keeps playing, everything else ignores touches. A tap
+** (or Back) shows an unlock button for a moment; only that button unlocks. */
+static bool locked_frame(FmRect area) {
+  if (!V.locked) return false;
+  bool hint = ui.now < V.lock_hint_until;
+  if (ui_key(SDLK_AC_BACK, 0) || ui_key(SDLK_ESCAPE, 0) || (ui_input_ok() && ui.pressed)) {
+    V.lock_hint_until = ui.now + LOCK_HINT_MS;
+    hint = true;
+    view_wake_in(LOCK_HINT_MS + 50);
+  }
+  if (!hint) return true;
+  float s = DP(64);
+  FmRect b = { area.x + DP(28), area.y + (area.h - s) * 0.5f, s, s };
+  gfx_circle(b.x + s * 0.5f, b.y + s * 0.5f, s * 0.5f, col_alpha(VIEW_SCRIM, 0.85f));
+  if (ui_icon_btn(ui_id("vid.unlock"), b, IC_LOCK, VIEW_FG, "Tap to unlock")) {
+    V.locked = false;
+    view_chrome_poke(&V.chrome);
+    ui_toast("Unlocked");
+    return false;
+  }
+  font_draw(FONT_REGULAR, ui.m.font_small, b.x + s + DP(12), b.y + (s - font_line_h(ui.m.font_small)) * 0.5f,
+            "Tap the lock to unlock", -1, VIEW_FG);
+  return true;
+}
+
+static void set_locked(void) {
+  V.locked = true;
+  V.lock_hint_until = ui.now + 1200;
+  view_wake_in(1250);
+  ui_toast("Screen locked");
+}
 
 /* ---- visualizer ----------------------------------------------------------------- */
 
@@ -549,11 +630,12 @@ static void vid_view_frame(FmRect area) {
   FmRect pic = area;
   if (V.tex && V.tw > 0 && V.th > 0) {
     double sar = V.info.sar > 0.1 && V.info.sar < 10 ? V.info.sar : 1.0;
-    double dw = V.tw * sar, dh = V.th;
-    double sc = FM_MIN(area.w / dw, area.h / dh);
-    float w = (float)(dw * sc), h = (float)(dh * sc);
-    pic = FM_RECT(area.x + (area.w - w) * 0.5f, area.y + (area.h - h) * 0.5f, w, h);
-    gfx_tex(V.tex, NULL, pic, FM_HEX(0xFFFFFF));
+    FmRect src;
+    place_picture(area, sar, &pic, &src);
+    gfx_clip_push(area);
+    gfx_tex(V.tex, &src, pic, FM_HEX(0xFFFFFF));
+    gfx_clip_pop();
+    pic = rect_intersect(pic, area);
     if (viz_shown) viz_overlay(pic);
   } else if (state == VS_OPENING || (ready && V.info.has_video && !V.have_frame && !audio_only)) {
     ui_spinner(rect_center(area, DP(40), DP(40)), VIEW_FG2);
@@ -579,8 +661,11 @@ static void vid_view_frame(FmRect area) {
       plat_open_external(V.path);
   }
 
+  if (locked_frame(area)) return;
+
   /* keys */
   if (ready) {
+    if (ui_key(SDLK_a, 0)) set_aspect(g_aspect + 1);
     if (ui_key(SDLK_SPACE, 0) || ui_key(SDLK_k, 0) || ui_key(SDLK_AUDIOPLAY, 0)) set_paused(!V.paused);
     if (ui_key(SDLK_RIGHT, 0)) { seek_to(V.clock + 10); view_chrome_poke(&V.chrome); }
     if (ui_key(SDLK_LEFT, 0)) { seek_to(V.clock - 10); view_chrome_poke(&V.chrome); }
@@ -657,6 +742,16 @@ static void vid_view_frame(FmRect area) {
       { VM_OPEN, IC_OPEN_WITH, "Open with system player", NULL, 0 },
       { VM_VIZ, IC_EQUALIZER, "Visualizer settings", NULL, V.info.has_audio ? 0 : UI_MI_DISABLED },
       { VM_EQ, IC_EQUALIZER, "Equalizer", NULL, V.info.has_audio ? 0 : UI_MI_DISABLED },
+      { 0, IC_NONE, NULL, NULL, UI_MI_SEP },
+      { VM_AR0 + AR_FIT, g_aspect == AR_FIT ? IC_CHECK : IC_FIT, "Fit", NULL, 0 },
+      { VM_AR0 + AR_FILL, g_aspect == AR_FILL ? IC_CHECK : IC_NONE, "Fill (crop)", NULL, 0 },
+      { VM_AR0 + AR_STRETCH, g_aspect == AR_STRETCH ? IC_CHECK : IC_NONE, "Stretch", NULL, 0 },
+      { VM_AR0 + AR_16_9, g_aspect == AR_16_9 ? IC_CHECK : IC_NONE, "16:9", NULL, 0 },
+      { VM_AR0 + AR_4_3, g_aspect == AR_4_3 ? IC_CHECK : IC_NONE, "4:3", NULL, 0 },
+      { VM_AR0 + AR_21_9, g_aspect == AR_21_9 ? IC_CHECK : IC_NONE, "21:9 (cinema)", NULL, 0 },
+      { VM_AR0 + AR_1_1, g_aspect == AR_1_1 ? IC_CHECK : IC_NONE, "1:1", NULL, 0 },
+      { VM_AR0 + AR_9_16, g_aspect == AR_9_16 ? IC_CHECK : IC_NONE, "9:16 (vertical)", NULL, 0 },
+      { VM_AR0 + AR_ORIGINAL, g_aspect == AR_ORIGINAL ? IC_CHECK : IC_NONE, "Original size", NULL, 0 },
     };
     ui_menu_open(mid, act.x + act.w, area.y + ui.m.bar_h, items, FM_COUNT(items));
   }
@@ -679,7 +774,9 @@ static void vid_view_frame(FmRect area) {
   if (ready && audio_only &&
       view_bar_btn(&act, ui_id("vid.vizset"), IC_EQUALIZER, "Visualizer", VIEW_BAR_MEDIA, chrome, V.viz_panel))
     V.viz_panel = !V.viz_panel;
-  switch (ui_menu_result(mid)) {
+  int mres = ui_menu_result(mid);
+  if (mres >= VM_AR0 && mres < VM_AR0 + AR_COUNT) set_aspect(mres - VM_AR0);
+  switch (mres) {
     case VM_INFO: V.info_open = true; break;
     case VM_SHARE: plat_share(V.path); break;
     case VM_OPEN: set_paused(true); plat_open_external(V.path); break;
@@ -712,6 +809,11 @@ static void vid_view_frame(FmRect area) {
     rect_cut_left(&row, DP(8));
     float tw = font_width(FONT_REGULAR, ui.m.font_small, tb, -1);
     ui_label(rect_cut_left(&row, tw + DP(4)), tb, FONT_REGULAR, ui.m.font_small, fg2, UI_LEFT);
+    /* picture shape cycles (the ⋮ menu lists them all); touch lock on phones */
+    if (ui_icon_btn(ui_id("vid.aspect"), rect_cut_right(&row, s), IC_FIT, fg, "Picture shape (A)"))
+      set_aspect(g_aspect + 1);
+    if (ui.touch_mode && ui_icon_btn(ui_id("vid.lock"), rect_cut_right(&row, s), IC_UNLOCK, fg, "Lock touch"))
+      set_locked();
     if (V.info.has_audio) {
       FmRect vb = rect_cut_right(&row, s);
       if (ui_icon_btn(ui_id("vid.mute"), vb, V.volume <= 0.001f ? IC_MUTE : IC_VOLUME, fg, "Mute (M)"))
