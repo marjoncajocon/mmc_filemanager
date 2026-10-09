@@ -35,5 +35,9 @@ int test_photo_ui(const char *tmp);   /* ftest_photo.c: online photos view: rows
 int test_asrc(const char *tmp);       /* ftest_asrc.c: online audio sources, XML reader (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
 int test_aonline_ui(const char *tmp); /* ftest_aonline.c: online audio view: item lines, library file (MMCFM_AONLINE_PLAY) */
 int test_soft(const char *tmp);       /* ftest_soft.c: built-in VP9 + Opus WebM backend (MMCFM_SOFT_BENCH) */
+int test_cloud(const char *tmp);      /* ftest_cloud.c: cloud accounts, locations, jobs on the in-memory service */
+int test_dav(const char *tmp);         /* ftest_dav.c: WebDAV + S3 adapters, SigV4 (MMCFM_DAV_TEST, MMCFM_S3_TEST) */
+int test_mega(const char *tmp);        /* ftest_mega.c: MEGA crypto, sign-in, tree, CTR+MAC (MMCFM_MEGA_LINK, MMCFM_MEGA_LOGIN) */
+int test_oauth(const char *tmp);      /* ftest_oauth.c: OAuth PKCE + loopback sign-in, Drive/Dropbox/OneDrive parsers */
 
 #endif

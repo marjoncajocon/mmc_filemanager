@@ -24,6 +24,7 @@ typedef struct FmNetResp {
   bool ranges;         /* byte ranges accepted (Accept-Ranges: bytes, or a 206 reply) */
   int icy_metaint;     /* SHOUTcast/Icecast metadata interval, 0 = none */
   char icy_name[96];   /* station name from icy-name */
+  char *headers;       /* net_request only: the reply's header lines ("Key: v\r\n"...), fm_free */
 } FmNetResp;
 
 /* progress(user, done, total(0 = unknown)); return false to cancel */
@@ -50,6 +51,29 @@ typedef void (*FmNetHead)(void *user, const FmNetResp *r);
 typedef bool (*FmNetData)(void *user, const u8 *p, size_t n);
 FmErr net_get_stream(const char *url, const char *headers, FmNetHead head, FmNetData data, void *user,
                      FmNetResp *out, volatile int *cancel);
+
+/* Any request (cloud storage: WebDAV, REST APIs, uploads). */
+typedef struct FmNetReq {
+  const char *method;        /* "GET" when NULL; "PUT", "DELETE", "PROPFIND", "MKCOL", "MOVE", "HEAD", ... */
+  const char *headers;       /* extra "Key: value\r\n" lines, or NULL */
+  const void *body;          /* a body in memory (body_len bytes), or */
+  size_t body_len;
+  const char *body_file;     /* a slice of a file, read in pieces while sending (uploads) */
+  i64 body_off, body_file_len;
+  size_t max_reply;          /* reply kept in memory, capped (0 = 16 MB) ... */
+  const char *out_file;      /* ... or written to this file as it arrives (any status) */
+  bool no_redirect;          /* report a 3xx instead of following it */
+  /* progress: while sending a file body done/total count the body, then the
+  ** reply (total = its length, 0 unknown); return false to cancel */
+  FmNetProgress progress;
+  void *user;
+} FmNetReq;
+
+/* The request; out gets status, type, length, headers and (unless out_file)
+** the body. FM_OK means a reply arrived, whatever its status. */
+FmErr net_request(const char *url, const FmNetReq *rq, FmNetResp *out, volatile int *cancel);
+/* A header of a net_request reply by name (case-insensitive) into out; false when absent. */
+bool  net_resp_header(const FmNetResp *r, const char *name, char *out, size_t cap);
 
 /* Percent-encodes s for a query string (spaces become %20). */
 void  net_urlencode(const char *s, char *out, size_t cap);

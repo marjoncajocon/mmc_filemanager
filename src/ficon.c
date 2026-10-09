@@ -556,6 +556,17 @@ void icon_draw(FmIcon ic, FmRect r, FmColor c) {
       ARC(12, 11, 6, 0, 180);
       L(12, 17, 12, 21); L(9, 21, 15, 21);
       break;
+    /* cloud storage */
+    case IC_CLOUD:      /* three bumps over a flat base */
+      ARC(7, 14.5f, 4, 90, 265);
+      ARC(12.5f, 10.5f, 5.5f, 195, 335);
+      ARC(17.5f, 14, 4.5f, -80, 90);
+      L(7, 18.5f, 17.5f, 18.5f);
+      break;
+    case IC_UPLOAD:     /* the download mark, arrow pointing up */
+      L(12, 15, 12, 3); POLY(false, 7.5f, 7.5f, 12, 3, 16.5f, 7.5f);
+      POLY(false, 4, 16, 4, 20, 20, 20, 20, 16);
+      break;
   }
 }
 

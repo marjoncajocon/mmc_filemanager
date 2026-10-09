@@ -112,6 +112,10 @@ static const TestArea kAreas[] = {
   { "photo-ui", test_photo_ui },
   { "asrc", test_asrc },
   { "aonline-ui", test_aonline_ui },
+  { "cloud", test_cloud },
+  { "oauth", test_oauth },
+  { "dav", test_dav },
+  { "mega", test_mega },
 };
 
 int test_run_all(void) {

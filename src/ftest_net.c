@@ -11,6 +11,7 @@
 #include "fnetstream.h"
 #include "fsdl.h"
 #include "fplat.h"
+#include "fcrypt.h"
 
 static void test_json(void) {
   /* the shape of a YouTube search response */
@@ -191,6 +192,89 @@ static void test_ns_dump(void) {
   ns_close(ns);
 }
 
+
+/* HMAC-SHA256: RFC 4231 test cases 1 and 2 */
+static void test_hmac256(void) {
+  u8 key[20], mac[32];
+  memset(key, 0x0b, sizeof key);
+  hmac_sha256(key, 20, "Hi There", 8, mac);
+  static const u8 k1[32] = { 0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
+                             0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7 };
+  TEST_CHECK(memcmp(mac, k1, 32) == 0);
+  hmac_sha256((const u8 *)"Jefe", 4, "what do ya want for nothing?", 28, mac);
+  static const u8 k2[32] = { 0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
+                             0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43 };
+  TEST_CHECK(memcmp(mac, k2, 32) == 0);
+}
+
+/* net_resp_header on a canned block */
+static void test_resp_header(void) {
+  FmNetResp r;
+  memset(&r, 0, sizeof r);
+  r.headers = fm_strdup("Content-Type: text/plain\r\nETag:  \"abc\"\r\nX-Empty:\r\nlocation: /next\r\n");
+  char v[64];
+  TEST_CHECK(net_resp_header(&r, "etag", v, sizeof v) && !strcmp(v, "\"abc\""));
+  TEST_CHECK(net_resp_header(&r, "Location", v, sizeof v) && !strcmp(v, "/next"));
+  TEST_CHECK(net_resp_header(&r, "X-Empty", v, sizeof v) && !v[0]);
+  TEST_CHECK(!net_resp_header(&r, "Content", v, sizeof v));
+  net_resp_free(&r);
+  TEST_CHECK(!r.headers);
+}
+
+/* MMCFM_NETREQ_TEST=1: net_request against httpbin.org (PUT with a file
+** body, DELETE, HEAD, a redirect reported instead of followed, a reply to a file) */
+static void test_netreq_live(const char *tmp) {
+  if (!getenv("MMCFM_NETREQ_TEST") || !net_available()) return;
+  char src[FM_PATH_MAX], dst[FM_PATH_MAX];
+  fm_path_join(src, sizeof src, tmp, "up.bin");
+  fm_path_join(dst, sizeof dst, tmp, "reply.json");
+  FILE *f = fm_fopen(src, "wb");
+  for (int i = 0; i < 300000; i++) fputc('a' + i % 26, f);
+  fclose(f);
+  FmNetReq rq;
+  memset(&rq, 0, sizeof rq);
+  rq.method = "PUT";
+  rq.headers = "Content-Type: application/octet-stream\r\nX-Test: mmcfm\r\n";
+  rq.body_file = src;
+  rq.body_off = 1000;
+  rq.body_file_len = 200000;
+  rq.out_file = dst;
+  FmNetResp r;
+  u64 t0 = plat_now_ms();
+  FmErr e = net_request("https://httpbin.org/put", &rq, &r, NULL);
+  char ct[96];
+  bool hct = net_resp_header(&r, "Content-Type", ct, sizeof ct);
+  printf("  netreq PUT 200000 B: %s status %d in %d ms, content-type %s\n", fm_err_str(e), r.status,
+         (int)(plat_now_ms() - t0), hct ? ct : "-");
+  TEST_CHECK(e == FM_OK && r.status == 200 && hct && strstr(ct, "json"));
+  net_resp_free(&r);
+  /* httpbin echoes the body back as "data" */
+  u8 *echo = (u8 *)fm_alloc(4u << 20);
+  FILE *rf = fm_fopen(dst, "rb");
+  size_t n = rf ? fread(echo, 1, (4u << 20) - 1, rf) : 0;
+  if (rf) fclose(rf);
+  echo[n] = 0;
+  TEST_CHECK(n > 200000 && strstr((const char *)echo, "\"X-Test\": \"mmcfm\"") && strstr((const char *)echo, "lmnopq"));
+  fm_free(echo);
+  memset(&rq, 0, sizeof rq);
+  rq.method = "DELETE";
+  e = net_request("https://httpbin.org/delete", &rq, &r, NULL);
+  TEST_CHECK(e == FM_OK && r.status == 200 && r.data && strstr((const char *)r.data, "httpbin.org/delete"));
+  net_resp_free(&r);
+  memset(&rq, 0, sizeof rq);
+  rq.no_redirect = true;
+  e = net_request("https://httpbin.org/redirect-to?url=%2Fget&status_code=302", &rq, &r, NULL);
+  char loc[256];
+  TEST_CHECK(e == FM_OK && r.status == 302 && net_resp_header(&r, "Location", loc, sizeof loc) && !strcmp(loc, "/get"));
+  printf("  netreq no-redirect: status %d location %s\n", r.status, loc);
+  net_resp_free(&r);
+  memset(&rq, 0, sizeof rq);
+  rq.method = "HEAD";
+  e = net_request("https://httpbin.org/bytes/1000", &rq, &r, NULL);
+  TEST_CHECK(e == FM_OK && r.status == 200 && r.len == 0);
+  net_resp_free(&r);
+}
+
 int test_net(const char *tmp) {
   int before = g_test_fail;
   test_ns_dump();
@@ -198,5 +282,8 @@ int test_net(const char *tmp) {
   test_url();
   test_proc();
   test_https(tmp);
+  test_hmac256();
+  test_resp_header();
+  test_netreq_live(tmp);
   return g_test_fail - before;
 }

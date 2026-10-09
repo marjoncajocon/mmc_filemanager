@@ -42,6 +42,10 @@ struct FmJob {
   int arc_index;
   FmArcOpts opts;
   bool quiet, sync, demo;
+  FmJobRun run;
+  void *run_data;
+  void (*run_free)(void *data);
+  volatile int vcancel;      /* mirrors cancel for network calls that poll an int */
 
   SDL_Thread *th;
   SDL_mutex *mu;
@@ -281,6 +285,30 @@ static FmConflict resolve(FmJob *j, const char *src, const FmStat *sst, char *ds
   if (c == CONFLICT_CANCEL) {
     SDL_LockMutex(j->mu);
     j->cancel = true;
+    j->vcancel = 1;
+    SDL_UnlockMutex(j->mu);
+  }
+  return c;
+}
+
+FmConflict ops_job_conflict(FmJob *j, const FmAsk *q) {
+  FmConflict c = j->policy;
+  if (c == CONFLICT_ASK) {
+    if (j->sync) {
+      c = CONFLICT_SKIP;
+    } else if (!job_ask(j, q)) {
+      c = CONFLICT_CANCEL;
+    } else {
+      SDL_LockMutex(j->mu);
+      c = j->answer;
+      if (j->answer_all && c != CONFLICT_CANCEL) j->policy = c;
+      SDL_UnlockMutex(j->mu);
+    }
+  }
+  if (c == CONFLICT_CANCEL) {
+    SDL_LockMutex(j->mu);
+    j->cancel = true;
+    j->vcancel = 1;
     SDL_UnlockMutex(j->mu);
   }
   return c;
@@ -805,6 +833,7 @@ static bool cb_password(void *ud, char *buf, int cap, bool retry) {
   else {
     SDL_LockMutex(j->mu);
     j->cancel = true;
+    j->vcancel = 1;
     SDL_UnlockMutex(j->mu);
   }
   return ok;
@@ -1088,10 +1117,62 @@ static void run_open(FmJob *j) {
   SDL_UnlockMutex(j->mu);
 }
 
+/* ---- custom jobs: worker side -------------------------------------------- */
+
+bool ops_job_stop(FmJob *j) { return job_stop(j); }
+volatile int *ops_job_cancel_flag(FmJob *j) { return &j->vcancel; }
+void ops_job_current(FmJob *j, const char *name) { job_current(j, name); }
+void ops_job_bytes(FmJob *j, u64 n) { job_bytes(j, n); }
+void ops_job_file_done(FmJob *j) { job_file_done(j); }
+void ops_job_skip(FmJob *j, u64 bytes) { job_skip(j, bytes); }
+void ops_job_error(FmJob *j, const char *name, FmErr e, const char *msg) { job_error(j, name, e, msg); }
+
+void ops_job_scanning(FmJob *j, bool on) {
+  SDL_LockMutex(j->mu);
+  j->info.scanning = on;
+  SDL_UnlockMutex(j->mu);
+  job_wake(j, false);
+}
+
+void ops_job_totals(FmJob *j, u64 files, u64 bytes) {
+  SDL_LockMutex(j->mu);
+  j->info.files_total += files;
+  j->info.bytes_total += bytes;
+  SDL_UnlockMutex(j->mu);
+}
+
+u64 ops_job_bytes_done(FmJob *j) {
+  SDL_LockMutex(j->mu);
+  u64 b = j->info.bytes_done;
+  SDL_UnlockMutex(j->mu);
+  return b;
+}
+
+void ops_job_set_bytes(FmJob *j, u64 done) {
+  SDL_LockMutex(j->mu);
+  j->info.bytes_done = done;
+  SDL_UnlockMutex(j->mu);
+  job_wake(j, false);
+}
+
+void ops_job_touch(FmJob *j, int slot, const char *what) {
+  if (slot < 0 || slot > 1) return;
+  SDL_LockMutex(j->mu);
+  fm_strlcpy(j->info.touched[slot], what, FM_PATH_MAX);
+  SDL_UnlockMutex(j->mu);
+}
+
+void ops_job_result(FmJob *j, const char *path) {
+  SDL_LockMutex(j->mu);
+  fm_strlcpy(j->info.result, path, FM_PATH_MAX);
+  SDL_UnlockMutex(j->mu);
+}
+
 /* ---- job lifecycle ------------------------------------------------------ */
 
 static void run_job(FmJob *j) {
-  switch (j->kind) {
+  if (j->run) j->run(j, j->run_data);
+  else switch (j->kind) {
     case JOB_COPY:
     case JOB_MOVE:
       if (j->arc[0]) run_extract(j);       /* out of an archive: extract the selection */
@@ -1124,9 +1205,13 @@ static const char *short_dir(const char *path) {
   return b[0] ? b : path;
 }
 
-static void make_title(FmJob *j) {
+static void make_title(FmJob *j, const char *custom) {
   char *t = j->info.title;
   size_t cap = sizeof j->info.title;
+  if (custom) {
+    fm_strlcpy(t, custom, cap);
+    return;
+  }
   char what[300];
   if (j->nsrc == 1) fm_snprintf(what, sizeof what, "\"%s\"", fm_path_base(j->srcs[0]));
   else fm_snprintf(what, sizeof what, "%d %s", j->nsrc, items_word((u64)j->nsrc));
@@ -1175,11 +1260,15 @@ static FmJob *job_new(const FmJobSpec *s, bool sync) {
   j->info.quiet = s->quiet;
   j->info.eta_s = -1;
   j->info.fraction = -1;
-  make_title(j);
+  j->run = s->run;
+  j->run_data = s->run_data;
+  j->run_free = s->run_free;
+  make_title(j, s->run ? s->title : NULL);
   return j;
 }
 
 static void job_destroy(FmJob *j) {
+  if (j->run_free && j->run_data) j->run_free(j->run_data);
   for (int i = 0; i < j->nsrc; i++) fm_free(j->srcs[i]);
   fm_free(j->srcs);
   fm_free(j->buf);
@@ -1292,6 +1381,7 @@ void ops_pause(FmJob *j, bool pause) {
 void ops_cancel(FmJob *j) {
   SDL_LockMutex(j->mu);
   j->cancel = true;
+  j->vcancel = 1;
   j->paused = false;
   if (j->demo) { j->finished = true; j->info.done = true; j->info.err = FM_ERR_CANCEL; }
   SDL_CondBroadcast(j->cv);
@@ -1322,7 +1412,7 @@ void ops_answer_conflict(FmJob *j, FmConflict c, bool apply_all) {
   j->answer = c;
   j->answer_all = apply_all;
   j->answered = true;
-  if (c == CONFLICT_CANCEL) j->cancel = true;
+  if (c == CONFLICT_CANCEL) { j->cancel = true; j->vcancel = 1; }
   SDL_CondBroadcast(j->cv);
   SDL_UnlockMutex(j->mu);
 }

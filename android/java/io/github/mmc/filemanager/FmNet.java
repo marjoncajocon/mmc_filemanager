@@ -48,8 +48,11 @@ public final class FmNet {
         boolean ended;   /* the body was read to its end */
     }
 
-    /* body != null: a POST (redirects then turn into GETs, as browsers do) */
-    public static Conn open(String url, String headers, String agent, byte[] body) {
+    /* body != null: a POST (redirects then turn into GETs, as browsers do).
+       method: null = GET/POST; file != null: the body is fileLen bytes of the
+       file from fileOff, streamed. follow = false reports 3xx replies. */
+    public static Conn open(String url, String headers, String agent, byte[] body, String method, String file,
+                            long fileOff, long fileLen, boolean follow) {
         Conn c = new Conn();
         try {
             for (int hop = 0; hop < 8; hop++) {
@@ -69,7 +72,27 @@ public final class FmNet {
                     }
                 }
                 if (range) h.setRequestProperty("Accept-Encoding", "identity");
-                if (body != null) {
+                if (method != null) setMethod(h, method);
+                if (file != null) {
+                    h.setDoOutput(true);
+                    h.setFixedLengthStreamingMode(fileLen);
+                    java.io.OutputStream os = h.getOutputStream();
+                    java.io.RandomAccessFile f = new java.io.RandomAccessFile(file, "r");
+                    try {
+                        f.seek(fileOff);
+                        byte[] buf = new byte[256 * 1024];
+                        long left = fileLen;
+                        while (left > 0) {
+                            int n = f.read(buf, 0, (int) Math.min(buf.length, left));
+                            if (n < 0) throw new java.io.IOException("the file ended early");
+                            os.write(buf, 0, n);
+                            left -= n;
+                        }
+                    } finally {
+                        f.close();
+                    }
+                    os.close();
+                } else if (body != null) {
                     h.setDoOutput(true);
                     h.setFixedLengthStreamingMode(body.length);
                     java.io.OutputStream os = h.getOutputStream();
@@ -77,7 +100,7 @@ public final class FmNet {
                     os.close();
                 }
                 int st = h.getResponseCode();
-                if (st >= 300 && st < 400 && st != 304) {
+                if (follow && st >= 300 && st < 400 && st != 304) {
                     String loc = h.getHeaderField("Location");
                     h.disconnect();
                     if (loc == null) { c.error = "redirect without a location"; return c; }
@@ -100,6 +123,42 @@ public final class FmNet {
             c.error = e.getClass().getSimpleName() + (m != null ? ": " + m : "");
         }
         return c;
+    }
+
+    /* HttpURLConnection only knows the classic verbs: WebDAV ones (PROPFIND,
+       MKCOL, MOVE, COPY) are set on its private field, the usual workaround
+       (and its delegate's, on Android's OkHttp-based implementation). */
+    private static void setMethod(HttpURLConnection h, String m) throws java.io.IOException {
+        try {
+            h.setRequestMethod(m);
+            return;
+        } catch (java.net.ProtocolException e) { /* not a classic verb */ }
+        try {
+            java.lang.reflect.Field f = HttpURLConnection.class.getDeclaredField("method");
+            f.setAccessible(true);
+            f.set(h, m);
+            for (Class<?> k = h.getClass(); k != null; k = k.getSuperclass()) {
+                try {
+                    java.lang.reflect.Field d = k.getDeclaredField("delegate");
+                    d.setAccessible(true);
+                    Object o = d.get(h);
+                    if (o instanceof HttpURLConnection) f.set(o, m);
+                } catch (NoSuchFieldException e) { /* no delegate here */ }
+            }
+        } catch (Exception e) {
+            throw new java.io.IOException("this system cannot send " + m);
+        }
+    }
+
+    /* all response headers as "Key: value\r\n" lines */
+    public static String headerBlock(Conn c) {
+        if (c.h == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<String, java.util.List<String>> e : c.h.getHeaderFields().entrySet()) {
+            if (e.getKey() == null) continue;
+            for (String v : e.getValue()) sb.append(e.getKey()).append(": ").append(v).append("\r\n");
+        }
+        return sb.toString();
     }
 
     /* a response header by name, "" when absent */

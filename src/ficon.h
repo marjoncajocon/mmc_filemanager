@@ -38,6 +38,8 @@ typedef enum FmIcon {
   IC_ALBUM, IC_ALBUM_ADD,
   /* online audio (faudio_online) */
   IC_RADIO, IC_PODCAST, IC_WAVEFORM, IC_RSS, IC_TRENDING, IC_MIC,
+  /* cloud storage (fcloud_ui) */
+  IC_CLOUD, IC_UPLOAD,
   IC_COUNT
 } FmIcon;
 

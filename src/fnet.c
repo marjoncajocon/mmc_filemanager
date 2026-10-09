@@ -36,6 +36,28 @@ void net_resp_free(FmNetResp *r) {
   fm_free(r->data);
   r->data = NULL;
   r->len = 0;
+  fm_free(r->headers);
+  r->headers = NULL;
+}
+
+bool net_resp_header(const FmNetResp *r, const char *name, char *out, size_t cap) {
+  if (cap) out[0] = 0;
+  if (!r->headers) return false;
+  size_t nl = strlen(name);
+  for (const char *p = r->headers; *p;) {
+    const char *e = p + strcspn(p, "\r\n");
+    if ((size_t)(e - p) > nl && p[nl] == ':' && !fm_strnicmp(p, name, nl)) {
+      const char *v = p + nl + 1;
+      while (v < e && (*v == ' ' || *v == '\t')) v++;
+      size_t n = FM_MIN((size_t)(e - v), cap ? cap - 1 : 0);
+      memcpy(out, v, n);
+      if (cap) out[n] = 0;
+      return true;
+    }
+    p = e;
+    while (*p == '\r' || *p == '\n') p++;
+  }
+  return false;
 }
 
 #if !defined(FM_WEB)
@@ -52,6 +74,12 @@ typedef struct Body {
   /* POST: the request body (NULL = GET) */
   const void *post;
   size_t post_len;
+  /* net_request: method, a file slice as the body, keep the reply headers */
+  const char *method;
+  FILE *upf;
+  i64 up_len, up_off;
+  char up_path[FM_PATH_MAX];  /* Android: Java streams the file itself */
+  bool keep_headers, no_redirect;
 } Body;
 
 static bool body_put(Body *b, const void *p, size_t n) {
@@ -74,6 +102,7 @@ static bool body_put(Body *b, const void *p, size_t n) {
 typedef struct Body {
   u8 *data; size_t len, cap, max; FILE *f; bool over; FmNetHead head; FmNetData sink; void *su;
   const void *post; size_t post_len;
+  const char *method; FILE *upf; i64 up_len, up_off; char up_path[FM_PATH_MAX]; bool keep_headers, no_redirect;
 } Body;
 #endif
 
@@ -95,6 +124,7 @@ typedef BOOL (WINAPI *CloseFn)(HINET);
 typedef BOOL (WINAPI *TimeoutsFn)(HINET, int, int, int, int);
 typedef BOOL (WINAPI *SetOptFn)(HINET, DWORD, LPVOID, DWORD);
 typedef BOOL (WINAPI *AddHdrFn)(HINET, LPCWSTR, DWORD, DWORD);
+typedef BOOL (WINAPI *WriteFn)(HINET, LPCVOID, DWORD, LPDWORD);
 
 enum {
   WH_ACCESS_DEFAULT = 0, WH_ACCESS_AUTOMATIC = 4,       /* automatic proxy: Windows 8.1+ */
@@ -102,14 +132,14 @@ enum {
   WH_QUERY_STATUS = 19, WH_QUERY_CTYPE = 1, WH_QUERY_CLEN = 5, WH_QUERY_NUMBER = 0x20000000,
   WH_OPT_SECURE_PROTOCOLS = 84, WH_TLS11 = 0x200, WH_TLS12 = 0x800, WH_TLS13 = 0x2000,
   WH_OPT_DECOMPRESSION = 118, WH_DECOMP_ALL = 3, WH_OPT_REDIRECT_POLICY = 88, WH_REDIRECT_ALWAYS_SAFE = 1,
-  WH_ADDREQ_ADD = 0x20000000, WH_QUERY_CUSTOM = 65535,
+  WH_ADDREQ_ADD = 0x20000000, WH_QUERY_CUSTOM = 65535, WH_QUERY_RAW_CRLF = 22, WH_REDIRECT_NEVER = 0,
 };
 
 static struct {
   int state;
   OpenFn open; ConnectFn connect; OpenReqFn openreq; SendFn send; RecvFn recv;
   QueryHdrFn qhdr; AvailFn avail; ReadFn read; CloseFn close; TimeoutsFn timeouts;
-  SetOptFn setopt; AddHdrFn addhdr;
+  SetOptFn setopt; AddHdrFn addhdr; WriteFn write;
 } wh;
 static SDL_SpinLock g_wh_lock;
 
@@ -122,9 +152,10 @@ static bool wh_load(void) {
     WH(send, "WinHttpSendRequest"); WH(recv, "WinHttpReceiveResponse"); WH(qhdr, "WinHttpQueryHeaders");
     WH(avail, "WinHttpQueryDataAvailable"); WH(read, "WinHttpReadData"); WH(close, "WinHttpCloseHandle");
     WH(timeouts, "WinHttpSetTimeouts"); WH(setopt, "WinHttpSetOption"); WH(addhdr, "WinHttpAddRequestHeaders");
+    WH(write, "WinHttpWriteData");
 #undef WH
     wh.state = (wh.open && wh.connect && wh.openreq && wh.send && wh.recv && wh.qhdr && wh.avail && wh.read &&
-                wh.close && wh.timeouts && wh.setopt && wh.addhdr) ? 1 : -1;
+                wh.close && wh.timeouts && wh.setopt && wh.addhdr && wh.write) ? 1 : -1;
   }
   SDL_AtomicUnlock(&g_wh_lock);
   return wh.state > 0;
@@ -185,15 +216,72 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
   wh.timeouts(ses, 10000, 10000, 15000, 30000);
   con = wh.connect(ses, whost, (WORD)port, 0);
   if (!con) goto done;
-  req = wh.openreq(con, b->post ? L"POST" : L"GET", wpath, NULL, NULL, NULL, tls ? WH_FLAG_SECURE : 0);
+  {
+    wchar_t *wm = b->method ? to_w(b->method) : NULL;
+    req = wh.openreq(con, wm ? wm : b->post ? L"POST" : L"GET", wpath, NULL, NULL, NULL, tls ? WH_FLAG_SECURE : 0);
+    fm_free(wm);
+  }
   if (!req) goto done;
-  DWORD redir = WH_REDIRECT_ALWAYS_SAFE;
+  DWORD redir = b->no_redirect ? WH_REDIRECT_NEVER : WH_REDIRECT_ALWAYS_SAFE;
   wh.setopt(req, WH_OPT_REDIRECT_POLICY, &redir, sizeof redir);
   if (whdr) wh.addhdr(req, whdr, (DWORD)-1, WH_ADDREQ_ADD);
   if (cancel && *cancel) { err = FM_ERR_CANCEL; goto done; }
-  if (!wh.send(req, NULL, 0, (void *)b->post, (DWORD)b->post_len, (DWORD)b->post_len, 0) || !wh.recv(req, NULL)) {
+  if (b->upf) {
+    /* a file body in pieces; past 4 GB the length goes in a header of its own */
+    if (b->up_len > 0xFFFFFFFFll) {
+      wchar_t cl[64];
+      _snwprintf(cl, 64, L"Content-Length: %lld\r\n", (long long)b->up_len);
+      wh.addhdr(req, cl, (DWORD)-1, WH_ADDREQ_ADD);
+    }
+    DWORD tot = b->up_len > 0xFFFFFFFFll ? 0 : (DWORD)b->up_len;
+    if (!wh.send(req, NULL, 0, NULL, 0, tot, 0)) {
+      fm_snprintf(out->error, sizeof out->error, "connection failed (error %lu)", (unsigned long)GetLastError());
+      goto done;
+    }
+    static const size_t kPiece = 256 * 1024;
+    u8 *piece = (u8 *)fm_alloc(kPiece);
+    i64 sent = 0;
+    bool ok = true;
+    while (sent < b->up_len) {
+      if (cancel && *cancel) { err = FM_ERR_CANCEL; ok = false; break; }
+      size_t want = (size_t)FM_MIN((i64)kPiece, b->up_len - sent);
+      size_t got = fread(piece, 1, want, b->upf);
+      if (got != want) { fm_strlcpy(out->error, "cannot read the file", sizeof out->error); err = FM_ERR_IO; ok = false; break; }
+      DWORD w = 0;
+      if (!wh.write(req, piece, (DWORD)got, &w) || w != got) {
+        fm_snprintf(out->error, sizeof out->error, "upload failed (error %lu)", (unsigned long)GetLastError());
+        ok = false;
+        break;
+      }
+      sent += (i64)got;
+      if (cb && !cb(user, (u64)sent, (u64)b->up_len)) { err = FM_ERR_CANCEL; ok = false; break; }
+    }
+    fm_free(piece);
+    if (!ok) goto done;
+    if (!wh.recv(req, NULL)) {
+      fm_snprintf(out->error, sizeof out->error, "no reply (error %lu)", (unsigned long)GetLastError());
+      goto done;
+    }
+  } else if (!wh.send(req, NULL, 0, (void *)b->post, (DWORD)b->post_len, (DWORD)b->post_len, 0) ||
+             !wh.recv(req, NULL)) {
     fm_snprintf(out->error, sizeof out->error, "connection failed (error %lu)", (unsigned long)GetLastError());
     goto done;
+  }
+  if (b->keep_headers) {
+    DWORD hs = 0;
+    wh.qhdr(req, WH_QUERY_RAW_CRLF, NULL, NULL, &hs, NULL);
+    if (hs > 0 && hs < (1u << 20)) {
+      wchar_t *hw = (wchar_t *)fm_alloc(hs + sizeof(wchar_t));
+      if (wh.qhdr(req, WH_QUERY_RAW_CRLF, NULL, hw, &hs, NULL)) {
+        hw[hs / sizeof(wchar_t)] = 0;
+        int n = WideCharToMultiByte(CP_UTF8, 0, hw, -1, NULL, 0, NULL, NULL);
+        if (n > 0) {
+          out->headers = (char *)fm_alloc((size_t)n);
+          WideCharToMultiByte(CP_UTF8, 0, hw, -1, out->headers, n, NULL, NULL);
+        }
+      }
+      fm_free(hw);
+    }
   }
   DWORD status = 0, sz = sizeof status;
   wh.qhdr(req, WH_QUERY_STATUS | WH_QUERY_NUMBER, NULL, &status, &sz, NULL);
@@ -279,7 +367,9 @@ enum {
   CURLOPT_LOW_SPEED_TIME_ = 20, CURLOPT_LOW_SPEED_LIMIT_ = 19, CURLOPT_ACCEPT_ENCODING_ = 10102,
   CURLOPT_MAXREDIRS_ = 68, CURLOPT_NOSIGNAL_ = 99, CURLOPT_HEADERFUNCTION_ = 20079,
   CURLOPT_HEADERDATA_ = 10029, CURLOPT_HTTP09_ALLOWED_ = 285, CURLOPT_POSTFIELDS_ = 10015,
-  CURLOPT_POSTFIELDSIZE_LARGE_ = 30120,
+  CURLOPT_POSTFIELDSIZE_LARGE_ = 30120, CURLOPT_CUSTOMREQUEST_ = 10036, CURLOPT_UPLOAD_ = 46,
+  CURLOPT_READFUNCTION_ = 20012, CURLOPT_READDATA_ = 10009, CURLOPT_INFILESIZE_LARGE_ = 30115,
+  CURLOPT_NOBODY_ = 44, CURLOPT_POST_ = 47,
   CURLINFO_RESPONSE_CODE_ = 0x200002, CURLINFO_CONTENT_TYPE_ = 0x100012,
 };
 
@@ -336,6 +426,18 @@ typedef struct CuCtx {
 } CuCtx;
 
 /* one response header line; a new status line (redirects) starts over */
+/* net_request: the raw header lines of the final reply */
+static void cu_keep(CuCtx *c, const char *p, size_t len, bool status_line) {
+  FmNetResp *o = c->out;
+  if (status_line) { fm_free(o->headers); o->headers = NULL; return; }   /* redirects start over */
+  if (len < 3) return;                                                  /* the blank line */
+  size_t have = o->headers ? strlen(o->headers) : 0;
+  if (have + len > (1u << 20)) return;
+  o->headers = (char *)fm_realloc(o->headers, have + len + 1);
+  memcpy(o->headers + have, p, len);
+  o->headers[have + len] = 0;
+}
+
 static size_t cu_header(char *p, size_t sz, size_t n, void *u) {
   CuCtx *c = (CuCtx *)u;
   size_t len = sz * n;
@@ -343,7 +445,9 @@ static size_t cu_header(char *p, size_t sz, size_t n, void *u) {
   fm_strlcpy(line, p, FM_MIN(len + 1, sizeof line));
   line[strcspn(line, "\r\n")] = 0;
   FmNetResp *o = c->out;
-  if (!fm_strnicmp(line, "HTTP/", 5) || !fm_strnicmp(line, "ICY ", 4)) {
+  bool status_line = !fm_strnicmp(line, "HTTP/", 5) || !fm_strnicmp(line, "ICY ", 4);
+  if (c->b->keep_headers) cu_keep(c, p, len, status_line);
+  if (status_line) {
     o->length = -1;
     o->ranges = false;
     o->icy_metaint = 0;
@@ -385,11 +489,17 @@ static size_t cu_write(char *p, size_t sz, size_t n, void *u) {
 
 static int cu_xfer(void *u, i64 dltotal, i64 dlnow, i64 ult, i64 uln) {
   CuCtx *c = (CuCtx *)u;
-  FM_UNUSED(ult);
-  FM_UNUSED(uln);
   if (c->cancel && *c->cancel) return 1;
-  if (c->cb && !c->cb(c->user, (u64)dlnow, (u64)dltotal)) return 1;
+  bool sending = c->b->upf && ult > 0 && uln < ult;     /* the body first, then the reply */
+  if (c->cb && !c->cb(c->user, (u64)(sending ? uln : dlnow), (u64)(sending ? ult : dltotal))) return 1;
   return 0;
+}
+
+/* net_request: the file body in pieces */
+static size_t cu_read(char *buf, size_t sz, size_t n, void *u) {
+  CuCtx *c = (CuCtx *)u;
+  if (c->cancel && *c->cancel) return 0x10000000;       /* CURL_READFUNC_ABORT */
+  return fread(buf, 1, sz * n, c->b->upf);
 }
 
 static FmErr cu_request(const char *url, const char *headers, Body *b, FmNetProgress cb, void *user,
@@ -435,10 +545,18 @@ static FmErr cu_request(const char *url, const char *headers, Body *b, FmNetProg
   cu.setopt(h, CURLOPT_XFERINFODATA_, (void *)&ctx);
   cu.setopt(h, CURLOPT_NOPROGRESS_, 0L);
   if (hl) cu.setopt(h, CURLOPT_HTTPHEADER_, hl);
-  if (b->post) {
+  if (b->no_redirect) cu.setopt(h, CURLOPT_FOLLOWLOCATION_, 0L);
+  if (b->upf) {                                          /* UPLOAD sends a body; the method is set below */
+    cu.setopt(h, CURLOPT_UPLOAD_, 1L);
+    cu.setopt(h, CURLOPT_READFUNCTION_, (CurlWriteFn)cu_read);
+    cu.setopt(h, CURLOPT_READDATA_, (void *)&ctx);
+    cu.setopt(h, CURLOPT_INFILESIZE_LARGE_, b->up_len);
+  } else if (b->post) {
     cu.setopt(h, CURLOPT_POSTFIELDSIZE_LARGE_, (i64)b->post_len);
     cu.setopt(h, CURLOPT_POSTFIELDS_, b->post);
   }
+  if (b->method && !strcmp(b->method, "HEAD")) cu.setopt(h, CURLOPT_NOBODY_, 1L);
+  else if (b->method) cu.setopt(h, CURLOPT_CUSTOMREQUEST_, b->method);
   int rc = cu.perform(h);
   long status = 0;
   cu.getinfo(h, CURLINFO_RESPONSE_CODE_, &status);
@@ -473,7 +591,7 @@ static FmErr cu_request(const char *url, const char *headers, Body *b, FmNetProg
 static struct {
   int state;
   jclass cls, conn;
-  jmethodID open, header, read, close;
+  jmethodID open, header, read, close, hblock;
   jfieldID status, length, type, error;
 } jx;
 static SDL_SpinLock g_jn_lock;
@@ -521,8 +639,11 @@ static JNIEnv *jn_load(void) {
     }
     if (jx.cls && jx.conn) {
       jx.open = (*e)->GetStaticMethodID(e, jx.cls, "open",
-                                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)"
+                                        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B"
+                                        "Ljava/lang/String;Ljava/lang/String;JJZ)"
                                         "Lio/github/mmc/filemanager/FmNet$Conn;");
+      jx.hblock = (*e)->GetStaticMethodID(e, jx.cls, "headerBlock",
+                                          "(Lio/github/mmc/filemanager/FmNet$Conn;)Ljava/lang/String;");
       jx.header = (*e)->GetStaticMethodID(e, jx.cls, "header",
                                           "(Lio/github/mmc/filemanager/FmNet$Conn;Ljava/lang/String;)Ljava/lang/String;");
       jx.read = (*e)->GetStaticMethodID(e, jx.cls, "read", "(Lio/github/mmc/filemanager/FmNet$Conn;[B)I");
@@ -532,7 +653,8 @@ static JNIEnv *jn_load(void) {
       jx.type = (*e)->GetFieldID(e, jx.conn, "type", "Ljava/lang/String;");
       jx.error = (*e)->GetFieldID(e, jx.conn, "error", "Ljava/lang/String;");
       jn_clear(e);
-      if (jx.open && jx.header && jx.read && jx.close && jx.status && jx.length && jx.type && jx.error) jx.state = 1;
+      if (jx.open && jx.header && jx.read && jx.close && jx.hblock && jx.status && jx.length && jx.type && jx.error)
+        jx.state = 1;
     }
   }
   SDL_AtomicUnlock(&g_jn_lock);
@@ -577,8 +699,13 @@ static FmErr jn_request(const char *url, const char *headers, Body *b, FmNetProg
     jp = (*e)->NewByteArray(e, (jsize)b->post_len);
     if (jp) (*e)->SetByteArrayRegion(e, jp, 0, (jsize)b->post_len, (const jbyte *)b->post);
   }
-  jobject c = (ju && jh && ja && (jp || !b->post)) ? (*e)->CallStaticObjectMethod(e, jx.cls, jx.open, ju, jh, ja, jp)
-                                                   : NULL;
+  /* a file body is streamed by Java from the file itself (path, offset, length) */
+  jstring jm = b->method ? (*e)->NewStringUTF(e, b->method) : NULL;
+  jstring jf = b->up_path[0] ? (*e)->NewStringUTF(e, b->up_path) : NULL;
+  jobject c = (ju && jh && ja && (jp || !b->post))
+                  ? (*e)->CallStaticObjectMethod(e, jx.cls, jx.open, ju, jh, ja, jp, jm, jf, (jlong)b->up_off,
+                                                 (jlong)b->up_len, (jboolean)!b->no_redirect)
+                  : NULL;
   if (jn_clear(e) || !c) {
     (*e)->PopLocalFrame(e, NULL);
     fm_strlcpy(out->error, "could not start the request", sizeof out->error);
@@ -602,6 +729,18 @@ static FmErr jn_request(const char *url, const char *headers, Body *b, FmNetProg
   jn_header(e, c, "icy-metaint", v, sizeof v);
   out->icy_metaint = atoi(v);
   jn_header(e, c, "icy-name", out->icy_name, sizeof out->icy_name);
+  if (b->keep_headers) {
+    jstring hb = (jstring)(*e)->CallStaticObjectMethod(e, jx.cls, jx.hblock, c);
+    if (jn_clear(e)) hb = NULL;
+    if (hb) {
+      const char *u = (*e)->GetStringUTFChars(e, hb, NULL);
+      if (u) {
+        out->headers = fm_strdup(u);
+        (*e)->ReleaseStringUTFChars(e, hb, u);
+      }
+      (*e)->DeleteLocalRef(e, hb);
+    }
+  }
   if (b->head) b->head(b->su, out);
 
   enum { CHUNK = 64 * 1024 };
@@ -684,6 +823,50 @@ FmErr net_post(const char *url, const char *headers, const void *body, size_t le
   if (err != FM_OK) { fm_free(b.data); b.data = NULL; b.len = 0; }
   out->data = b.data;
   out->len = b.len;
+  return err;
+}
+
+FmErr net_request(const char *url, const FmNetReq *rq, FmNetResp *out, volatile int *cancel) {
+  Body b;
+  memset(&b, 0, sizeof b);
+  memset(out, 0, sizeof *out);
+  b.max = rq->max_reply ? rq->max_reply : (16u << 20);
+  b.method = rq->method;
+  b.keep_headers = true;
+  b.no_redirect = rq->no_redirect;
+  if (rq->body) {
+    b.post = rq->body;
+    b.post_len = rq->body_len;
+  } else if (rq->body_file) {
+    b.upf = fm_fopen(rq->body_file, "rb");
+    if (!b.upf || (rq->body_off && fm_fseek64(b.upf, rq->body_off, SEEK_SET) != 0)) {
+      if (b.upf) fclose(b.upf);
+      fm_strlcpy(out->error, "cannot read the file to send", sizeof out->error);
+      return FM_ERR_IO;
+    }
+    b.up_off = rq->body_off;
+    b.up_len = rq->body_file_len;
+    fm_strlcpy(b.up_path, rq->body_file, sizeof b.up_path);
+  } else if (rq->method && (!strcmp(rq->method, "PUT") || !strcmp(rq->method, "POST") || !strcmp(rq->method, "PATCH"))) {
+    b.post = "";                               /* an empty body still says Content-Length: 0 */
+  }
+  if (rq->out_file) {
+    b.f = fm_fopen(rq->out_file, "wb");
+    if (!b.f) {
+      if (b.upf) fclose(b.upf);
+      fm_strlcpy(out->error, "cannot create the file", sizeof out->error);
+      return FM_ERR_IO;
+    }
+  }
+  FmErr err = REQUEST(url, rq->headers, &b, rq->progress, rq->user, out, cancel);
+  if (b.upf) fclose(b.upf);
+  if (b.f && fclose(b.f) != 0 && err == FM_OK) err = FM_ERR_IO;
+  if (!b.f) {
+    if (err == FM_OK && !b.data) b.data = (u8 *)fm_calloc(1, 1);
+    if (err != FM_OK) { fm_free(b.data); b.data = NULL; b.len = 0; }
+    out->data = b.data;
+    out->len = b.len;
+  }
   return err;
 }
 

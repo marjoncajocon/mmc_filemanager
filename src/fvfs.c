@@ -13,9 +13,12 @@
 **   - vfs_materialize writes to PLACE_CACHE/view/<hash>/<name>, where the
 **     hash covers archive path, entry path, size and mtime: a cached copy is
 **     reused only while it is still the same entry.
+**   - Cloud locations are handled by fcloud_vfs.c; the functions here only
+**     hand them over, so local and archive browsing never see the network.
 */
 #include "fvfs.h"
 #include "fops.h"
+#include "fcloud_app.h"
 
 /* ---- locations ---------------------------------------------------------- */
 
@@ -36,6 +39,7 @@ void loc_local(FmLoc *loc, const char *path) {
 }
 
 bool loc_up(FmLoc *loc) {
+  if (loc->in_cloud) return cloud_loc_up(loc);
   if (loc->in_arc) {
     size_t n = strlen(loc->inner);
     if (n == 0) {
@@ -55,6 +59,7 @@ bool loc_up(FmLoc *loc) {
 }
 
 void loc_title(const FmLoc *loc, char *out, size_t cap) {
+  if (loc->in_cloud) { cloud_loc_title(loc, out, cap); return; }
   if (loc->in_arc && loc->inner[0]) {
     char tmp[FM_PATH_MAX];
     fm_strlcpy(tmp, loc->inner, sizeof tmp);
@@ -82,6 +87,7 @@ void loc_title(const FmLoc *loc, char *out, size_t cap) {
 }
 
 void loc_display(const FmLoc *loc, char *out, size_t cap) {
+  if (loc->in_cloud) { cloud_loc_display(loc, out, cap); return; }
   fm_strlcpy(out, loc->path, cap);
   if (!loc->in_arc || !loc->inner[0]) return;
   size_t n = strlen(out);
@@ -94,6 +100,8 @@ void loc_display(const FmLoc *loc, char *out, size_t cap) {
 }
 
 bool loc_equal(const FmLoc *a, const FmLoc *b) {
+  if (a->in_cloud || b->in_cloud)
+    return a->in_cloud == b->in_cloud && a->cloud == b->cloud && strcmp(a->path, b->path) == 0;
   return a->in_arc == b->in_arc && same_path(a->path, b->path) && strcmp(a->inner, b->inner) == 0;
 }
 
@@ -220,7 +228,11 @@ static FmErr list_arc(FmListing *l, bool show_hidden) {
 }
 
 FmErr vfs_list(FmListing *l, const FmLoc *loc, bool show_hidden) {
+  if (loc->in_cloud) return cloud_vfs_list(l, loc, show_hidden);
   FmLoc want = *loc;
+  if (l->cdir) cloud_vfs_release(l);
+  l->loading = false;
+  l->errmsg[0] = 0;
   if (l->arc && !(want.in_arc && same_path(l->loc.path, want.path))) {
     arc_close(l->arc);
     l->arc = NULL;
@@ -235,7 +247,12 @@ FmErr vfs_list(FmListing *l, const FmLoc *loc, bool show_hidden) {
   return l->err;
 }
 
+bool vfs_poll(FmListing *l, bool show_hidden) {
+  return l->loading && l->loc.in_cloud && cloud_vfs_poll(l, show_hidden);
+}
+
 void vfs_free(FmListing *l) {
+  if (l->cdir) cloud_vfs_release(l);
   if (l->arc) arc_close(l->arc);
   arena_free(&l->arena);
   fm_free(l->items);
@@ -243,7 +260,7 @@ void vfs_free(FmListing *l) {
 }
 
 bool vfs_entry_path(const FmListing *l, const FmEntry *e, char *out, size_t cap) {
-  if (l->loc.in_arc) return false;
+  if (l->loc.in_arc || l->loc.in_cloud) return false;
   return fm_path_join(out, cap, l->loc.path, e->name);
 }
 

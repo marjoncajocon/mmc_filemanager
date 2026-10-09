@@ -14,6 +14,9 @@
 **     which is what the self test (and any headless caller) uses.
 **   - Workers wake the main loop with app_wake at most ~20 times a second;
 **     the speed and ETA are computed on the UI side from the snapshots.
+**   - Other modules can run their own work as a job (spec.run: cloud
+**     transfers in fcloud_job.c) and get the same card, pause, cancel,
+**     conflict questions and finish handling through the ops_job_* calls.
 */
 #ifndef FOPS_H
 #define FOPS_H
@@ -37,6 +40,10 @@ typedef enum FmConflict {
   CONFLICT_ASK = 0, CONFLICT_OVERWRITE, CONFLICT_SKIP, CONFLICT_KEEP_BOTH, CONFLICT_CANCEL
 } FmConflict;
 
+typedef struct FmJob FmJob;
+/* A custom job's body: runs on the worker with the job and spec.run_data. */
+typedef void (*FmJobRun)(FmJob *j, void *data);
+
 typedef struct FmJobSpec {
   FmJobKind kind;
   /* Local absolute paths; or, when `arc` is set, names relative to
@@ -52,6 +59,11 @@ typedef struct FmJobSpec {
   const char *password;     /* archive password to try first (may be NULL) */
   FmConflict conflict;      /* initial policy; CONFLICT_ASK asks the UI */
   bool quiet;               /* no progress card and no toast */
+  /* custom job: run() does the work (kind still picks the icon and toast) */
+  FmJobRun run;
+  void *run_data;           /* owned by the job from ops_start on */
+  void (*run_free)(void *data);
+  const char *title;        /* the card's title for a custom job */
 } FmJobSpec;
 
 typedef struct FmJobInfo {
@@ -79,8 +91,6 @@ typedef struct FmJobInfo {
   bool arc_encrypted;
   u64 arc_unpacked;
 } FmJobInfo;
-
-typedef struct FmJob FmJob;
 
 typedef enum FmAskKind { ASK_NONE = 0, ASK_CONFLICT, ASK_PASSWORD } FmAskKind;
 
@@ -120,6 +130,26 @@ FmErr  ops_run_sync(const FmJobSpec *spec, FmJobInfo *out);
 
 /* A fake job card for screenshots (--demo-job). */
 void   ops_demo(void);
+
+/* ---- custom jobs: worker side -------------------------------------------- */
+
+bool  ops_job_stop(FmJob *j);                    /* waits while paused; true = cancelled */
+volatile int *ops_job_cancel_flag(FmJob *j);     /* nonzero once cancelled (for net calls) */
+void  ops_job_current(FmJob *j, const char *name);
+void  ops_job_scanning(FmJob *j, bool on);
+void  ops_job_totals(FmJob *j, u64 files, u64 bytes);   /* adds to the totals */
+void  ops_job_bytes(FmJob *j, u64 n);            /* adds to bytes done */
+u64   ops_job_bytes_done(FmJob *j);
+void  ops_job_set_bytes(FmJob *j, u64 done);
+void  ops_job_file_done(FmJob *j);
+void  ops_job_skip(FmJob *j, u64 bytes);
+void  ops_job_error(FmJob *j, const char *name, FmErr e, const char *msg);
+/* A name conflict: the job's policy, or the user's answer (q filled by the
+** caller); CONFLICT_CANCEL also cancels the job. KEEP_BOTH is left to the
+** caller to name. */
+FmConflict ops_job_conflict(FmJob *j, const FmAsk *q);
+void  ops_job_touch(FmJob *j, int slot, const char *what);   /* info.touched[slot] */
+void  ops_job_result(FmJob *j, const char *path);
 
 /* ---- helpers ------------------------------------------------------------ */
 

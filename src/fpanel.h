@@ -56,6 +56,7 @@ typedef struct FmPanel {
   float row_h, tile_w, tile_h;   /* last frame geometry, for keyboard scrolling */
   int cols;                      /* grid columns (1 in list view) */
   u64 nav_t;                     /* time of the last navigation (fade-in) */
+  char select_after[256];        /* cloud: select this name when the listing arrives */
 } FmPanel;
 
 void panel_init(FmPanel *p, int idx, const char *path);
@@ -87,6 +88,8 @@ int  panel_selected(FmPanel *p, int **items);
 char **panel_selected_paths(FmPanel *p, int *n);
 void panel_free_paths(char **paths, int n);
 bool panel_is_local(const FmPanel *p);   /* a readable local folder */
+/* Copy / move can go into it: a local folder, or a cloud folder that takes uploads. */
+bool panel_can_receive(const FmPanel *p);
 
 /* Opens an entry: folder, archive, or a file (viewer / system app). */
 void panel_open_item(FmPanel *p, int item);

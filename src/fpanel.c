@@ -13,6 +13,10 @@
 **     long press starts selection mode with checkboxes.
 **   - Desktop type-to-filter writes straight into the filter (no focused
 **     field), so the first key is never swallowed by a select-all.
+**   - Cloud folders arrive later (fvfs: `loading`): the panel shows a
+**     spinner, or keeps the old rows during a refresh, and vfs_poll in
+**     panel_frame swaps the new listing in with the selection kept by name.
+**     History encodes them as "C<serial>\x1f<ids>\x1f<names>".
 */
 #include "fpanel.h"
 #include "fconf.h"
@@ -20,6 +24,7 @@
 #include "fapp.h"
 #include "fthumb.h"
 #include "fview.h"
+#include "fcloud_app.h"
 
 /* The keyboard cursor outline only shows once the keyboard is used. */
 static bool g_kbd_cursor;
@@ -38,16 +43,26 @@ static bool same_path(const char *a, const char *b) {
 /* ---- history ------------------------------------------------------------ */
 
 static char *loc_encode(const FmLoc *l) {
-  size_t n = strlen(l->path) + strlen(l->inner) + 3;
+  size_t n = strlen(l->path) + strlen(l->inner) + 24;
   char *s = (char *)fm_alloc(n);
-  if (l->in_arc) fm_snprintf(s, n, "A%s\n%s", l->path, l->inner);
+  if (l->in_cloud) fm_snprintf(s, n, "C%d\x1f%s\x1f%s", l->cloud, l->path, l->inner);
+  else if (l->in_arc) fm_snprintf(s, n, "A%s\n%s", l->path, l->inner);
   else fm_snprintf(s, n, "L%s", l->path);
   return s;
 }
 
 static void loc_decode(const char *s, FmLoc *l) {
   memset(l, 0, sizeof *l);
-  if (s[0] == 'A') {
+  if (s[0] == 'C') {
+    cloud_loc_root(l, atoi(s + 1));
+    const char *a = strchr(s, '\x1f'), *b = a ? strchr(a + 1, '\x1f') : NULL;
+    if (a && b) {
+      size_t pl = FM_MIN((size_t)(b - a - 1), sizeof l->path - 1);
+      memcpy(l->path, a + 1, pl);
+      l->path[pl] = 0;
+      fm_strlcpy(l->inner, b + 1, sizeof l->inner);
+    }
+  } else if (s[0] == 'A') {
     const char *nl = strchr(s + 1, '\n');
     size_t pl = nl ? (size_t)(nl - s - 1) : strlen(s + 1);
     if (pl >= sizeof l->path) pl = sizeof l->path - 1;
@@ -151,6 +166,16 @@ static void build_segments(FmPanel *p) {
   const FmLoc *loc = &p->list.loc;
   loc_display(loc, p->display, sizeof p->display);
   p->nsegs = 0;
+  if (loc->in_cloud) {
+    /* account label, then the folder names; seg_end holds the depth */
+    int depth = cloud_loc_depth(loc);
+    for (int k = 0; k <= depth && p->nsegs < PANEL_SEGS; k++) {
+      cloud_loc_level(loc, k, NULL, 0, p->seg_label[p->nsegs], sizeof p->seg_label[0]);
+      p->seg_end[p->nsegs++] = (u16)k;
+    }
+    p->crumb_x = 1e9f;
+    return;
+  }
   const char *d = p->display;
   size_t n = strlen(d), i = 0;
   char home[FM_PATH_MAX];
@@ -214,6 +239,11 @@ static void build_segments(FmPanel *p) {
 /* Location of breadcrumb segment k. */
 static void segment_loc(FmPanel *p, int k, FmLoc *out) {
   const FmLoc *cur = &p->list.loc;
+  if (cur->in_cloud) {
+    *out = *cur;
+    cloud_loc_trim(out, p->seg_end[k]);
+    return;
+  }
   size_t end = p->seg_end[k];
   char prefix[FM_PATH_MAX];
   size_t n = end < sizeof prefix ? end : sizeof prefix - 1;
@@ -251,7 +281,7 @@ static void after_nav(FmPanel *p) {
   build_segments(p);
   panel_resort(p);
   FmStat st;
-  p->dir_mtime = (!p->list.loc.in_arc && plat_stat(p->list.loc.path, &st)) ? st.mtime : 0;
+  p->dir_mtime = (!p->list.loc.in_arc && !p->list.loc.in_cloud && plat_stat(p->list.loc.path, &st)) ? st.mtime : 0;
   p->nav_t = ui.now;
   ui_anim_set(ui_idn(ui_id("panel.nav"), (u32)p->idx), 1.0f);
   thumb_cancel_all();
@@ -262,7 +292,7 @@ static void after_nav(FmPanel *p) {
 static FmErr go_into(FmPanel *p, const FmLoc *loc, bool push) {
   FmLoc want = *loc;
   FmLoc old = p->list.loc;
-  bool had = old.path[0] != 0;
+  bool had = old.path[0] != 0 || old.in_cloud;
   bool new_arc = want.in_arc && !(p->list.arc && same_path(p->list.loc.path, want.path));
   FmErr err;
   if (new_arc) {
@@ -378,51 +408,97 @@ static int cmp_str(const void *a, const void *b) {
   return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+/* The selection and cursor by name, kept across a relist. */
+typedef struct SelSave {
+  FmArena ar;
+  char **names;
+  int nn;
+  char cur[512];
+  float sy;
+  bool sm;
+} SelSave;
+
+static void sel_save(FmPanel *p, SelSave *s) {
+  FmListing *l = &p->list;
+  arena_init(&s->ar, 16 * 1024);
+  s->names = (char **)fm_alloc((size_t)(p->nsel > 0 ? p->nsel : 1) * sizeof(char *));
+  s->nn = 0;
+  for (int i = 0; i < l->count && s->nn < p->nsel; i++)
+    if (l->items[i].selected) s->names[s->nn++] = arena_strdup(&s->ar, l->items[i].name);
+  qsort(s->names, (size_t)s->nn, sizeof *s->names, cmp_str);
+  s->cur[0] = 0;
+  FmEntry *ce = panel_cursor_entry(p);
+  if (ce) fm_strlcpy(s->cur, ce->name, sizeof s->cur);
+  s->sy = p->scroll.y;
+  s->sm = p->select_mode;
+}
+
+static void sel_restore(FmPanel *p, SelSave *s) {
+  FmListing *l = &p->list;
+  for (int i = 0; i < l->count; i++) {
+    const char *key = l->items[i].name;
+    if (s->nn && bsearch(&key, s->names, (size_t)s->nn, sizeof *s->names, cmp_str)) l->items[i].selected = 1;
+  }
+  p->cursor = -1;
+  panel_resort(p);
+  if (s->cur[0])
+    for (int i = 0; i < p->nview; i++)
+      if (!strcmp(l->items[p->view[i]].name, s->cur)) { p->cursor = i; break; }
+  p->scroll.y = s->sy;
+  p->select_mode = s->sm && p->nsel > 0;
+}
+
+static void sel_free(SelSave *s) {
+  fm_free(s->names);
+  arena_free(&s->ar);
+}
+
 void panel_refresh(FmPanel *p) {
   FmListing *l = &p->list;
-  /* remember the selection and cursor by name */
-  FmArena ar;
-  arena_init(&ar, 16 * 1024);
-  char **names = (char **)fm_alloc((size_t)(p->nsel > 0 ? p->nsel : 1) * sizeof(char *));
-  int nn = 0;
-  for (int i = 0; i < l->count && nn < p->nsel; i++)
-    if (l->items[i].selected) names[nn++] = arena_strdup(&ar, l->items[i].name);
-  qsort(names, (size_t)nn, sizeof *names, cmp_str);
-  char cur[512] = { 0 };
-  FmEntry *ce = panel_cursor_entry(p);
-  if (ce) fm_strlcpy(cur, ce->name, sizeof cur);
-  float sy = p->scroll.y;
-  bool sm = p->select_mode;
-
+  SelSave sv;
+  sel_save(p, &sv);
   FmLoc loc = l->loc;
+  if (loc.in_cloud) {
+    /* ask the service again; the old rows stay until the answer is in */
+    char key[CLOUD_ID_MAX + 32];
+    cloud_loc_key(&loc, key, sizeof key);
+    cloud_vfs_invalidate(key);
+  }
   FmErr e = vfs_list(l, &loc, conf.show_hidden);
-  if (e == FM_ERR_NOT_FOUND && !loc.in_arc) {
+  if (e == FM_ERR_NOT_FOUND && !loc.in_arc && !loc.in_cloud) {
     /* the folder went away: show the nearest one that still exists */
     while (fm_path_parent(loc.path) && !plat_is_dir(loc.path)) {}
     vfs_list(l, &loc, conf.show_hidden);
     after_nav(p);
   } else {
-    for (int i = 0; i < l->count; i++) {
-      const char *key = l->items[i].name;
-      if (nn && bsearch(&key, names, (size_t)nn, sizeof *names, cmp_str)) l->items[i].selected = 1;
-    }
-    p->cursor = -1;
-    panel_resort(p);
-    if (cur[0])
-      for (int i = 0; i < p->nview; i++)
-        if (!strcmp(l->items[p->view[i]].name, cur)) { p->cursor = i; break; }
-    p->scroll.y = sy;
-    p->select_mode = sm && p->nsel > 0;
+    sel_restore(p, &sv);
     FmStat st;
-    p->dir_mtime = (!loc.in_arc && plat_stat(loc.path, &st)) ? st.mtime : 0;
+    p->dir_mtime = (!loc.in_arc && !loc.in_cloud && plat_stat(loc.path, &st)) ? st.mtime : 0;
   }
-  fm_free(names);
-  arena_free(&ar);
+  sel_free(&sv);
   ui_redraw();
 }
 
+/* A cloud listing arrived: swap it in, keeping the selection by name. */
+static void panel_poll(FmPanel *p) {
+  if (!p->list.loading) return;
+  SelSave sv;
+  sel_save(p, &sv);
+  bool had = p->list.count > 0;
+  if (vfs_poll(&p->list, conf.show_hidden)) {
+    if (had) sel_restore(p, &sv);
+    else panel_resort(p);
+    if (p->select_after[0]) {
+      panel_select_name(p, p->select_after);
+      p->select_after[0] = 0;
+    }
+    ui_redraw();
+  }
+  sel_free(&sv);
+}
+
 bool panel_changed_outside(FmPanel *p) {
-  if (p->list.loc.in_arc) return false;
+  if (p->list.loc.in_arc || p->list.loc.in_cloud) return false;
   FmStat st;
   if (!plat_stat(p->list.loc.path, &st)) return true;
   return st.mtime != p->dir_mtime;
@@ -545,7 +621,7 @@ char **panel_selected_paths(FmPanel *p, int *n) {
   for (int i = 0; i < k; i++) {
     const FmEntry *e = &p->list.items[items[i]];
     char path[FM_PATH_MAX];
-    if (p->list.loc.in_arc) out[m++] = fm_strdup(e->name);
+    if (p->list.loc.in_arc || p->list.loc.in_cloud) out[m++] = fm_strdup(e->name);
     else if (vfs_entry_path(&p->list, e, path, sizeof path)) out[m++] = fm_strdup(path);
   }
   fm_free(items);
@@ -559,7 +635,11 @@ void panel_free_paths(char **paths, int n) {
 }
 
 bool panel_is_local(const FmPanel *p) {
-  return !p->list.loc.in_arc && p->list.err == FM_OK;
+  return !p->list.loc.in_arc && !p->list.loc.in_cloud && p->list.err == FM_OK;
+}
+
+bool panel_can_receive(const FmPanel *p) {
+  return panel_is_local(p) || cloud_panel_writable(p);
 }
 
 /* ---- opening ------------------------------------------------------------ */
@@ -605,6 +685,14 @@ void panel_open_item(FmPanel *p, int item) {
   if (item < 0 || item >= p->list.count) return;
   FmEntry *e = &p->list.items[item];
   FmLoc l = p->list.loc;
+  if (l.in_cloud) {
+    const FmCloudEntry *ce = cloud_vfs_entry(&p->list, e);
+    if (!ce) return;
+    if (!ce->dir) { cloud_ui_open_item(p, item); return; }
+    if (!cloud_loc_child(&l, ce->id, ce->name)) { ui_toast("This folder is nested too deeply to open"); return; }
+    panel_go(p, &l, true);
+    return;
+  }
   if (e->flags & FM_ST_DIR) {
     if (l.in_arc) {
       fm_strlcat(l.inner, e->name, sizeof l.inner);
@@ -1041,7 +1129,8 @@ static void draw_crumbs(FmPanel *p, FmRect area, bool active) {
   float total = 0;
   for (int i = 0; i < p->nsegs; i++) {
     w[i] = font_width(i == p->nsegs - 1 ? FONT_BOLD : FONT_REGULAR, fs, p->seg_label[i], -1) + padx * 2;
-    if (i == 0 && (strcmp(p->seg_label[0], "Home") == 0 || strcmp(p->seg_label[0], "Storage") == 0))
+    if (i == 0 && (p->list.loc.in_cloud || strcmp(p->seg_label[0], "Home") == 0 ||
+                   strcmp(p->seg_label[0], "Storage") == 0))
       w[i] += DP(18);
     total += w[i] + (i ? chev : 0);
   }
@@ -1078,11 +1167,11 @@ static void draw_crumbs(FmPanel *p, FmRect area, bool active) {
       if (f & UI_HELD) gfx_rrect(b, bh * 0.5f, T.press);
       if (f & UI_PRESS) app_panel_activate(p->idx);
       if ((f & UI_CLICK) && !last) go = i;
-      if ((f & UI_CLICK) && last && !ui.touch_mode) panel_edit_path(p);
+      if ((f & UI_CLICK) && last && !ui.touch_mode && !p->list.loc.in_cloud) panel_edit_path(p);
       float tx = b.x + padx;
       if (w[i] > font_width(FONT_REGULAR, fs, p->seg_label[i], -1) + padx * 2 + DP(4) && i == 0) {
-        icon_draw(IC_HOME, FM_RECT(tx, b.y + (bh - DP(15)) * 0.5f, DP(15), DP(15)),
-                  last ? T.text : T.text2);
+        icon_draw(p->list.loc.in_cloud ? cloud_ui_icon(p->list.loc.cloud) : IC_HOME,
+                  FM_RECT(tx, b.y + (bh - DP(15)) * 0.5f, DP(15), DP(15)), last ? T.text : T.text2);
         tx += DP(18);
       }
       FmColor c = last ? (active ? T.text : T.text) : T.text2;
@@ -1092,7 +1181,7 @@ static void draw_crumbs(FmPanel *p, FmRect area, bool active) {
     x += w[i];
   }
   /* empty space after the path: click to type a path (desktop) */
-  if (x < area.x + area.w && !ui.touch_mode) {
+  if (x < area.x + area.w && !ui.touch_mode && !p->list.loc.in_cloud) {
     FmRect rest = { x, area.y, area.x + area.w - x, area.h };
     int f = ui_hit(ui_idn(base, 1001), rest);
     if (f & UI_PRESS) app_panel_activate(p->idx);
@@ -1151,7 +1240,16 @@ static void draw_header(FmPanel *p, FmRect h, bool active) {
     app_panel_activate(p->idx);
     app_panel_places(p, b.x, b.y + b.h);
   }
-  if (!narrow && !p->list.loc.in_arc) {
+  if (p->list.loc.in_cloud) {
+    /* cloud: refresh instead of the bookmark star, a spinner while listing */
+    b = rect_center(rect_cut_right(&r, bs), bs, bs);
+    if (p->list.loading) {
+      ui_spinner(rect_center(b, DP(18), DP(18)), T.accent);
+    } else if (ui_icon_btn(ui_idn(base, 6), b, IC_REFRESH, T.text2, "Refresh (Ctrl+R)")) {
+      app_panel_activate(p->idx);
+      panel_refresh(p);
+    }
+  } else if (!narrow && !p->list.loc.in_arc) {
     b = rect_center(rect_cut_right(&r, bs), bs, bs);
     bool star = conf_is_bookmark(p->list.loc.path);
     if (ui_icon_btn(ui_idn(base, 5), b, star ? IC_STAR_FILL : IC_STAR, star ? T.warn : T.text2,
@@ -1235,7 +1333,9 @@ static void draw_footer(FmPanel *p, FmRect r) {
     in.x += cw + DP(4);
     in.w -= cw + DP(4);
   }
-  if (p->nsel > 0) {
+  if (p->list.loading && p->list.count == 0) {
+    font_draw_ellipsis(FONT_REGULAR, fs, in.x, ty, "Loading\xE2\x80\xA6", in.w - DP(4), T.text2);
+  } else if (p->nsel > 0) {
     fm_snprintf(buf, sizeof buf, "%d selected  \xC2\xB7  %s", p->nsel,
                 fm_fmt_size(p->sel_bytes, a, sizeof a));
     font_draw_ellipsis(FONT_BOLD, fs, in.x, ty, buf, in.w - DP(4), T.accent);
@@ -1257,8 +1357,54 @@ static void draw_footer(FmPanel *p, FmRect r) {
 
 /* ---- empty and error states --------------------------------------------- */
 
+/* Cloud folders: loading, or why the service said no (with Sign in). */
+static bool draw_cloud_state(FmPanel *p, FmRect body, u32 base) {
+  if (!p->list.loc.in_cloud) return false;
+  FmErr e = p->list.err;
+  float cx = body.x + body.w * 0.5f;
+  if (p->list.loading) {
+    float s = DP(30);
+    float y = body.y + FM_MAX(DP(10), body.h * 0.36f);
+    ui_spinner(FM_RECT(cx - s * 0.5f, y, s, s), T.accent);
+    ui_label(FM_RECT(body.x + DP(12), y + s + DP(12), body.w - DP(24), font_line_h(ui.m.font)), "Loading\xE2\x80\xA6",
+             FONT_REGULAR, ui.m.font, T.text2, UI_CENTER);
+    return true;
+  }
+  if (e == FM_OK) return false;
+  bool signin = e == FM_ERR_PASSWORD;
+  const char *title = signin ? "Signed out" : e == FM_ERR_NOT_FOUND ? "Folder not found" : "Can't open this folder";
+  const char *sub = p->list.errmsg[0] ? p->list.errmsg : fm_err_str(e);
+  if (signin && !strncmp(sub, "Signed out", 10)) sub = "Sign in again to see the files.";
+  float is = DP(52), bh = DP(ui.touch_mode ? 44 : 36);
+  float tw = FM_MIN(body.w - DP(48), font_width(FONT_REGULAR, ui.m.font, sub, -1) + DP(2));
+  float subh = font_draw_wrap(FONT_REGULAR, ui.m.font, 0, 0, tw, sub, T.text2, false);
+  float h = is + DP(14) + font_line_h(ui.m.font_title) + DP(4) + subh + DP(18) + bh;
+  float y = body.y + FM_MAX(DP(10), (body.h - h) * 0.42f);
+  FmColor icc = signin ? T.text2 : T.warn;
+  gfx_circle(cx, y + is * 0.5f, is * 0.62f, col_alpha(icc, 0.10f));
+  icon_draw(signin ? IC_LOCK : IC_CLOUD, FM_RECT(cx - is * 0.3f, y + is * 0.2f, is * 0.6f, is * 0.6f), icc);
+  y += is + DP(14);
+  ui_label(FM_RECT(body.x + DP(12), y, body.w - DP(24), font_line_h(ui.m.font_title)), title, FONT_BOLD,
+           ui.m.font_title, T.text, UI_CENTER);
+  y += font_line_h(ui.m.font_title) + DP(4);
+  font_draw_wrap(FONT_REGULAR, ui.m.font, cx - tw * 0.5f, y, tw, sub, T.text2, true);
+  y += subh + DP(18);
+  float bw = DP(120), gap = DP(10);
+  bool account = cloud_acct_index(p->list.loc.cloud) >= 0;
+  if (signin && account) {
+    if (ui_button(ui_idn(base, 6), FM_RECT(cx - bw - gap * 0.5f, y, bw, bh), IC_KEY, "Sign in", UI_BTN_FILLED))
+      cloud_ui_signin(p->list.loc.cloud);
+  } else if (ui_button(ui_idn(base, 4), FM_RECT(cx - bw - gap * 0.5f, y, bw, bh), IC_UP, "Go up", UI_BTN_TONAL)) {
+    panel_up(p);
+  }
+  if (account && ui_button(ui_idn(base, 5), FM_RECT(cx + gap * 0.5f, y, bw, bh), IC_REFRESH, "Retry", UI_BTN_OUTLINE))
+    panel_refresh(p);
+  return true;
+}
+
 static void draw_state(FmPanel *p, FmRect body) {
   u32 base = ui_idn(ui_id("panel.state"), (u32)p->idx);
+  if (draw_cloud_state(p, body, base)) return;
   FmErr e = p->list.err;
   FmIcon ic = IC_FOLDER_OPEN;
   FmColor icc = T.text3;
@@ -1283,7 +1429,8 @@ static void draw_state(FmPanel *p, FmRect body) {
     }
   }
   /* Android 11+: without "all files" access the storage lists as empty */
-  bool want_grant = (e == FM_ERR_ACCESS || (e == FM_OK && !p->filter[0])) && !plat_storage_granted();
+  bool want_grant = (e == FM_ERR_ACCESS || (e == FM_OK && !p->filter[0])) && !plat_storage_granted() &&
+                    !p->list.loc.in_cloud;
   if (want_grant && e == FM_OK) {
     ic = IC_LOCK;
     title = "No access to your files";
@@ -1340,6 +1487,7 @@ static void draw_state(FmPanel *p, FmRect body) {
 
 void panel_frame(FmPanel *p, FmRect r, bool active) {
   p->rect = r;
+  panel_poll(p);
   float rad = ui.m.radius;
   gfx_shadow(r, rad, DP(active ? 14 : 10), active ? T.shadow : col_alpha(T.shadow, 0.6f));
   gfx_rrect(r, rad, T.surface);

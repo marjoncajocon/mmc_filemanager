@@ -1,4 +1,4 @@
-/* fcrypt.c -- AES, SHA-1, SHA-256, HMAC, PBKDF2, ZipCrypto and CRC32.
+/* fcrypt.c -- AES, SHA-1, SHA-256, SHA-512, HMAC, PBKDF2, ZipCrypto and CRC32.
 **
 ** Design decisions:
 **   - Portable C first: table AES (one encrypt and one decrypt table,
@@ -11,6 +11,11 @@
 **     C; for the hardware path it is only re-laid out as bytes.
 **   - PBKDF2 keeps the HMAC state after the key and copies it per
 **     iteration: two SHA-1 blocks per round instead of four.
+**   - SHA-512 works on u64 words in plain C (tcc's 32-bit build included);
+**     PBKDF2-SHA512 copies the keyed HMAC state per round like PBKDF2-SHA1,
+**     which keeps MEGA's 100 000-round login key short.
+**   - aes_ctr_be is position-addressed (counter = iv + pos/16) instead of
+**     stateful, so a resumed download or one upload chunk needs no history.
 **   - Secrets on the stack are wiped with wipe(), whose volatile stores
 **     the compiler may not drop.
 */
@@ -274,6 +279,29 @@ void aes_ctr_le(const FmAes *a, FmAesCtr *c, u8 *buf, size_t n) {
   }
 }
 
+void aes_ctr_be(const FmAes *a, const u8 iv[16], u64 pos, u8 *buf, size_t n) {
+  u8 ctr[16], ks[16];
+  u64 blk = pos >> 4;
+  int off = (int)(pos & 15);
+  size_t i = 0;
+  while (i < n) {
+    memcpy(ctr, iv, 16);                   /* counter = iv + blk, 128-bit big-endian */
+    u64 add = blk;
+    u32 carry = 0;
+    for (int b = 15; b >= 0 && (add || carry); b--) {
+      u32 s = (u32)ctr[b] + (u32)(add & 0xFF) + carry;
+      ctr[b] = (u8)s;
+      carry = s >> 8;
+      add >>= 8;
+    }
+    aes_encrypt_block(a, ctr, ks);
+    while (off < 16 && i < n) buf[i++] ^= ks[off++];
+    off = 0;
+    blk++;
+  }
+  wipe(ks, sizeof ks);
+}
+
 void wipe(void *p, size_t n) {
   volatile u8 *v = (volatile u8 *)p;
   while (n--) *v++ = 0;
@@ -404,7 +432,134 @@ void sha256_final(FmSha256 *s, u8 out[32]) {
   wipe(s, sizeof *s);
 }
 
+/* ---- SHA-512 ------------------------------------------------------------ */
+
+static const u64 kSha512K[80] = {
+  0x428a2f98d728ae22ull, 0x7137449123ef65cdull, 0xb5c0fbcfec4d3b2full, 0xe9b5dba58189dbbcull,
+  0x3956c25bf348b538ull, 0x59f111f1b605d019ull, 0x923f82a4af194f9bull, 0xab1c5ed5da6d8118ull,
+  0xd807aa98a3030242ull, 0x12835b0145706fbeull, 0x243185be4ee4b28cull, 0x550c7dc3d5ffb4e2ull,
+  0x72be5d74f27b896full, 0x80deb1fe3b1696b1ull, 0x9bdc06a725c71235ull, 0xc19bf174cf692694ull,
+  0xe49b69c19ef14ad2ull, 0xefbe4786384f25e3ull, 0x0fc19dc68b8cd5b5ull, 0x240ca1cc77ac9c65ull,
+  0x2de92c6f592b0275ull, 0x4a7484aa6ea6e483ull, 0x5cb0a9dcbd41fbd4ull, 0x76f988da831153b5ull,
+  0x983e5152ee66dfabull, 0xa831c66d2db43210ull, 0xb00327c898fb213full, 0xbf597fc7beef0ee4ull,
+  0xc6e00bf33da88fc2ull, 0xd5a79147930aa725ull, 0x06ca6351e003826full, 0x142929670a0e6e70ull,
+  0x27b70a8546d22ffcull, 0x2e1b21385c26c926ull, 0x4d2c6dfc5ac42aedull, 0x53380d139d95b3dfull,
+  0x650a73548baf63deull, 0x766a0abb3c77b2a8ull, 0x81c2c92e47edaee6ull, 0x92722c851482353bull,
+  0xa2bfe8a14cf10364ull, 0xa81a664bbc423001ull, 0xc24b8b70d0f89791ull, 0xc76c51a30654be30ull,
+  0xd192e819d6ef5218ull, 0xd69906245565a910ull, 0xf40e35855771202aull, 0x106aa07032bbd1b8ull,
+  0x19a4c116b8d2d0c8ull, 0x1e376c085141ab53ull, 0x2748774cdf8eeb99ull, 0x34b0bcb5e19b48a8ull,
+  0x391c0cb3c5c95a63ull, 0x4ed8aa4ae3418acbull, 0x5b9cca4f7763e373ull, 0x682e6ff3d6b2b8a3ull,
+  0x748f82ee5defb2fcull, 0x78a5636f43172f60ull, 0x84c87814a1f0ab72ull, 0x8cc702081a6439ecull,
+  0x90befffa23631e28ull, 0xa4506cebde82bde9ull, 0xbef9a3f7b2c67915ull, 0xc67178f2e372532bull,
+  0xca273eceea26619cull, 0xd186b8c721c0c207ull, 0xeada7dd6cde0eb1eull, 0xf57d4f7fee6ed178ull,
+  0x06f067aa72176fbaull, 0x0a637dc5a2c898a6ull, 0x113f9804bef90daeull, 0x1b710b35131c471bull,
+  0x28db77f523047d84ull, 0x32caab7b40c72493ull, 0x3c9ebe0a15c9bebcull, 0x431d67c49c100d4cull,
+  0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull, 0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull,
+};
+
+static u64 ror64(u64 v, int s) { return (v >> s) | (v << (64 - s)); }
+static u64 ld64be(const u8 *p) { return ((u64)ld32be(p) << 32) | ld32be(p + 4); }
+static void st64be(u8 *p, u64 v) { st32be(p, (u32)(v >> 32)); st32be(p + 4, (u32)v); }
+
+static void sha512_block(u64 h[8], const u8 *p) {
+  u64 w[80];
+  for (int i = 0; i < 16; i++) w[i] = ld64be(p + 8 * i);
+  for (int i = 16; i < 80; i++) {
+    u64 s0 = ror64(w[i - 15], 1) ^ ror64(w[i - 15], 8) ^ (w[i - 15] >> 7);
+    u64 s1 = ror64(w[i - 2], 19) ^ ror64(w[i - 2], 61) ^ (w[i - 2] >> 6);
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+  }
+  u64 a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+  for (int i = 0; i < 80; i++) {
+    u64 S1 = ror64(e, 14) ^ ror64(e, 18) ^ ror64(e, 41);
+    u64 ch = (e & f) ^ (~e & g);
+    u64 t1 = hh + S1 + ch + kSha512K[i] + w[i];
+    u64 S0 = ror64(a, 28) ^ ror64(a, 34) ^ ror64(a, 39);
+    u64 mj = (a & b) ^ (a & c) ^ (b & c);
+    u64 t2 = S0 + mj;
+    hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+  }
+  h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+}
+
+void sha512_init(FmSha512 *s) {
+  static const u64 iv[8] = {
+    0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+    0x510e527fade682d1ull, 0x9b05688c2b3e6c1full, 0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull,
+  };
+  memcpy(s->h, iv, sizeof iv);
+  s->len = 0;
+  s->n = 0;
+}
+
+void sha512_update(FmSha512 *s, const void *data, size_t n) {
+  const u8 *p = (const u8 *)data;
+  s->len += n;
+  if (s->n) {
+    size_t take = FM_MIN(n, (size_t)(128 - s->n));
+    memcpy(s->buf + s->n, p, take);
+    s->n += (int)take; p += take; n -= take;
+    if (s->n < 128) return;
+    sha512_block(s->h, s->buf);
+    s->n = 0;
+  }
+  for (; n >= 128; p += 128, n -= 128) sha512_block(s->h, p);
+  memcpy(s->buf, p, n);
+  s->n = (int)n;
+}
+
+void sha512_final(FmSha512 *s, u8 out[64]) {
+  u64 bits = s->len * 8;               /* under 2^61 bytes: the high length word stays 0 */
+  u8 pad[144];
+  size_t padn = (s->n < 112) ? (size_t)(112 - s->n) : (size_t)(240 - s->n);
+  memset(pad, 0, sizeof pad);
+  pad[0] = 0x80;
+  st64be(pad + padn + 8, bits);
+  sha512_update(s, pad, padn + 16);
+  for (int i = 0; i < 8; i++) st64be(out + 8 * i, s->h[i]);
+  wipe(s, sizeof *s);
+}
+
 /* ---- HMAC-SHA1, PBKDF2 -------------------------------------------------- */
+
+void hmac_sha256_init(FmHmacSha256 *h, const u8 *key, size_t key_len) {
+  u8 k[64], pad[64];
+  memset(k, 0, sizeof k);
+  if (key_len > 64) {
+    FmSha256 s;
+    sha256_init(&s);
+    sha256_update(&s, key, key_len);
+    sha256_final(&s, k);
+  } else if (key_len) {
+    memcpy(k, key, key_len);
+  }
+  for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x36;
+  sha256_init(&h->inner);
+  sha256_update(&h->inner, pad, 64);
+  for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5C;
+  sha256_init(&h->outer);
+  sha256_update(&h->outer, pad, 64);
+  wipe(k, sizeof k);
+  wipe(pad, sizeof pad);
+}
+
+void hmac_sha256_update(FmHmacSha256 *h, const void *data, size_t n) { sha256_update(&h->inner, data, n); }
+
+void hmac_sha256_final(FmHmacSha256 *h, u8 out[32]) {
+  u8 in[32];
+  sha256_final(&h->inner, in);
+  sha256_update(&h->outer, in, 32);
+  sha256_final(&h->outer, out);
+  wipe(in, sizeof in);
+}
+
+void hmac_sha256(const u8 *key, size_t key_len, const void *data, size_t n, u8 out[32]) {
+  FmHmacSha256 h;
+  hmac_sha256_init(&h, key, key_len);
+  hmac_sha256_update(&h, data, n);
+  hmac_sha256_final(&h, out);
+  wipe(&h, sizeof h);
+}
 
 void hmac_sha1_init(FmHmacSha1 *h, const u8 *key, size_t key_len) {
   u8 k[64], pad[64];
@@ -458,6 +613,74 @@ void pbkdf2_sha1(const u8 *pw, size_t pw_len, const u8 *salt, size_t salt_len, u
       for (int k = 0; k < 20; k++) t[k] ^= u[k];
     }
     size_t take = FM_MIN(out_len, (size_t)20);
+    memcpy(out, t, take);
+    out += take;
+    out_len -= take;
+  }
+  wipe(&base, sizeof base);
+  wipe(&h, sizeof h);
+  wipe(u, sizeof u);
+  wipe(t, sizeof t);
+}
+
+void hmac_sha512_init(FmHmacSha512 *h, const u8 *key, size_t key_len) {
+  u8 k[128], pad[128];
+  memset(k, 0, sizeof k);
+  if (key_len > 128) {
+    FmSha512 s;
+    sha512_init(&s);
+    sha512_update(&s, key, key_len);
+    sha512_final(&s, k);
+  } else if (key_len) {
+    memcpy(k, key, key_len);
+  }
+  for (int i = 0; i < 128; i++) pad[i] = k[i] ^ 0x36;
+  sha512_init(&h->inner);
+  sha512_update(&h->inner, pad, 128);
+  for (int i = 0; i < 128; i++) pad[i] = k[i] ^ 0x5C;
+  sha512_init(&h->outer);
+  sha512_update(&h->outer, pad, 128);
+  wipe(k, sizeof k);
+  wipe(pad, sizeof pad);
+}
+
+void hmac_sha512_update(FmHmacSha512 *h, const void *data, size_t n) { sha512_update(&h->inner, data, n); }
+
+void hmac_sha512_final(FmHmacSha512 *h, u8 out[64]) {
+  u8 in[64];
+  sha512_final(&h->inner, in);
+  sha512_update(&h->outer, in, 64);
+  sha512_final(&h->outer, out);
+  wipe(in, sizeof in);
+}
+
+void hmac_sha512(const u8 *key, size_t key_len, const void *data, size_t n, u8 out[64]) {
+  FmHmacSha512 h;
+  hmac_sha512_init(&h, key, key_len);
+  hmac_sha512_update(&h, data, n);
+  hmac_sha512_final(&h, out);
+  wipe(&h, sizeof h);
+}
+
+void pbkdf2_sha512(const u8 *pw, size_t pw_len, const u8 *salt, size_t salt_len, u32 iters,
+                   u8 *out, size_t out_len) {
+  FmHmacSha512 base, h;
+  u8 u[64], t[64], cnt[4];
+  hmac_sha512_init(&base, pw, pw_len);
+  for (u32 block = 1; out_len; block++) {
+    st32be(cnt, block);
+    h = base;
+    hmac_sha512_update(&h, salt, salt_len);
+    hmac_sha512_update(&h, cnt, 4);
+    hmac_sha512_final(&h, u);
+    memcpy(t, u, 64);
+    for (u32 i = 1; i < iters; i++) {
+      h = base;
+      hmac_sha512_update(&h, u, 64);
+      hmac_sha512_final(&h, u);
+      for (int k = 0; k < 64; k++) t[k] ^= u[k];
+    }
+    size_t take = FM_MIN(out_len, (size_t)64);
     memcpy(out, t, take);
     out += take;
     out_len -= take;

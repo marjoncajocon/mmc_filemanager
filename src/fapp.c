@@ -25,6 +25,7 @@
 #include "fonline.h"
 #include "fphoto.h"                    /* photos */
 #include "faudio_online.h"             /* audio */
+#include "fcloud_app.h"                /* cloud */
 
 /* ---- state -------------------------------------------------------------- */
 
@@ -43,6 +44,7 @@ typedef struct Dialog {
   int npaths;
   bool permanent;
   /* properties */
+  bool in_cloud;                /* cloud: names, sizes from the listing */
   FmJob *job;
   FmJobInfo info;
   bool have_info;
@@ -110,10 +112,10 @@ typedef struct Place {
   FmIcon icon;
   char label[64];
   char path[FM_PATH_MAX];
-  int section;                  /* 0 storage, 1 places, 2 bookmarks, 3 recent */
+  int section;                  /* 0 storage, 1 places, 2 bookmarks, 3 recent, 4 cloud */
   u64 total, free_b;
 } Place;
-#define PLACES_MAX 40
+#define PLACES_MAX 56
 static Place g_places[PLACES_MAX];
 static int g_nplaces;
 static bool g_places_dirty = true;
@@ -122,6 +124,7 @@ static FmScroll g_side_scroll;
 static u32 ID_CTX, ID_PMENU, ID_PLACES, ID_JOBMENU;
 
 static FmPanel *P(void) { return &g_p[g_active]; }
+static int active_panel(void) { return g_active; }   /* cloud: for its sheets */
 static FmPanel *O(void) { return &g_p[1 - g_active]; }
 
 /* ---- formats for compress ----------------------------------------------- */
@@ -195,12 +198,14 @@ static void update_title(void) {
 
 /* Folder of a panel on disk (an archive panel: the folder holding it). */
 static void panel_disk_dir(const FmPanel *p, char *out, size_t cap) {
+  if (p->list.loc.in_cloud) { if (cap) out[0] = 0; return; }   /* cloud */
   fm_strlcpy(out, p->list.loc.path, cap);
   if (p->list.loc.in_arc) fm_path_parent(out);
 }
 
 static void refresh_folder(const char *dir) {
   if (!dir || !dir[0]) return;
+  if (cloud_key_serial(dir)) { cloud_ui_touched(dir); return; }   /* cloud: a job's cloud folder */
   for (int i = 0; i < 2; i++) {
     FmPanel *p = &g_p[i];
     if (!p->list.loc.in_arc && same_path(p->list.loc.path, dir)) panel_refresh(p);
@@ -278,6 +283,7 @@ static void build_places(void) {
   place_add(IC_PLAY_BADGE, "Online videos", "online:", 1);   /* online: the online videos view */
   place_add(IC_ALBUM, "Online photos", "photos:", 1);        /* photos: the online photos view */
   place_add(IC_RADIO, "Online audio", "audio:", 1);          /* audio: the online audio view */
+  place_add(IC_CLOUD, "Cloud storage", "cloud:", 1);         /* cloud: accounts sheet */
   for (int i = 0; i < FM_COUNT(kPl); i++)
     if (plat_place(kPl[i].p, path, sizeof path) && plat_is_dir(path))
       place_add(kPl[i].ic, kPl[i].label, path, 1);
@@ -291,6 +297,12 @@ static void build_places(void) {
     if (same_path(h, P()->list.loc.path)) continue;
     place_add(IC_HISTORY, fm_path_base(h)[0] ? fm_path_base(h) : h, h, 3);
     nh++;
+  }
+  /* cloud: each account opens its root ("cloud:<serial>") */
+  for (int i = 0; i < cloud_acct_count(); i++) {
+    char key[32];
+    fm_snprintf(key, sizeof key, "cloud:%d", cloud_acct_serial(i));
+    place_add(cloud_ui_icon(cloud_acct_serial(i)), cloud_acct_at(i)->label, key, 4);
   }
   g_places_dirty = false;
 }
@@ -354,6 +366,8 @@ static void go_place(int i, int panel) {
   if (!strcmp(g_places[i].path, "online:")) { open_online(); return; }   /* online */
   if (!strcmp(g_places[i].path, "photos:")) { open_photos(); return; }   /* photos */
   if (!strcmp(g_places[i].path, "audio:")) { open_aonline(); return; }    /* audio */
+  if (!strcmp(g_places[i].path, "cloud:")) { cloud_ui_home(); return; }   /* cloud */
+  if (!strncmp(g_places[i].path, "cloud:", 6)) { cloud_ui_go(atoi(g_places[i].path + 6), panel); return; }
   if (!plat_is_dir(g_places[i].path)) {
     ui_toast("%s is not available", g_places[i].label);
     return;
@@ -427,6 +441,7 @@ static bool need_selection(FmPanel *p) {
 static void open_rename(void) {
   FmPanel *p = P();
   if (p->list.loc.in_arc) { ui_toast("Archives are read-only"); return; }
+  if (p->list.loc.in_cloud && !cloud_panel_writable(p)) { ui_toast("This folder is read-only"); return; }
   int *items;
   int n = panel_selected(p, &items);
   if (n != 1) {
@@ -442,6 +457,13 @@ static void open_rename(void) {
 
 static void open_new(bool file) {
   FmPanel *p = P();
+  if (p->list.loc.in_cloud) {                  /* cloud: folders only */
+    if (file) { ui_toast("Can't create files here: copy one into this folder instead"); return; }
+    if (!cloud_panel_writable(p)) { ui_toast("Can't create folders here"); return; }
+    dlg_open(DLG_NEWDIR, g_active);
+    fm_strlcpy(D.name, "New folder", sizeof D.name);
+    return;
+  }
   if (!panel_is_local(p)) { ui_toast("Can't create items here"); return; }
   dlg_open(file ? DLG_NEWFILE : DLG_NEWDIR, g_active);
   const char *base = file ? "New file.txt" : "New folder";
@@ -466,6 +488,11 @@ static void start_delete(char **paths, int n, bool permanent) {
 static void open_delete(bool permanent) {
   FmPanel *p = P();
   if (p->list.loc.in_arc) { ui_toast("Archives are read-only"); return; }
+  if (p->list.loc.in_cloud) {                  /* cloud: its own question, to the service's trash */
+    if (!cloud_panel_writable(p)) { ui_toast("This folder is read-only"); return; }
+    if (need_selection(p)) cloud_ui_delete(p);
+    return;
+  }
   if (!need_selection(p)) return;
   int n;
   char **paths = panel_selected_paths(p, &n);
@@ -484,7 +511,8 @@ static void open_delete(bool permanent) {
 static void open_props(bool folder) {
   FmPanel *p = P();
   dlg_open(DLG_PROPS, g_active);
-  D.in_arc = p->list.loc.in_arc;
+  D.in_cloud = p->list.loc.in_cloud;           /* cloud: like an archive, no local paths */
+  D.in_arc = p->list.loc.in_arc || D.in_cloud;
   loc_display(&p->list.loc, D.where, sizeof D.where);
   int *items;
   int n = folder ? 0 : panel_selected(p, &items);
@@ -557,6 +585,7 @@ static int creatable_fmt(int from) {
 static void open_compress(void) {
   FmPanel *p = P(), *o = O();
   if (p->list.loc.in_arc) { ui_toast("Extract the files first to compress them"); return; }
+  if (p->list.loc.in_cloud) { ui_toast("Copy the files to this device first to compress them"); return; }
   if (!need_selection(p)) return;
   if (!panel_is_local(o)) { ui_toast("The other panel can't receive files"); return; }
   dlg_open(DLG_COMPRESS, g_active);
@@ -582,6 +611,7 @@ static bool is_archive_entry(const FmEntry *e) {
 static void open_extract(void) {
   FmPanel *p = P(), *o = O();
   if (!panel_is_local(o)) { ui_toast("The other panel can't receive files"); return; }
+  if (p->list.loc.in_cloud) { ui_toast("Copy the archive to this device first to extract it"); return; }
   dlg_open(DLG_EXTRACT, g_active);
   if (p->list.loc.in_arc) {
     D.from_arc = true;
@@ -624,6 +654,7 @@ static void open_exit(void) {
 /* ---- operations --------------------------------------------------------- */
 
 static void do_transfer(bool move, FmPanel *src, FmPanel *dst) {
+  if (src->list.loc.in_cloud || dst->list.loc.in_cloud) { cloud_ui_transfer(move, src, dst); return; }   /* cloud */
   if (dst->list.loc.in_arc) { ui_toast("Can't write into an archive; extract it first"); return; }
   if (dst->list.err != FM_OK) { ui_toast("The target folder is not available"); return; }
   if (!need_selection(src)) return;
@@ -661,6 +692,7 @@ static void clip_set(bool cut) {
   FmPanel *p = P();
   if (!need_selection(p)) return;
   if (cut && p->list.loc.in_arc) { ui_toast("Archives are read-only"); return; }
+  if (p->list.loc.in_cloud) { ui_toast("Use Copy or Move to the other panel for cloud files"); return; }   /* cloud */
   clip_free();
   g_clip = panel_selected_paths(p, &g_nclip);
   g_clip_cut = cut;
@@ -684,6 +716,11 @@ static void clip_set(bool cut) {
 static void clip_paste(void) {
   FmPanel *p = P();
   if (g_nclip == 0) { ui_toast("Nothing to paste"); return; }
+  if (p->list.loc.in_cloud && !g_clip_loc.in_arc) {   /* cloud: upload what was copied */
+    cloud_ui_upload_paths(p, g_clip, g_nclip, g_clip_cut);
+    if (g_clip_cut) clip_free();
+    return;
+  }
   if (!panel_is_local(p)) { ui_toast("Can't paste here"); return; }
   FmJobSpec s;
   memset(&s, 0, sizeof s);
@@ -803,7 +840,9 @@ void app_panel_activate(int idx) {
 }
 
 void app_panel_navigated(FmPanel *p) {
-  if (!p->list.loc.in_arc && p->list.err == FM_OK) {
+  if (p->list.loc.in_cloud) {
+    /* cloud: nothing to remember across runs */
+  } else if (!p->list.loc.in_arc && p->list.err == FM_OK) {
     fm_strlcpy(conf.path[p->idx], p->list.loc.path, FM_PATH_MAX);
     conf_add_history(p->list.loc.path);
   } else if (p->list.loc.in_arc) {
@@ -842,6 +881,7 @@ enum {
   PM_SORT_NAME = 40, PM_SORT_SIZE, PM_SORT_DATE, PM_SORT_TYPE, PM_DESC, PM_DIRS_FIRST, PM_LIST,
   PM_GRID, PM_HIDDEN, PM_NEWDIR, PM_NEWFILE, PM_PASTE, PM_SELECT_ALL, PM_REFRESH, PM_PROPS,
   PM_SEARCH, PM_MIRROR, PM_PATH, PM_SELECT_MODE, PM_LIBRARY, PM_ONLINE, PM_PHOTOS /* photos */, PM_AUDIO /* audio */,
+  PM_CLOUD /* cloud */,
   JM_PAUSE = 80, JM_CANCEL
 };
 
@@ -865,29 +905,33 @@ static void item(FmMenuItem *m, int *n, int id, FmIcon ic, const char *label, co
 void app_panel_context(FmPanel *p, float x, float y) {
   FmMenuItem m[24];
   int n = 0;
-  bool arc = p->list.loc.in_arc;
+  bool cloud = p->list.loc.in_cloud;           /* cloud: no local paths, writable when the service allows */
+  bool ro = p->list.loc.in_arc || (cloud && !cloud_panel_writable(p));
+  bool arc = p->list.loc.in_arc || cloud;      /* no local paths below */
   FmPanel *o = &g_p[1 - p->idx];
-  bool o_ok = panel_is_local(o);
+  bool o_ok = panel_can_receive(o);
   int dis_o = o_ok ? 0 : UI_MI_DISABLED;
-  int dis_arc = arc ? UI_MI_DISABLED : 0;
+  int dis_lo = panel_is_local(o) ? 0 : UI_MI_DISABLED;
+  int dis_arc = ro ? UI_MI_DISABLED : 0;
+  int dis_cloud = cloud ? UI_MI_DISABLED : 0;
   bool one = p->nsel == 1;
   FmEntry *ce = panel_cursor_entry(p);
-  bool is_arc = one && ce && ce->selected && is_archive_entry(ce);
+  bool is_arc = one && ce && ce->selected && is_archive_entry(ce) && !cloud;
   g_menu_panel = p->idx;
   item(m, &n, CM_OPEN, IC_OPEN_WITH, "Open", "Enter", one ? 0 : UI_MI_DISABLED);
   if (!arc && one) item(m, &n, CM_OPEN_SYSTEM, IC_SHARE, "Open with system app", NULL, 0);
   sep(m, &n);
-  item(m, &n, CM_COPY_TO, IC_COPY, "Copy to other panel", "F5", dis_o);
+  item(m, &n, CM_COPY_TO, cloud ? IC_DOWNLOAD : IC_COPY, "Copy to other panel", "F5", dis_o);
   item(m, &n, CM_MOVE_TO, IC_MOVE, "Move to other panel", "F6", dis_o | dis_arc);
-  item(m, &n, CM_COPY, IC_COPY, "Copy", "Ctrl+C", 0);
-  item(m, &n, CM_CUT, IC_CUT, "Cut", "Ctrl+X", dis_arc);
+  item(m, &n, CM_COPY, IC_COPY, "Copy", "Ctrl+C", dis_cloud);
+  item(m, &n, CM_CUT, IC_CUT, "Cut", "Ctrl+X", dis_arc | dis_cloud);
   if (g_nclip > 0) item(m, &n, CM_PASTE, IC_PASTE, "Paste here", "Ctrl+V", dis_arc);
   sep(m, &n);
-  item(m, &n, CM_RENAME, IC_RENAME, "Rename", "F2", (one && !arc) ? 0 : UI_MI_DISABLED);
-  item(m, &n, CM_DELETE, IC_DELETE, "Delete", "Del", (arc ? UI_MI_DISABLED : 0) | UI_MI_DANGER);
+  item(m, &n, CM_RENAME, IC_RENAME, "Rename", "F2", (one && !ro) ? 0 : UI_MI_DISABLED);
+  item(m, &n, CM_DELETE, IC_DELETE, "Delete", "Del", (ro ? UI_MI_DISABLED : 0) | UI_MI_DANGER);
   sep(m, &n);
-  item(m, &n, CM_COMPRESS, IC_COMPRESS, "Compress to other panel", NULL, dis_o | dis_arc);
-  if (is_arc || arc) item(m, &n, CM_EXTRACT, IC_EXTRACT, "Extract to other panel", NULL, dis_o);
+  item(m, &n, CM_COMPRESS, IC_COMPRESS, "Compress to other panel", NULL, dis_lo | (arc ? UI_MI_DISABLED : 0));
+  if (is_arc || p->list.loc.in_arc) item(m, &n, CM_EXTRACT, IC_EXTRACT, "Extract to other panel", NULL, dis_lo);
   sep(m, &n);
   if (one && ce && (ce->flags & FM_ST_DIR) && !arc) {
     char path[FM_PATH_MAX];
@@ -918,7 +962,7 @@ void app_panel_menu(FmPanel *p, float x, float y) {
   FmMenuItem m[28];
   int n = 0;
   int s = conf.sort[p->idx];
-  bool arc = p->list.loc.in_arc;
+  bool arc = p->list.loc.in_arc || (p->list.loc.in_cloud && !cloud_panel_writable(p));   /* cloud: read-only? */
   g_menu_panel = p->idx;
   item(m, &n, PM_SORT_NAME, IC_SORT, "Sort by name", NULL, s == SORT_NAME ? UI_MI_CHECKED : 0);
   item(m, &n, PM_SORT_SIZE, IC_SORT, "Sort by size", NULL, s == SORT_SIZE ? UI_MI_CHECKED : 0);
@@ -932,7 +976,7 @@ void app_panel_menu(FmPanel *p, float x, float y) {
   item(m, &n, PM_HIDDEN, IC_EYE, "Show hidden files", "Ctrl+H", conf.show_hidden ? UI_MI_CHECKED : 0);
   sep(m, &n);
   item(m, &n, PM_NEWDIR, IC_NEW_FOLDER, "New folder", "F7", arc ? UI_MI_DISABLED : 0);
-  item(m, &n, PM_NEWFILE, IC_NEW_FILE, "New file", "Shift+F4", arc ? UI_MI_DISABLED : 0);
+  item(m, &n, PM_NEWFILE, IC_NEW_FILE, "New file", "Shift+F4", arc || p->list.loc.in_cloud ? UI_MI_DISABLED : 0);
   if (g_nclip > 0) item(m, &n, PM_PASTE, IC_PASTE, "Paste", "Ctrl+V", arc ? UI_MI_DISABLED : 0);
   item(m, &n, PM_SELECT_ALL, IC_SELECT_ALL, "Select all", "Ctrl+A", p->nview ? 0 : UI_MI_DISABLED);
   if (ui.touch_mode)
@@ -942,6 +986,7 @@ void app_panel_menu(FmPanel *p, float x, float y) {
   item(m, &n, PM_ONLINE, IC_PLAY_BADGE, "Online videos", NULL, 0);   /* online */
   item(m, &n, PM_PHOTOS, IC_ALBUM, "Online photos", NULL, 0);        /* photos */
   item(m, &n, PM_AUDIO, IC_RADIO, "Online audio", NULL, 0);          /* audio */
+  item(m, &n, PM_CLOUD, IC_CLOUD, "Cloud storage", NULL, 0);         /* cloud */
   sep(m, &n);
   item(m, &n, PM_MIRROR, IC_SWAP, "Same folder in other panel", NULL, 0);
   item(m, &n, PM_PATH, IC_RENAME, "Go to path", "Ctrl+L", 0);
@@ -1088,6 +1133,7 @@ static void pmenu_action(int id) {
     case PM_ONLINE: open_online(); break;       /* online */
     case PM_PHOTOS: open_photos(); break;       /* photos */
     case PM_AUDIO: open_aonline(); break;       /* audio */
+    case PM_CLOUD: cloud_ui_home(); break;      /* cloud */
     case PM_MIRROR: {
       FmLoc l = p->list.loc;
       panel_go(&g_p[1 - p->idx], &l, true);
@@ -1266,6 +1312,7 @@ static bool do_rename(void) {
   FmPanel *p = &g_p[D.panel];
   const char *dir = p->list.loc.path;
   if (!strcmp(D.name, D.orig)) return true;
+  if (p->list.loc.in_cloud) return cloud_ui_rename(p, D.orig, D.name, D.err, sizeof D.err);   /* cloud */
   if (!ops_valid_name(D.name)) {
     fm_strlcpy(D.err, "That name is not allowed", sizeof D.err);
     return false;
@@ -1305,6 +1352,7 @@ static bool do_rename(void) {
 
 static bool do_create(bool file) {
   FmPanel *p = &g_p[D.panel];
+  if (p->list.loc.in_cloud && !file) return cloud_ui_mkdir(p, D.name, D.err, sizeof D.err);   /* cloud */
   if (!ops_valid_name(D.name)) {
     fm_strlcpy(D.err, "That name is not allowed", sizeof D.err);
     return false;
@@ -1511,6 +1559,10 @@ static void dlg_props(void) {
     prop_row(&c, "Access", v, kw);
     if (e->flags & (FM_ST_LINK | FM_ST_BROKEN))
       prop_row(&c, "Link", (e->flags & FM_ST_BROKEN) ? "Broken (the target is missing)" : "Symbolic link", kw);
+  } else if (D.in_cloud) {
+    const FmCloudAcct *ca = cloud_acct_by_serial(g_p[D.panel].list.loc.cloud);
+    const FmCloud *cs = ca ? cloud_find(ca->provider) : NULL;
+    prop_row(&c, "Service", cs ? cs->name : "Cloud", kw);
   } else if (D.in_arc && D.single) {
     prop_row(&c, "Encrypted", e->encrypted ? "Yes" : "No", kw);
   } else {
@@ -1911,6 +1963,9 @@ static void dlg_settings(void) {
   static bool photo_jump;
   if (photo_settings_focus()) photo_jump = true;
   content += aonline_settings_h(c.w - DP(6));        /* audio: its section */
+  content += cloud_settings_h(c.w - DP(6));          /* cloud: its section */
+  static bool cloud_jump;
+  if (cloud_settings_focus()) cloud_jump = true;
   static bool audio_jump;
   if (aonline_settings_focus()) audio_jump = true;
   u32 sid = ui_id("dlg.settings.scroll");
@@ -2056,6 +2111,12 @@ static void dlg_settings(void) {
     ui_redraw();
   }
   aonline_settings(&r, ui_idn(base, 600));
+  if (cloud_jump) {                                /* cloud: opened for the accounts */
+    D.scroll.y = r.y - c.y + D.scroll.y;
+    cloud_jump = false;
+    ui_redraw();
+  }
+  cloud_settings(&r, ui_idn(base, 700));           /* cloud: accounts (fcloud_ui.c) */
   small_label(&r, "ABOUT");
   {
     char ver[96];
@@ -2100,7 +2161,14 @@ static void dlg_exit(void) {
 }
 
 static void draw_dialogs(void) {
-  if (D.kind == DLG_NONE) {
+  /* cloud: its sheets (job questions wait while one is open); one opened
+  ** from the settings' account rows replaces the settings */
+  bool cloud_open = false;
+  if (D.kind == DLG_NONE || D.kind == DLG_SETTINGS) {
+    cloud_open = cloud_ui_frame();
+    if (cloud_open && D.kind == DLG_SETTINGS) dlg_close();
+  }
+  if (D.kind == DLG_NONE && !cloud_open) {
     FmAsk a;
     FmJob *j = ops_question(&a);
     if (j) {
@@ -2183,6 +2251,8 @@ static void draw_top(FmRect r) {
 }
 
 static void draw_sidebar(FmRect r) {
+  static u32 cloud_stamp;              /* cloud: accounts added, renamed or removed */
+  if (cloud_acct_stamp() != cloud_stamp) { cloud_stamp = cloud_acct_stamp(); g_places_dirty = true; }
   if (g_places_dirty) build_places();
   gfx_shadow(r, ui.m.radius, DP(10), col_alpha(T.shadow, 0.6f));
   gfx_rrect(r, ui.m.radius, T.surface);
@@ -2198,7 +2268,7 @@ static void draw_sidebar(FmRect r) {
   u32 sid = ui_id("side.scroll");
   ui_scroll(&g_side_scroll, sid, in, content);
   gfx_clip_push(in);
-  static const char *const kSec[] = { "STORAGE", "PLACES", "BOOKMARKS", "RECENT" };
+  static const char *const kSec[] = { "STORAGE", "PLACES", "BOOKMARKS", "RECENT", "CLOUD" };
   float y = in.y - g_side_scroll.y;
   last = -1;
   const char *cur = P()->list.loc.path;
@@ -2215,7 +2285,8 @@ static void draw_sidebar(FmRect r) {
     y += h;
     if (!gfx_visible(row)) continue;
     int f = ui_hit(ui_idn(sid, (u32)i + 1), row);
-    bool here = !P()->list.loc.in_arc && same_path(cur, pl->path);
+    bool here = !P()->list.loc.in_arc && !P()->list.loc.in_cloud && same_path(cur, pl->path);
+    if (P()->list.loc.in_cloud && pl->section == 4) here = atoi(pl->path + 6) == P()->list.loc.cloud;   /* cloud */
     if (here) gfx_rrect(row, DP(10), T.accent_soft);
     else if (f & UI_HOVER) gfx_rrect(row, DP(10), T.hover);
     float is = DP(18);
@@ -2286,9 +2357,11 @@ static void run_action(int id) {
 
 static int build_actions(Act *a) {
   FmPanel *p = P(), *o = O();
-  bool sel = p->nsel > 0, arc = p->list.loc.in_arc, o_ok = panel_is_local(o);
+  bool cloud = p->list.loc.in_cloud;           /* cloud: read-only unless the service takes changes */
+  bool sel = p->nsel > 0, arc = p->list.loc.in_arc || (cloud && !cloud_panel_writable(p)), o_ok = panel_can_receive(o);
+  bool o_local = panel_is_local(o);
   bool sel_arcs = false;
-  if (!arc && p->nsel > 0) {
+  if (!arc && !cloud && p->nsel > 0) {
     sel_arcs = true;
     for (int i = 0; i < p->list.count; i++) {
       const FmEntry *e = &p->list.items[i];
@@ -2302,9 +2375,9 @@ static int build_actions(Act *a) {
     { ACT_MOVE, IC_MOVE, "Move", "Move to the other panel (F6)", sel && o_ok && !arc, 2 },
     { ACT_DELETE, IC_DELETE, "Delete", "Delete (Del)", sel && !arc, 0 },
     { ACT_RENAME, IC_RENAME, "Rename", "Rename (F2)", p->nsel == 1 && !arc, 0 },
-    { ACT_NEWDIR, IC_NEW_FOLDER, "New", "New folder (F7)", panel_is_local(p), 0 },
-    { ACT_EXTRACT, IC_EXTRACT, "Extract", "Extract to the other panel", o_ok && (arc || sel_arcs), 0 },
-    { ACT_COMPRESS, IC_COMPRESS, "Zip", "Compress into the other panel", sel && !arc && o_ok && can_create, 0 },
+    { ACT_NEWDIR, IC_NEW_FOLDER, "New", "New folder (F7)", panel_is_local(p) || cloud_panel_writable(p), 0 },
+    { ACT_EXTRACT, IC_EXTRACT, "Extract", "Extract to the other panel", o_local && (p->list.loc.in_arc || sel_arcs), 0 },
+    { ACT_COMPRESS, IC_COMPRESS, "Zip", "Compress into the other panel", sel && !arc && !cloud && o_local && can_create, 0 },
     { ACT_SELALL, IC_SELECT_ALL, "All", "Select all (Ctrl+A)", p->nview > 0, 0 },
   };
   for (int i = 0; i < 8; i++) a[n++] = k[i];
@@ -2540,7 +2613,19 @@ static void draw_status(FmRect r) {
   }
   char buf[200], a[32], b[32];
   float x = in.x;
-  if (g_space_total > 0) {
+  float qf = 0;
+  if (p->list.loc.in_cloud) {                  /* cloud: the account's quota */
+    if (cloud_ui_quota_text(p, buf, sizeof buf, &qf)) {
+      icon_draw(IC_CLOUD, FM_RECT(x, in.y + (in.h - DP(14)) * 0.5f, DP(14), DP(14)), T.text2);
+      x = font_draw(FONT_REGULAR, fs, x + DP(20), ty, buf, -1, T.text2) + DP(8);
+      FmRect bar = { x, in.y + in.h * 0.5f - DP(2), DP(60), DP(4) };
+      if (qf >= 0 && bar.x + bar.w < in.x + in.w * 0.5f) {
+        gfx_rrect(bar, DP(2), T.surface3);
+        gfx_rrect(FM_RECT(bar.x, bar.y, FM_MAX(bar.w * qf, DP(4)), bar.h), DP(2), qf > 0.9f ? T.danger : T.accent);
+        x = bar.x + bar.w + DP(12);
+      }
+    }
+  } else if (g_space_total > 0) {
     icon_draw(IC_DRIVE, FM_RECT(x, in.y + (in.h - DP(14)) * 0.5f, DP(14), DP(14)), T.text2);
     x += DP(20);
     fm_snprintf(buf, sizeof buf, "%s free of %s", fm_fmt_size(g_space_free, a, sizeof a),
@@ -2588,7 +2673,7 @@ static void draw_drag(void) {
   if (!g_drag) return;
   FmPanel *to = &g_p[1 - g_drag_from];
   bool move = (ui.mod & KMOD_SHIFT) != 0;
-  bool over = g_L.show[to->idx] && rect_has(to->rect, ui.mx, ui.my) && panel_is_local(to);
+  bool over = g_L.show[to->idx] && rect_has(to->rect, ui.mx, ui.my) && panel_can_receive(to);
   if (move && g_p[g_drag_from].list.loc.in_arc) move = false;
   if (over) gfx_rrect_line(rect_inset(to->rect, -DP(3)), ui.m.radius + DP(3), DP(2.5f), T.accent);
   char t[96];
@@ -2676,7 +2761,8 @@ static const char *arg_positional(void) {
                                       "--demo-dialog", "--layout", "--demo-library",
                                       "--demo-online", "--demo-online-state",
                                       "--demo-photos", "--demo-photos-state" /* photos */,
-                                      "--demo-audio-online", "--demo-audio-online-state" /* audio */ };
+                                      "--demo-audio-online", "--demo-audio-online-state" /* audio */,
+                                      "--demo-cloud" /* cloud */ };
   for (int i = 1; i < app.argc; i++) {
     const char *a = app.argv[i];
     bool val = false;
@@ -2874,6 +2960,11 @@ void app_init(void) {
     FmAonlineHooks ah = { conf_dirty, open_settings, aonline_reveal_path };
     aonline_set_hooks(&ah);
   }
+  cloud_init(g_shot);                  /* cloud: --shot runs never load or save accounts */
+  {
+    FmCloudHooks ch = { app_panel_activate, open_settings, active_panel, dlg_close };
+    cloud_ui_bind(g_p, &ch);
+  }
   if (!g_shot) restore_window();
   title_apply();
 
@@ -2922,16 +3013,22 @@ void app_init(void) {
       if (!strcmp(app.argv[i], "--demo-audio-online") && app.argv[i + 2][0] != '-') q = app.argv[i + 2];
     aonline_demo(dau, q, arg_value("--demo-audio-online-state"));
   }
+  /* cloud: --demo-cloud [panel|folder|loading|signedout|delete|home|add|form-KEY|link] */
+  if (arg_flag("--demo-cloud")) {
+    const char *st = arg_value("--demo-cloud");
+    cloud_ui_demo(st && st[0] != '-' ? st : NULL);
+  }
   ui_redraw();
 }
 
 void app_shutdown(void) {
   app_close_viewer();
   ops_shutdown();
+  cloud_tasks_shutdown();              /* cloud: stop listings and sign-ins */
   if (!g_shot) {
     track_window();
     for (int i = 0; i < 2; i++) {
-      if (!g_p[i].list.loc.in_arc && g_p[i].list.err == FM_OK)
+      if (!g_p[i].list.loc.in_arc && !g_p[i].list.loc.in_cloud && g_p[i].list.err == FM_OK)
         fm_strlcpy(conf.path[i], g_p[i].list.loc.path, FM_PATH_MAX);
     }
     conf.active = g_active;
@@ -2946,6 +3043,7 @@ void app_shutdown(void) {
   aonline_shutdown();                  /* audio */
   photo_shutdown();                    /* photos */
   online_shutdown();                   /* online */
+  cloud_shutdown();                    /* cloud */
   thumb_shutdown();
 }
 
@@ -3001,6 +3099,7 @@ void app_event(const SDL_Event *e) {
 
 void app_frame(void) {
   thumb_pump();
+  cloud_pump();                        /* cloud: finished listings and sign-ins, saving */
   lib_pump();                          /* flib: scan results, saving */
   online_pump();                       /* online: searches, downloads, thumbnails */
   photo_pump();                        /* photos: searches, full pictures, downloads, albums */
@@ -3066,7 +3165,7 @@ void app_frame(void) {
   if (g_L.audio.h > 0) audio_mini_draw(rect_inset2(g_L.audio, DP(8), DP(4)));
   ui_divider(0, ui.w, g_L.status.y);
   draw_status(g_L.status);
-  if (D.kind == DLG_NONE && !ui_menu_is_open()) global_keys();
+  if (D.kind == DLG_NONE && !ui_menu_is_open() && !cloud_ui_is_open()) global_keys();
   draw_drag();
   draw_dialogs();
 
