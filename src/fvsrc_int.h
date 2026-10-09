@@ -39,6 +39,14 @@ FmErr vsrc_bilibili_resolve(const FmVsrcConf *c, const char *bv, FmVsrcStream *o
                             volatile int *cancel);
 extern const FmVsrc g_vsrc_web;
 
+/* ---- Eporner (fvsrc_eporner.c, adult; the "adult" branch), for the self test -- */
+extern const FmVsrc g_vsrc_eporner;
+bool  vsrc_eporner_id(const char *s, char *out, size_t cap);
+bool  vsrc_eporner_hash(const char *hex32, char *out, size_t cap);
+FmErr vsrc_eporner_parse_search(const char *json, size_t len, int page, FmVsrcPage *out);
+FmErr vsrc_eporner_pick(const char *json, size_t len, const FmVsrcConf *c, FmVsrcStream *out, char *err,
+                        size_t errcap);
+
 /* ---- helpers (fvsrc.c) ------------------------------------------------------ */
 
 /* false (with a message in err) when this system has no HTTPS client */

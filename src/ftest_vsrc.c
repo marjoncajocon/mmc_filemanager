@@ -154,7 +154,7 @@ static const char *kYtdlpSingle =
 /* ---- offline ---------------------------------------------------------------------- */
 
 static void vt_registry(void) {
-  static const char *const kKeys[] = { "youtube", "archive", "peertube", "dailymotion", "bilibili", "web" };
+  static const char *const kKeys[] = { "youtube", "archive", "peertube", "dailymotion", "bilibili", "eporner", "web" };
   TEST_CHECK(vsrc_count() == FM_COUNT(kKeys));
   for (int i = 0; i < vsrc_count() && i < FM_COUNT(kKeys); i++) {
     const FmVsrc *s = vsrc_at(i);
@@ -1434,6 +1434,113 @@ static void vt_bilibili(void) {
 }
 
 /* MMCFM_BILI_TEST=<query>: search, resolve the first result, open and decode it. */
+/* Eporner (adult branch): the hash, link ids, a search reply and the xhr
+** reply, offline; MMCFM_EP_TEST=<query> runs it against the site. */
+static const char kEpSearch[] =
+  "{\"count\":2,\"start\":0,\"per_page\":2,\"page\":1,\"total_count\":9185,\"total_pages\":4593,\"videos\":["
+  "{\"id\":\"a8nAZAjjGd0\",\"title\":\"First &amp; one\",\"views\":\"394118\",\"rate\":\"4.27\","
+  "\"url\":\"https://www.eporner.com/video-a8nAZAjjGd0/first-one/\",\"added\":\"2025-08-14 13:00:18\","
+  "\"length_sec\":\"1780\",\"length_min\":\"29:40\",\"embed\":\"https://www.eporner.com/embed/a8nAZAjjGd0/\","
+  "\"default_thumb\":{\"size\":\"big\",\"width\":\"640\",\"height\":\"360\","
+  "\"src\":\"https://static-ca-cdn.eporner.com/thumbs/static4/1/14/142/14209507/2_3\"}},"
+  "{\"id\":\"bad id!\",\"title\":\"x\",\"url\":\"https://www.eporner.com/video-x/\"}]}";
+static const char kEpXhr[] =
+  "{\"vid\":\"a8nAZAjjGd0\",\"duration\":1780,\"available\":true,\"sources\":{\"mp4\":{"
+  "\"1080p HD\":{\"labelShort\":\"1080p\",\"src\":\"https://vid-s19.eporner.com/v6/x/1080.mp4\"},"
+  "\"720p HD\":{\"labelShort\":\"720p\",\"src\":\"https://vid-s3.eporner.com/v4/x/720.mp4\"},"
+  "\"480p\":{\"labelShort\":\"480p\",\"src\":\"https://vid-s19.eporner.com/v6/x/480.mp4\"},"
+  "\"240p\":{\"labelShort\":\"240p\",\"src\":\"https://vid-s3.eporner.com/v4/x/240.mp4\"}}}}";
+
+static void vt_eporner(void) {
+  char h[64], id[32];
+  TEST_CHECK(vsrc_eporner_hash("00000000ffffffff0000002400000023", h, sizeof h) && !strcmp(h, "01z141z310z"));
+  TEST_CHECK(!vsrc_eporner_hash("zz000000ffffffff0000002400000023", h, sizeof h));
+  TEST_CHECK(vsrc_eporner_id("https://www.eporner.com/video-a8nAZAjjGd0/some-title/", id, sizeof id) &&
+             !strcmp(id, "a8nAZAjjGd0"));
+  TEST_CHECK(vsrc_eporner_id("https://www.eporner.com/embed/a8nAZAjjGd0/", id, sizeof id) && !strcmp(id, "a8nAZAjjGd0"));
+  TEST_CHECK(!vsrc_eporner_id("https://www.eporner.com/cat/all/", id, sizeof id));
+  FmVsrcPage pg;
+  memset(&pg, 0, sizeof pg);
+  TEST_CHECK(vsrc_eporner_parse_search(kEpSearch, sizeof kEpSearch - 1, 1, &pg) == FM_OK);
+  TEST_CHECK(pg.count == 1 && !strcmp(pg.items[0].id, "a8nAZAjjGd0") && !strcmp(pg.items[0].title, "First & one"));
+  TEST_CHECK(pg.count == 1 && pg.items[0].duration == 1780 && pg.items[0].views == 394118 &&
+             !strcmp(pg.items[0].published, "2025-08-14") && pg.items[0].thumb[0] && !strcmp(pg.next, "2"));
+  vsrc_page_free(&pg);
+  FmVsrcConf c;
+  memset(&c, 0, sizeof c);
+  c.os_mp4 = true;
+  c.max_height = 720;
+  FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+  char err[200];
+  TEST_CHECK(vsrc_eporner_pick(kEpXhr, sizeof kEpXhr - 1, &c, st, err, sizeof err) == FM_OK);
+  TEST_CHECK(st->nq == 4 && st->cur >= 0 && strstr(st->video, "720.mp4") && !st->audio[0] && st->duration == 1780);
+  /* Safe search on: the source refuses (the age gate) */
+  c.safe_search = true;
+  memset(&pg, 0, sizeof pg);
+  TEST_CHECK(g_vsrc_eporner.search(&c, "x", NULL, &pg, NULL) == FM_ERR_UNSUPPORTED && strstr(pg.error, "Safe search"));
+  vsrc_page_free(&pg);
+  fm_free(st);
+}
+
+static void vt_eporner_live(void) {
+  const char *qs = getenv("MMCFM_EP_TEST");
+  if (!qs || !*qs) return;
+  FmVsrcConf c;
+  vsrc_conf_snapshot(&c);
+  c.safe_search = false;
+  c.ytdlp[0] = 0;                                      /* must play with no yt-dlp at all */
+  FmVsrcPage pg;
+  memset(&pg, 0, sizeof pg);
+  u64 t0 = plat_now_ms();
+  FmErr e = g_vsrc_eporner.search(&c, qs, NULL, &pg, NULL);
+  printf("  ep search: %s, %d results in %d ms %s\n", fm_err_str(e), pg.count, (int)(plat_now_ms() - t0), pg.error);
+  TEST_CHECK(e == FM_OK && pg.count > 5 && pg.next[0]);
+  if (pg.count) {
+    FmVsrcItem it = pg.items[0];
+    printf("  ep item: %s, %.0f s, %lld views, thumb %d\n", it.id, it.duration, (long long)it.views, it.thumb[0] != 0);
+    FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+    char err[256] = "";
+    t0 = plat_now_ms();
+    e = g_vsrc_eporner.resolve(&c, &it, st, NULL, NULL, err, sizeof err, NULL);
+    printf("  ep resolve: %s in %d ms %s\n", fm_err_str(e), (int)(plat_now_ms() - t0), err);
+    for (int i = 0; i < st->nq; i++)
+      printf("    %s %-8s %-6s %s%s\n", i == st->cur ? ">" : " ", st->q[i].label, st->q[i].codec,
+             st->q[i].playable ? "stream" : "", st->q[i].needs_ffmpeg ? "ffmpeg" : "");
+    TEST_CHECK(e == FM_OK && st->video[0]);
+    if (e == FM_OK) {
+      FmErr ve;
+      t0 = plat_now_ms();
+      FmVid *v = vid_open(st->video, 0, &ve);
+      u64 t1 = plat_now_ms();
+      TEST_CHECK(v != NULL);
+      if (v) {
+        FmVidFrame vf;
+        FmVidPcm pc;
+        int ev, nv = 0, na = 0, guard = 0;
+        while ((nv < 30 || na < 30) && guard++ < 3000 && (ev = vid_decode(v, &vf, &pc)) > 0) {
+          if (ev == VID_EV_VIDEO) nv++;
+          else if (ev == VID_EV_AUDIO) na++;
+        }
+        bool sk = vid_seek(v, 600);
+        int after = 0;
+        for (guard = 0; guard < 600 && after < 5; guard++) {
+          ev = vid_decode(v, &vf, &pc);
+          if (ev <= 0) break;
+          if (ev == VID_EV_VIDEO) after++;
+        }
+        printf("  ep play: %s %dx%d, open %d ms, %d frames + %d sound blocks, seek to 10 min %s (%d frames after)\n",
+               vid_info(v)->backend, vid_info(v)->w, vid_info(v)->h, (int)(t1 - t0), nv, na, sk ? "ok" : "failed", after);
+        TEST_CHECK(nv >= 30 && na >= 30);
+        vid_close(v);
+      } else {
+        printf("  ep play: open failed: %s\n", fm_err_str(ve));
+      }
+    }
+    fm_free(st);
+  }
+  vsrc_page_free(&pg);
+}
+
 static void vt_bilibili_live(void) {
   const char *qs = getenv("MMCFM_BILI_TEST");
   if (!qs || !*qs) return;
@@ -1530,6 +1637,8 @@ int test_vsrc(const char *tmp) {
   vt_innertube_live();
   vt_bilibili();
   vt_bilibili_live();
+  vt_eporner();
+  vt_eporner_live();
   vt_garbage();
   vt_cache(tmp);
   vt_save(tmp);
