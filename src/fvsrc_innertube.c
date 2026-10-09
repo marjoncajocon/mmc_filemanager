@@ -383,11 +383,28 @@ FmErr vsrc_innertube_resolve(const FmVsrcConf *c, const char *id, FmVsrcStream *
     return FM_ERR_FORMAT;
   }
   if (c->fresh) visitor_forget();            /* the old session's links were refused */
-  FmJson j;
-  FmErr e = player(id, &j, err, errcap, cancel);
-  if (e != FM_OK) return e;
-  e = pick(json_root(&j), c, out, err, errcap);
-  json_free(&j);
+  /* YouTube now and then refuses a session's links (403 on the very first
+  ** byte; seen on a phone, a few times an hour). One byte of the chosen
+  ** picture says so in ~0.2 s, and a new session gets links that play,
+  ** instead of a failed open and the player's reconnect (~3 s). */
+  FmErr e = FM_OK;
+  for (int round = 0; round < 2; round++) {
+    FmJson j;
+    e = player(id, &j, err, errcap, cancel);
+    if (e != FM_OK) return e;
+    e = pick(json_root(&j), c, out, err, errcap);
+    json_free(&j);
+    if (e != FM_OK || round == 1) break;
+    FmNetResp r;
+    memset(&r, 0, sizeof r);
+    FmErr pe = net_get(out->video, "Range: bytes=0-0\r\n", 4096, &r, cancel);
+    int st = r.status;
+    net_resp_free(&r);
+    if (pe == FM_ERR_CANCEL) return pe;
+    if (st != 403) break;
+    fm_log("youtube: links refused (403), asking again with a new session");
+    visitor_forget();
+  }
   return e;
 }
 

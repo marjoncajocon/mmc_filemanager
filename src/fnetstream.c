@@ -984,6 +984,13 @@ size_t ns_peek_at(FmNetStream *s, i64 pos, void *out, size_t n) {
   return got;
 }
 
+size_t ns_buffered(FmNetStream *s) {
+  SDL_LockMutex(s->mx);
+  size_t f = s->fill;
+  SDL_UnlockMutex(s->mx);
+  return f;
+}
+
 void ns_limit_ring(FmNetStream *s, size_t max) {
   SDL_LockMutex(s->mx);
   s->cap_max = FM_MAX(max, (size_t)RING);

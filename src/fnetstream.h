@@ -49,6 +49,8 @@ void   ns_limit_ring(FmNetStream *s, size_t max);
 /* Bytes at pos when they are already in the read-ahead buffer (nothing is
 ** consumed, nothing waits); 0 when they are not there yet. */
 size_t ns_peek_at(FmNetStream *s, i64 pos, void *out, size_t n);
+/* Bytes read ahead and not consumed yet. */
+size_t ns_buffered(FmNetStream *s);
 double ns_hls_start(const FmNetStream *s);
 double ns_hls_duration(const FmNetStream *s);
 /* From any thread: a blocked ns_read/ns_peek returns 0 now, later ones at

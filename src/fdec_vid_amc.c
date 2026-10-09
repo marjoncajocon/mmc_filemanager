@@ -141,7 +141,7 @@ typedef struct AmcNet {
   pthread_mutex_t mx;
   /* windows of bytes read (see net_read_at), each with its own connection
   ** (opened on first use; w[0].ns == ns) */
-  struct { u8 *buf; i64 pos; size_t len; u64 used; FmNetStream *ns; } w[NET_WINS];
+  struct { u8 *buf; i64 pos; size_t len; u64 used; FmNetStream *ns; i64 run; bool wide; } w[NET_WINS];
   u64 tick;
 } AmcNet;
 
@@ -199,6 +199,8 @@ static void amc_close(void *p);
 #define NET_STEP (64u * 1024u)
 #define NET_NEAR (256 * 1024)          /* a gap this small is read through, not sought */
 #define NET_SIDE_RING (512u * 1024u)
+#define NET_BACK (64 * 1024)            /* a new window starts this far before the asked byte */
+#define NET_RUN (1024 * 1024)           /* read straight on this far: the data cursor, read ahead fully */
 
 static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
   AmcNet *n = (AmcNet *)u;
@@ -248,11 +250,22 @@ static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
         if (!n->w[k].ns) { fm_log("video: %s", why); fail = true; break; }
         ns_limit_ring(n->w[k].ns, NET_SIDE_RING);
       }
-      n->w[k].pos = p;
+      /* the extractor steps back a little right after a jump: start early */
+      lend = p > NET_BACK ? p - NET_BACK : 0;
+      n->w[k].pos = lend;
       n->w[k].len = 0;
-      lend = p;
+      n->w[k].run = 0;
     }
     FmNetStream *ns = n->w[k].ns;
+    if (getenv("MMCFM_AMC_TRACE") && ns_tell(ns) != lend) {
+      char wl[256];
+      size_t o = 0;
+      for (int i = 0; i < NET_WINS; i++)
+        if (n->w[i].ns)
+          o += (size_t)fm_snprintf(wl + o, sizeof wl - o, " [%d %lld+%zu ahead %zu%s]", i, (long long)n->w[i].pos,
+                                   n->w[i].len, ns_buffered(n->w[i].ns), n->w[i].wide ? " wide" : "");
+      fm_log("amc miss %lld: window %d moves %lld -> %lld;%s", (long long)p, k, (long long)ns_tell(ns), (long long)lend, wl);
+    }
     if (ns_tell(ns) != lend && !ns_seek(ns, lend)) { n->w[k].len = 0; fail = true; break; }
     if (n->w[k].len + NET_STEP > NET_WIN) {                   /* slide: drop its oldest bytes */
       size_t drop = n->w[k].len + NET_STEP - NET_WIN;
@@ -264,6 +277,11 @@ static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
     n->w[k].used = ++n->tick;
     if (!got) break;                                          /* end of stream (or aborted) */
     n->w[k].len += got;
+    n->w[k].run += (i64)got;
+    if (!n->w[k].wide && n->w[k].run >= NET_RUN) {            /* this one carries the data now */
+      n->w[k].wide = true;
+      ns_limit_ring(ns, 4u * 1024u * 1024u);
+    }
   }
   pthread_mutex_unlock(&n->mx);
   ssize_t r = fail && !done ? -1 : (ssize_t)done;
