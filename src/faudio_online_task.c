@@ -777,8 +777,54 @@ void aplay_init(void) {
   /* no settings snapshot yet: it loads FFmpeg to check for it, which
   ** startup should not pay for; aplay_list takes one before any resolve */
   if (!g_play_mx) g_play_mx = SDL_CreateMutex();
-  FmAudioHooks h = { aplay_resolve, hook_is_fav, hook_fav_toggle, hook_played };
+  /* prepare: a queue restored or added to elsewhere takes the settings
+  ** snapshot before its first resolve */
+  FmAudioHooks h = { aplay_resolve, hook_is_fav, hook_fav_toggle, hook_played, aplay_snapshot };
   audio_set_hooks(&h);
+}
+
+void aplay_entry(const FmAsrcItem *it, FmAudioEntry *e, char *ref, char *who) {
+  memset(e, 0, sizeof *e);
+  aitem_ref(it, ref, AO_REF_MAX);
+  /* a station's second line: its country and tags */
+  if (it->kind == AITEM_STATION && it->artist[0] && it->album[0])
+    fm_snprintf(who, 512, "%s \xC2\xB7 %s", it->artist, it->album);
+  else fm_strlcpy(who, it->artist[0] ? it->artist : it->album, 512);
+  /* url left empty: asrc_stream on the player's thread picks it (and
+  ** counts a station's click, checks the codec, fetches fresh links) */
+  e->url = NULL;
+  e->title = it->title;
+  e->artist = who;
+  e->album = it->kind == AITEM_STATION ? NULL : it->album;
+  e->art_url = it->art;
+  e->live = it->kind == AITEM_STATION;
+  e->ref = ref;
+  e->dur = it->duration > 0 ? it->duration : 0;
+}
+
+void aplay_queue(const FmAsrcItem *it, bool next) {
+  if (!aitem_playable(it)) return;
+  char *ref = (char *)fm_alloc(AO_REF_MAX);
+  char *who = (char *)fm_alloc(512);
+  FmAudioEntry e;
+  aplay_entry(it, &e, ref, who);
+  aplay_snapshot();
+  if (audio_queue_add(&e, 1, next ? AQ_NEXT : AQ_END))
+    ui_toast(next ? "\xE2\x80\x9C%s\xE2\x80\x9D plays next" : "Added \xE2\x80\x9C%s\xE2\x80\x9D to the queue",
+             it->title[0] ? it->title : "it");
+  fm_free(ref);
+  fm_free(who);
+}
+
+void aplay_pick_playlist(const FmAsrcItem *it, float x, float y) {
+  if (!aitem_playable(it)) return;
+  char *ref = (char *)fm_alloc(AO_REF_MAX);
+  char *who = (char *)fm_alloc(512);
+  FmAudioEntry e;
+  aplay_entry(it, &e, ref, who);
+  qui_pick_playlist(&e, 1, x, y);         /* copied */
+  fm_free(ref);
+  fm_free(who);
 }
 
 void aplay_list(const FmAsrcItem *items, int n, int index) {
@@ -801,22 +847,9 @@ void aplay_list(const FmAsrcItem *items, int n, int index) {
     if (i == index) at = k;
     char *ref = (char *)fm_alloc(AO_REF_MAX);
     char *who = (char *)fm_alloc(512);
-    aitem_ref(it, ref, AO_REF_MAX);
-    /* a station's second line: its country and tags */
-    if (it->kind == AITEM_STATION && it->artist[0] && it->album[0])
-      fm_snprintf(who, 512, "%s \xC2\xB7 %s", it->artist, it->album);
-    else fm_strlcpy(who, it->artist[0] ? it->artist : it->album, 512);
+    aplay_entry(it, &e[k], ref, who);
     bufs[k * 2] = ref;
     bufs[k * 2 + 1] = who;
-    /* url left empty: asrc_stream on the player's thread picks it (and
-    ** counts a station's click, checks the codec, fetches fresh links) */
-    e[k].url = NULL;
-    e[k].title = it->title;
-    e[k].artist = who;
-    e[k].album = it->kind == AITEM_STATION ? NULL : it->album;
-    e[k].art_url = it->art;
-    e[k].live = it->kind == AITEM_STATION;
-    e[k].ref = ref;
     k++;
   }
   aplay_snapshot();

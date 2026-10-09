@@ -109,7 +109,7 @@ int  lib_prune_missing(void);
 
 enum {
   LIB_SEC_SONGS, LIB_SEC_ARTISTS, LIB_SEC_ALBUMS, LIB_SEC_VIDEOS, LIB_SEC_FAVS, LIB_SEC_RECENT,
-  LIB_SEC_FOLDERS, LIB_SEC_COUNT
+  LIB_SEC_PLAYLISTS /* fqueue_ui.c draws it */, LIB_SEC_FOLDERS, LIB_SEC_COUNT
 };
 
 /* hint_dir: the active panel's folder, offered by "Add folder". */

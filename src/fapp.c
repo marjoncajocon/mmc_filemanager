@@ -26,6 +26,7 @@
 #include "fphoto.h"                    /* photos */
 #include "faudio_online.h"             /* audio */
 #include "fcloud_app.h"                /* cloud */
+#include "fqueue.h"                    /* music queue, playlists */
 
 /* ---- state -------------------------------------------------------------- */
 
@@ -877,7 +878,7 @@ void app_panel_password(FmPanel *p, const FmLoc *loc, bool retry) {
 enum {
   CM_OPEN = 1, CM_OPEN_SYSTEM, CM_COPY_TO, CM_MOVE_TO, CM_COPY, CM_CUT, CM_PASTE, CM_RENAME,
   CM_DELETE, CM_COMPRESS, CM_EXTRACT, CM_PROPS, CM_COPY_PATH, CM_BOOKMARK, CM_SHOW,
-  CM_SELECT_ALL, CM_LIB_FOLDER, CM_LIB_FAV,
+  CM_SELECT_ALL, CM_LIB_FOLDER, CM_LIB_FAV, CM_Q_NEXT, CM_Q_ADD, CM_PL_ADD, CM_PL_IMPORT,
   PM_SORT_NAME = 40, PM_SORT_SIZE, PM_SORT_DATE, PM_SORT_TYPE, PM_DESC, PM_DIRS_FIRST, PM_LIST,
   PM_GRID, PM_HIDDEN, PM_NEWDIR, PM_NEWFILE, PM_PASTE, PM_SELECT_ALL, PM_REFRESH, PM_PROPS,
   PM_SEARCH, PM_MIRROR, PM_PATH, PM_SELECT_MODE, PM_LIBRARY, PM_ONLINE, PM_PHOTOS /* photos */, PM_AUDIO /* audio */,
@@ -903,7 +904,7 @@ static void item(FmMenuItem *m, int *n, int id, FmIcon ic, const char *label, co
 }
 
 void app_panel_context(FmPanel *p, float x, float y) {
-  FmMenuItem m[24];
+  FmMenuItem m[32];
   int n = 0;
   bool cloud = p->list.loc.in_cloud;           /* cloud: no local paths, writable when the service allows */
   bool ro = p->list.loc.in_arc || (cloud && !cloud_panel_writable(p));
@@ -952,6 +953,18 @@ void app_panel_context(FmPanel *p, float x, float y) {
   } else if (!arc && ce && !(ce->flags & FM_ST_DIR) && lib_is_media(ce->name)) {
     item(m, &n, CM_LIB_FAV, IC_HEART, "Add to favorites", NULL, 0);
   }
+  /* music queue and playlists: audio files, and folders as their audio files */
+  bool music = !arc && ce && (p->nsel > 1 || (ce->flags & FM_ST_DIR) || fm_type_from_name(ce->name) == FT_AUDIO);
+  if (music) {
+    sep(m, &n);
+    item(m, &n, CM_Q_NEXT, IC_PLAY_NEXT, "Play next", NULL, 0);
+    item(m, &n, CM_Q_ADD, IC_QUEUE, "Add to queue", NULL, 0);
+    item(m, &n, CM_PL_ADD, IC_PLAYLIST_ADD, "Add to playlist\xE2\x80\xA6", NULL, 0);
+  }
+  if (one && ce && !arc && !(ce->flags & FM_ST_DIR) &&
+      (fm_ends_with_i(ce->name, ".m3u") || fm_ends_with_i(ce->name, ".m3u8")))
+    item(m, &n, CM_PL_IMPORT, IC_QUEUE, "Import as playlist", NULL, 0);
+  sep(m, &n);
   if (!arc) item(m, &n, CM_COPY_PATH, IC_COPY, "Copy path", NULL, 0);
   if (!arc && one) item(m, &n, CM_SHOW, IC_FOLDER_OPEN, "Show in system file manager", NULL, 0);
   item(m, &n, CM_PROPS, IC_INFO, "Properties", "Alt+Enter", 0);
@@ -1064,6 +1077,27 @@ static void ctx_action(int id) {
         bool on = !lib_has_folder(path);
         lib_folder_set(path, on);
         ui_toast(on ? "Added to the media library" : "Removed from the media library");
+      }
+      break;
+    case CM_Q_NEXT: case CM_Q_ADD: case CM_PL_ADD:   /* the music queue, playlists */
+      if (ce) {
+        int ns = 0;
+        char **sel = panel_selected_paths(p, &ns);
+        entry_path(p, ce, path, sizeof path);
+        const char *one_path = path;
+        const char *const *list = ns > 0 ? (const char *const *)sel : &one_path;
+        int cnt = ns > 0 ? ns : 1;
+        if (id == CM_PL_ADD) qui_pick_playlist_paths(list, cnt, ui.mx, ui.my);
+        else qui_queue_paths(list, cnt, id == CM_Q_NEXT);
+        panel_free_paths(sel, ns);
+      }
+      break;
+    case CM_PL_IMPORT:
+      if (ce) {
+        entry_path(p, ce, path, sizeof path);
+        int k = pl_import_m3u(path);
+        if (k >= 0) ui_toast("Imported \xE2\x80\x9C%s\xE2\x80\x9D: %d tracks (Media library > Playlists)", pl_name(k), pl_len(k));
+        else ui_toast("No tracks found in %s", ce->name);
       }
       break;
     case CM_LIB_FAV:      /* flib: every selected media file follows the one under the cursor */
@@ -2189,6 +2223,7 @@ static void draw_dialogs(void) {
     case DLG_EXIT: dlg_exit(); break;
     default: break;
   }
+  qui_overlay();                       /* music queue and playlists: menus, dialogs */
 }
 
 /* ---- top bar, sidebar, tabs --------------------------------------------- */
@@ -2966,6 +3001,8 @@ void app_init(void) {
     FmAonlineHooks ah = { conf_dirty, open_settings, aonline_reveal_path };
     aonline_set_hooks(&ah);
   }
+  pl_init(g_shot);                     /* playlists: loaded when first shown */
+  audio_queue_init(g_shot);            /* the queue as it was, paused (after the online hooks) */
   cloud_init(g_shot);                  /* cloud: --shot runs never load or save accounts */
   {
     FmCloudHooks ch = { app_panel_activate, open_settings, active_panel, dlg_close };
@@ -3028,6 +3065,7 @@ void app_init(void) {
 }
 
 void app_shutdown(void) {
+  audio_queue_save_now();              /* the queue, the track and where it was */
   app_close_viewer();
   video_bg_stop();                     /* a video playing in the background */
   ops_shutdown();
@@ -3047,6 +3085,7 @@ void app_shutdown(void) {
   panel_free(&g_p[0]);
   panel_free(&g_p[1]);
   lib_shutdown();                      /* flib */
+  pl_shutdown();                       /* playlists */
   aonline_shutdown();                  /* audio */
   photo_shutdown();                    /* photos */
   online_shutdown();                   /* online */
@@ -3097,6 +3136,8 @@ void app_event(const SDL_Event *e) {
       break;
     case SDL_APP_WILLENTERBACKGROUND:
       conf_flush(true);
+      audio_queue_save_now();          /* Android may end the app from the background */
+      pl_flush();
       break;
     default: break;
   }
@@ -3109,6 +3150,8 @@ void app_frame(void) {
   thumb_pump();
   cloud_pump();                        /* cloud: finished listings and sign-ins, saving */
   lib_pump();                          /* flib: scan results, saving */
+  audio_queue_pump();                  /* the music queue file */
+  pl_pump();                           /* playlists file */
   online_pump();                       /* online: searches, downloads, thumbnails */
   photo_pump();                        /* photos: searches, full pictures, downloads, albums */
   aonline_pump();                      /* audio: searches, episodes, downloads, the library */

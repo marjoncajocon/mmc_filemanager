@@ -50,7 +50,7 @@ static void utf8_cut_tail(char *s);
 /* ---- registry ----------------------------------------------------------------- */
 
 static const FmAsrc *const kSources[] = {
-  &g_asrc_radio, &g_asrc_audius, &g_asrc_archive, &g_asrc_podcasts, &g_asrc_jamendo, &g_asrc_freesound,
+  &g_asrc_radio, &g_asrc_youtube, &g_asrc_audius, &g_asrc_archive, &g_asrc_podcasts, &g_asrc_jamendo, &g_asrc_freesound,
 };
 
 int asrc_count(void) { return FM_COUNT(kSources); }
@@ -269,9 +269,11 @@ void asrc_codec_norm(const char *codec, char *out, size_t cap) {
   }
 }
 
+/* WEBM: Opus in WebM, which the built-in video decoders play (the music
+** player falls back to them, fdec_aud.c); YouTube's sound-only track. */
 bool asrc_codec_builtin(const char *codec) {
   return !codec || !*codec || !fm_stricmp(codec, "MP3") || !fm_stricmp(codec, "FLAC") ||
-         !fm_stricmp(codec, "WAV");
+         !fm_stricmp(codec, "WAV") || !fm_stricmp(codec, "WEBM");
 }
 
 bool asrc_codec_blocked(const FmAsrcConf *c, const FmAsrcItem *item, const char *codec, char *err, size_t cap) {

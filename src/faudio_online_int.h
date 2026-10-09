@@ -19,6 +19,7 @@
 #include "fconf.h"
 #include "fview.h"
 #include "fonline_int.h"
+#include "fqueue.h"
 
 #define AO_WHITE FM_RGBA(255, 255, 255, 255)
 #define AO_REF_MAX 4096           /* a serialized item */
@@ -158,6 +159,12 @@ bool  aplay_resolve(const char *ref, FmAudioStream *out, volatile int *cancel);
 void  aplay_snapshot(void);
 /* Plays items[index] with the playable items of the list as the queue. */
 void  aplay_list(const FmAsrcItem *items, int n, int index);
+/* One item as a player entry: its ref (AO_REF_MAX) and second line (512)
+** are written into the caller's buffers, which the entry points to. */
+void  aplay_entry(const FmAsrcItem *it, FmAudioEntry *e, char *ref, char *who);
+/* "Play next" / "Add to queue" with a toast; "Add to playlist..." picker. */
+void  aplay_queue(const FmAsrcItem *it, bool next);
+void  aplay_pick_playlist(const FmAsrcItem *it, float x, float y);
 /* What the player is on, for the rows: AUDIO_* and its key ("" when idle
 ** or not an online item). Read once per frame. */
 int   aplay_state(char *key, size_t cap);

@@ -571,6 +571,24 @@ void icon_draw(FmIcon ic, FmRect r, FmColor c) {
       L(12, 15, 12, 3); POLY(false, 7.5f, 7.5f, 12, 3, 16.5f, 7.5f);
       POLY(false, 4, 16, 4, 20, 20, 20, 20, 16);
       break;
+    /* play queue and playlists */
+    case IC_QUEUE:      /* lines of a list with a note on the last one */
+      L(3, 6, 15, 6); L(3, 11, 15, 11); L(3, 16, 10, 16);
+      L(19, 8.5f, 19, 17); L(19, 8.5f, 21.5f, 9.5f);
+      DOT(16.8f, 17.2f, 2.3f);
+      break;
+    case IC_PLAY_NEXT:  /* list lines with a play triangle in front */
+      SHAPE(3, 4, 9, 7.5f, 3, 11);
+      L(12, 7.5f, 21, 7.5f); L(3, 15, 21, 15); L(3, 19.5f, 21, 19.5f);
+      break;
+    case IC_PLAYLIST_ADD:   /* list lines with a plus */
+      L(3, 6, 16, 6); L(3, 11, 16, 11); L(3, 16, 11, 16);
+      L(18, 13, 18, 21); L(14, 17, 22, 17);
+      break;
+    case IC_DRAG:       /* a grip: two columns of three dots */
+      DOT(9, 6, 1.6f); DOT(15, 6, 1.6f); DOT(9, 12, 1.6f); DOT(15, 12, 1.6f);
+      DOT(9, 18, 1.6f); DOT(15, 18, 1.6f);
+      break;
   }
 }
 

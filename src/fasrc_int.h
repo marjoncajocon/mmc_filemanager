@@ -31,6 +31,7 @@
 #define ASRC_MAX_OFFSET   2000            /* deepest result offset a page token may ask for */
 
 extern const FmAsrc g_asrc_radio;
+extern const FmAsrc g_asrc_youtube;
 extern const FmAsrc g_asrc_audius;
 extern const FmAsrc g_asrc_archive;
 extern const FmAsrc g_asrc_podcasts;

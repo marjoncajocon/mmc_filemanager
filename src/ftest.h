@@ -26,6 +26,7 @@ int test_themes(const char *tmp);     /* ftest_theme.c: every theme readable */
 int test_net(const char *tmp);        /* ftest_net.c: json, processes, https (MMCFM_NET_TEST=1) */
 int test_viz(const char *tmp);        /* ftest_viz.c: visualizer bands, smoothing, presets, conf */
 int test_library(const char *tmp);    /* ftest_lib.c: media library scan, favorites, persistence */
+int test_queue(const char *tmp);      /* ftest_queue.c: music queue math, track lines, saved queue, playlists, .m3u8 */
 int test_vsrc(const char *tmp);       /* ftest_vsrc.c: online video sources (MMCFM_NET_TEST=1, MMCFM_YTDLP=path) */
 int test_hls(const char *tmp);        /* ftest_hls.c: HLS playlists, AES-128, Dailymotion (MMCFM_HLS_TEST, MMCFM_DM_TEST) */
 int test_generic(const char *tmp);    /* ftest_generic.c: native "Any site" page resolver (MMCFM_GENERIC_TEST=url) */

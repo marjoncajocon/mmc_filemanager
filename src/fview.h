@@ -76,11 +76,16 @@ void audio_stop(void);
 **   headers  extra request lines for url ("Key: v\r\n"), or NULL
 **   live     an endless station: no seek bar, no gapless next, "LIVE"
 **   ref      the caller's own description of the item (opaque text), handed
-**            back to the hooks below; NULL = none */
+**            back to the hooks below; NULL = none
+**   file     url is a local file: tags and cover come from it, the heart is
+**            the media library's (queued files, playlists)
+**   dur      its length in seconds when known (saved queues), 0 = unknown */
 typedef struct FmAudioEntry {
   const char *url, *title, *artist, *album, *art_url, *headers;
   bool live;
   const char *ref;
+  bool file;
+  double dur;
 } FmAudioEntry;
 
 /* What resolve() fills in for an entry without a url. */
@@ -99,6 +104,9 @@ typedef struct FmAudioHooks {
   void (*fav_toggle)(const char *ref);
   /* main thread: the entry became the one heard ("Recently played") */
   void (*played)(const char *ref);
+  /* main thread: an entry with a ref is about to be resolved (a queue
+  ** restored after a restart, items queued from elsewhere); may be NULL */
+  void (*prepare)(void);
 } FmAudioHooks;
 void audio_set_hooks(const FmAudioHooks *h);
 
@@ -108,6 +116,49 @@ void audio_set_hooks(const FmAudioHooks *h);
 bool audio_play_entries(const FmAudioEntry *list, int n, int index);
 /* Opens the full player over whatever is on screen (no-op when idle). */
 void audio_show_player(void);
+
+/* ---- the play queue ------------------------------------------------------ */
+
+/* The queue is the player's list in play order: positions before the
+** current one were heard, the ones after it are "Up next". Shuffle reorders
+** the up-next part only (turning it off puts back the order from before,
+** keeping what was added or removed meanwhile); repeat all goes round the
+** whole queue. All main thread. */
+enum { AQ_END, AQ_NEXT };
+/* Adds entries at the end or right after the current track; with nothing
+** loaded (or a finished queue) the first one starts playing. */
+bool audio_queue_add(const FmAudioEntry *list, int n, int where);
+int  audio_queue_len(void);
+int  audio_queue_pos(void);            /* position of the track heard, -1 idle */
+u32  audio_queue_gen(void);            /* changes with every edit and track change */
+
+typedef struct FmAudioQInfo {
+  char title[256], artist[256];
+  const char *path;                    /* file path or stream URL ("" = resolved later) */
+  const char *art_url;                 /* "" none */
+  const char *ref;                     /* "" none */
+  bool file, live;
+  double dur;                          /* 0 unknown */
+} FmAudioQInfo;
+/* Info of the track at a position (strings valid until the next edit). */
+bool audio_queue_get(int pos, FmAudioQInfo *out);
+/* The whole queue as entries in play order (pointers into the player, valid
+** until the next edit; fm_free the array). */
+FmAudioEntry *audio_queue_entries(int *n);
+void audio_queue_move(int from, int to);
+void audio_queue_remove(int pos);
+void audio_queue_clear(void);          /* the up-next part */
+void audio_queue_jump(int pos);        /* plays that one now */
+/* A new list played in a random order (shuffle turns on). */
+bool audio_play_shuffled(const FmAudioEntry *list, int n);
+bool audio_queue_shuffle(void);
+/* Opens the full player with the queue showing. */
+void audio_show_queue(void);
+/* The saved queue (PLACE_CONFIG/audio-queue.txt): restored paused at the
+** same track and position (nothing opens until Play); readonly: --shot. */
+void audio_queue_init(bool readonly);
+void audio_queue_pump(void);           /* every frame: saves a changed queue */
+void audio_queue_save_now(void);       /* the app goes to the background or quits */
 
 enum { AUDIO_IDLE, AUDIO_BUFFERING, AUDIO_PLAYING, AUDIO_PAUSED, AUDIO_FAILED };
 /* State of the entry being heard; ref (may be NULL) gets its ref ("" for

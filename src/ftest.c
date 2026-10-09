@@ -104,6 +104,7 @@ static const TestArea kAreas[] = {
   { "net", test_net },
   { "viz", test_viz },
   { "library", test_library },
+  { "queue", test_queue },
   { "vsrc", test_vsrc },
   { "hls", test_hls },
   { "generic", test_generic },

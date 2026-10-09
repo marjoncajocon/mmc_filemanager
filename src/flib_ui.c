@@ -12,7 +12,11 @@
 **     the index, the filter, the section or the favorites change (the
 **     library generation number); drawing touches the visible rows only.
 **   - One tap plays (a media library is not a file list: there is nothing
-**     to select); right click or long press opens the item menu.
+**     to select); right click or long press opens the item menu, which
+**     also queues songs (Play next, Add to queue) and adds them to
+**     playlists; artists and albums have the same menu for all their songs.
+**   - Playlists are a section like the others, but their list and editor
+**     are drawn by fqueue_ui.c, which owns them.
 */
 #include "flib.h"
 #include "fapp.h"
@@ -22,17 +26,19 @@
 #include "ftitle.h"
 #include "fconf.h"
 #include "fdec_aud.h"
+#include "fqueue.h"
 
 typedef struct SecInfo { const char *label; FmIcon icon; } SecInfo;
 static const SecInfo kSec[LIB_SEC_COUNT] = {
   { "Songs", IC_MUSIC }, { "Artists", IC_PERSON }, { "Albums", IC_DISC }, { "Videos", IC_VIDEO },
-  { "Favorites", IC_HEART }, { "Recent", IC_HISTORY }, { "Folders", IC_FOLDER },
+  { "Favorites", IC_HEART }, { "Recent", IC_HISTORY }, { "Playlists", IC_QUEUE }, { "Folders", IC_FOLDER },
 };
 
 enum { KIND_ALL = 0, KIND_MUSIC, KIND_VIDEO };
 enum {
-  MI_PLAY = 1, MI_FAV, MI_REVEAL, MI_SYSTEM, MI_COPY_PATH, MI_FORGET,
-  MI_ADD_HINT = 20, MI_ADD_HIDDEN = 40
+  MI_PLAY = 1, MI_FAV, MI_REVEAL, MI_SYSTEM, MI_COPY_PATH, MI_FORGET, MI_NEXT, MI_QUEUE, MI_PLADD,
+  MI_ADD_HINT = 20, MI_ADD_HIDDEN = 40,
+  GM_PLAY = 60, GM_NEXT, GM_QUEUE, GM_PLADD     /* an artist or album */
 };
 
 static struct {
@@ -59,11 +65,12 @@ static struct {
   /* item menu */
   char menu_path[FM_PATH_MAX];
   int menu_sec;
+  int menu_group;              /* the group menu's artist or album */
   u64 last_scan;
   void (*reveal)(const char *path);
 } U;
 
-static u32 ID_MENU, ID_ADD;
+static u32 ID_MENU, ID_ADD, ID_GROUP;
 
 /* ---- helpers ------------------------------------------------------------------ */
 
@@ -99,6 +106,7 @@ static int sec_count(int s) {
     case LIB_SEC_VIDEOS: return d->nvideos;
     case LIB_SEC_FAVS: return lib_fav_count();
     case LIB_SEC_RECENT: return lib_recent_count();
+    case LIB_SEC_PLAYLISTS: return pl_count();
     default: return lib_folder_count();
   }
 }
@@ -194,6 +202,8 @@ static void build_rows(void) {
     case LIB_SEC_RECENT:
       for (int i = 0; i < lib_recent_count(); i++)
         if (kind_ok(lib_recent_at(i), kind) && path_matches(lib_recent_at(i), f)) push_row(i);
+      break;
+    case LIB_SEC_PLAYLISTS:
       break;
     default:
       for (int i = 0; i < lib_folder_count(); i++) push_row(i);
@@ -298,6 +308,7 @@ static void enter_group(int gi) {
 }
 
 static void set_section(int s) {
+  if (s == LIB_SEC_PLAYLISTS && U.sec != s) qui_playlists_reset();
   if (s == U.sec && !U.in_group) return;
   U.sec = FM_CLAMP(s, 0, LIB_SEC_COUNT - 1);
   U.in_group = false;
@@ -311,10 +322,17 @@ static void open_item_menu(const char *path, float x, float y) {
   fm_strlcpy(U.menu_path, path, sizeof U.menu_path);
   U.menu_sec = U.sec;
   bool fav = lib_is_fav(path);
-  FmMenuItem m[8];
+  FmMenuItem m[14];
   int n = 0;
   memset(m, 0, sizeof m);
+  bool audio = fm_type_from_name(path) == FT_AUDIO;
   m[n].id = MI_PLAY; m[n].icon = IC_PLAY; m[n++].label = "Play";
+  if (audio) {
+    m[n].id = MI_NEXT; m[n].icon = IC_PLAY_NEXT; m[n++].label = "Play next";
+    m[n].id = MI_QUEUE; m[n].icon = IC_QUEUE; m[n++].label = "Add to queue";
+    m[n].id = MI_PLADD; m[n].icon = IC_PLAYLIST_ADD; m[n++].label = "Add to playlist\xE2\x80\xA6";
+    m[n++].flags = UI_MI_SEP;
+  }
   m[n].id = MI_FAV; m[n].icon = fav ? IC_HEART_FILL : IC_HEART;
   m[n++].label = fav ? "Remove from favorites" : "Add to favorites";
   if (U.sec == LIB_SEC_RECENT) { m[n].id = MI_FORGET; m[n].icon = IC_CLOSE; m[n++].label = "Remove from recent"; }
@@ -323,6 +341,53 @@ static void open_item_menu(const char *path, float x, float y) {
   m[n].id = MI_SYSTEM; m[n].icon = IC_SHARE; m[n++].label = "Open with system app";
   m[n].id = MI_COPY_PATH; m[n].icon = IC_COPY; m[n++].label = "Copy path";
   ui_menu_open(ID_MENU, x, y, m, n);
+}
+
+/* An artist's or album's songs: play, queue or add them to a playlist. */
+static void open_group_menu(int gi, float x, float y) {
+  U.menu_group = gi;
+  U.menu_sec = U.sec;
+  FmMenuItem m[5];
+  int n = 0;
+  memset(m, 0, sizeof m);
+  m[n].id = GM_PLAY; m[n].icon = IC_PLAY; m[n++].label = "Play";
+  m[n].id = GM_NEXT; m[n].icon = IC_PLAY_NEXT; m[n++].label = "Play next";
+  m[n].id = GM_QUEUE; m[n].icon = IC_QUEUE; m[n++].label = "Add to queue";
+  m[n].id = GM_PLADD; m[n].icon = IC_PLAYLIST_ADD; m[n++].label = "Add to playlist\xE2\x80\xA6";
+  ui_menu_open(ID_GROUP, x, y, m, n);
+}
+
+/* The group's songs as queue entries, in the library's order. */
+static FmAudioEntry *group_entries(int gi, int *n) {
+  int ng;
+  *n = 0;
+  if (U.menu_sec != U.sec) return NULL;
+  const FmLibGroup *gr = cur_groups(&ng);
+  if (!gr || gi < 0 || gi >= ng) return NULL;
+  const char **paths = (const char **)fm_alloc(sizeof(char *) * (size_t)FM_MAX(gr[gi].count, 1));
+  int k = 0;
+  for (int i = 0; i < gr[gi].count; i++) {
+    const char *p = lib_str(lib_data()->items[group_order()[gr[gi].first + i]].path);
+    if (fm_type_from_name(p) == FT_AUDIO) paths[k++] = p;
+  }
+  FmAudioEntry *e = qents_from_paths(paths, k, 5000, n);
+  fm_free((void *)paths);
+  return e;
+}
+
+static void group_action(int r) {
+  int n = 0;
+  FmAudioEntry *e = group_entries(U.menu_group, &n);
+  if (n == 0) { qents_free(e, n); return; }
+  if (r == GM_PLAY) {
+    if (audio_play_entries(e, n, 0)) audio_show_player();
+  } else if (r == GM_NEXT || r == GM_QUEUE) {
+    if (audio_queue_add(e, n, r == GM_NEXT ? AQ_NEXT : AQ_END))
+      ui_toast(r == GM_NEXT ? "%d songs to play next" : "Added %d songs to the queue", n);
+  } else if (r == GM_PLADD) {
+    qui_pick_playlist(e, n, ui.mx, ui.my);
+  }
+  qents_free(e, n);
 }
 
 static void forget_recent(const char *path) {
@@ -342,6 +407,8 @@ static void menu_results(void) {
   const char *p = U.menu_path;
   switch (r) {
     case MI_PLAY: open_path(p, U.menu_sec == U.sec); break;
+    case MI_NEXT: case MI_QUEUE: qui_queue_paths(&p, 1, r == MI_NEXT); break;
+    case MI_PLADD: qui_pick_playlist_paths(&p, 1, ui.mx, ui.my); break;
     case MI_FAV: lib_fav_toggle(p); ui_toast(lib_is_fav(p) ? "Added to favorites" : "Removed from favorites"); break;
     case MI_FORGET: forget_recent(p); break;
     case MI_REVEAL: if (U.reveal) U.reveal(p); break;
@@ -349,6 +416,8 @@ static void menu_results(void) {
     case MI_COPY_PATH: ui_clipboard_set(p); ui_toast("Path copied"); break;
     default: break;
   }
+  r = ui_menu_result(ID_GROUP);
+  if (r >= GM_PLAY) group_action(r);
   r = ui_menu_result(ID_ADD);
   if (r == MI_ADD_HINT && U.hint[0]) {
     lib_folder_set(U.hint, true);
@@ -503,6 +572,7 @@ static void group_row(FmRect row, u32 id, int gi) {
   float cs = DP(16);
   icon_draw(IC_CHEVRON_RIGHT, FM_RECT(row.x + row.w - DP(26), row.y + (rh - cs) * 0.5f, cs, cs), T.text3);
   if (f & UI_CLICK) enter_group(gi);
+  else if ((f & UI_RCLICK) || (f & UI_LONG)) open_group_menu(gi, ui.mx, ui.my);
 }
 
 static void folder_row(FmRect row, u32 id, int i) {
@@ -592,6 +662,7 @@ static void album_tile(FmRect t, u32 id, int gi) {
   else fm_strlcpy(sub, c, sizeof sub);
   font_draw_ellipsis(FONT_REGULAR, fss, art.x + DP(2), y + font_line_h(fs), sub, art.w - DP(4), T.text3);
   if (f & UI_CLICK) enter_group(gi);
+  else if ((f & UI_RCLICK) || (f & UI_LONG)) open_group_menu(gi, ui.mx, ui.my);
 }
 
 /* ---- lists ------------------------------------------------------------------------ */
@@ -809,6 +880,10 @@ static void draw_body(FmRect r) {
   gfx_rrect(r, rad, T.surface);
   if (T.panel_border.a) gfx_rrect_line(r, rad, DP(T.panel_border_w), T.panel_border);
   else gfx_rrect_line(r, rad, DP(1), T.border);
+  if (U.sec == LIB_SEC_PLAYLISTS) {
+    qui_playlists(r);
+    return;
+  }
   build_rows();
   FmRect body = r;
   draw_header(&body);
@@ -939,6 +1014,7 @@ static void draw_chips(FmRect r) {
 
 static void go_back(void) {
   if (U.search_open) { U.search_open = false; U.filter[0] = 0; ui_focus(0); return; }
+  if (U.sec == LIB_SEC_PLAYLISTS && qui_playlists_back()) return;
   if (U.in_group) { U.in_group = false; return; }
   lib_ui_close();
 }
@@ -998,7 +1074,8 @@ static void draw_top(FmRect r, bool narrow) {
 void lib_ui_set_reveal(void (*fn)(const char *path)) { U.reveal = fn; }
 
 int lib_ui_section(const char *name) {
-  static const char *const kNames[] = { "songs", "artists", "albums", "videos", "favorites", "recent", "folders" };
+  static const char *const kNames[] = { "songs", "artists", "albums", "videos", "favorites", "recent", "playlists",
+                                       "folders" };
   if (!name) return -1;
   for (int i = 0; i < LIB_SEC_COUNT; i++)
     if (fm_stricmp(name, kNames[i]) == 0 || fm_stricmp(name, kSec[i].label) == 0) return i;
@@ -1011,6 +1088,7 @@ bool lib_ui_is_open(void) { return U.open; }
 void lib_ui_open(int section, const char *hint_dir) {
   ID_MENU = ui_id("lib.menu");
   ID_ADD = ui_id("lib.addmenu");
+  ID_GROUP = ui_id("lib.groupmenu");
   if (section >= 0 && section < LIB_SEC_COUNT) { U.sec = section; U.in_group = false; }
   fm_strlcpy(U.hint, hint_dir ? hint_dir : "", sizeof U.hint);
   U.open = true;

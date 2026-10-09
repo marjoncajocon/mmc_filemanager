@@ -199,15 +199,15 @@ static const char *kFreesound =
 /* ---- offline: registry and helpers ------------------------------------------------- */
 
 static void at_registry(void) {
-  static const char *const kKeys[] = { "radio", "audius", "archive", "podcasts", "jamendo", "freesound" };
-  TEST_CHECK(asrc_count() == 6);
-  for (int i = 0; i < asrc_count() && i < 6; i++) {
+  static const char *const kKeys[] = { "radio", "youtube", "audius", "archive", "podcasts", "jamendo", "freesound" };
+  TEST_CHECK(asrc_count() == FM_COUNT(kKeys));
+  for (int i = 0; i < asrc_count() && i < FM_COUNT(kKeys); i++) {
     const FmAsrc *s = asrc_at(i);
     TEST_CHECK(s && !strcmp(s->key, kKeys[i]));
     TEST_CHECK(s && s->name && s->about && s->search && (s->flags & ASRC_SEARCH));
     TEST_CHECK(s && asrc_find(s->key) == s);
     TEST_CHECK(s && strlen(s->key) < sizeof ((FmAsrcItem *)0)->source);
-    TEST_CHECK(s && ((s->flags & ASRC_NEEDKEY) != 0) == (i >= 4));
+    TEST_CHECK(s && ((s->flags & ASRC_NEEDKEY) != 0) == (i >= 5));   /* jamendo, freesound */
     TEST_CHECK(s && ((s->flags & ASRC_LIVE) != 0) == (i == 0));
     TEST_CHECK(s && ((s->flags & ASRC_BROWSE) != 0) == (s->categories != NULL && s->browse != NULL));
     if (s && s->categories) {
@@ -222,7 +222,7 @@ static void at_registry(void) {
   }
   TEST_CHECK(asrc_find("archive")->children && asrc_find("podcasts")->children && asrc_find("audius")->children);
   TEST_CHECK(!asrc_find("radio")->children && asrc_find("radio")->resolve);
-  TEST_CHECK(asrc_at(-1) == NULL && asrc_at(6) == NULL && asrc_find("nope") == NULL && asrc_find(NULL) == NULL);
+  TEST_CHECK(asrc_at(-1) == NULL && asrc_at(FM_COUNT(kKeys)) == NULL && asrc_find("nope") == NULL && asrc_find(NULL) == NULL);
   FmAsrcConf c;
   asrc_conf_snapshot(&c);
   TEST_CHECK(strstr(c.cache_dir, "online-audio") != NULL && c.download_dir[0]);
@@ -1309,6 +1309,58 @@ static void at_online(const char *tmp) {
   }
 }
 
+
+/* MMCFM_ASRC_YT=<query>: YouTube as music, the way the player does it:
+** search, resolve the first result, open the sound with aud_open_msg (the
+** music decoder; Opus WebM goes to the video decoders), decode, seek. */
+static void at_youtube_live(void) {
+  const char *q = getenv("MMCFM_ASRC_YT");
+  if (!q || !*q) return;
+  FmAsrcConf c;
+  asrc_conf_snapshot(&c);
+  FmAsrcPage pg;
+  memset(&pg, 0, sizeof pg);
+  u64 t0 = plat_now_ms();
+  FmErr e = g_asrc_youtube.search(&c, q, NULL, &pg, NULL);
+  printf("  yt audio search: %s, %d results in %d ms %s\n", fm_err_str(e), pg.count, (int)(plat_now_ms() - t0), pg.error);
+  TEST_CHECK(e == FM_OK && pg.count > 3 && pg.items[0].art[0] && pg.items[0].kind == AITEM_TRACK);
+  if (pg.count) {
+    FmAsrcItem it = pg.items[0];
+    printf("  yt audio item: \"%.60s\" by %.40s, %.0f s, cover %s\n", it.title, it.artist, it.duration,
+           it.art[0] ? "yes" : "no");
+    FmAsrcStream st;
+    char err[256] = "";
+    t0 = plat_now_ms();
+    e = asrc_stream(&c, &it, &st, err, sizeof err, NULL);
+    printf("  yt audio resolve: %s in %d ms, codec %s %s\n", fm_err_str(e), (int)(plat_now_ms() - t0), st.codec, err);
+    TEST_CHECK(e == FM_OK && st.url[0]);
+    if (e == FM_OK) {
+      FmErr ae;
+      char msg[160] = "";
+      t0 = plat_now_ms();
+      FmAudio *a = aud_open_msg(st.url, st.headers[0] ? st.headers : NULL, &ae, msg, sizeof msg);
+      u64 t1 = plat_now_ms();
+      TEST_CHECK(a != NULL);
+      if (a) {
+        static float buf[48000 * 2];
+        int got = 0, n;
+        while (got < aud_rate(a) * 3 && (n = aud_read(a, buf, 4096)) > 0) got += n;
+        u64 t2 = plat_now_ms();
+        bool sk = aud_length(a) > 0 && aud_seek(a, aud_length(a) / 2);
+        int after = sk ? aud_read(a, buf, 4096) : 0;
+        printf("  yt audio play: %s %d Hz %d ch, %.0f s long, open %d ms, 3 s decoded in %d ms, seek %s (%d ms)\n",
+               aud_codec(a), aud_rate(a), aud_channels(a), aud_rate(a) ? (double)aud_length(a) / aud_rate(a) : 0,
+               (int)(t1 - t0), (int)(t2 - t1), sk && after > 0 ? "ok" : "FAIL", (int)(plat_now_ms() - t2));
+        TEST_CHECK(got >= aud_rate(a) * 3 && sk && after > 0);
+        aud_close(a);
+      } else {
+        printf("  yt audio open failed: %s %s\n", fm_err_str(ae), msg);
+      }
+    }
+  }
+  asrc_page_free(&pg);
+}
+
 int test_asrc(const char *tmp) {
   int before = g_test_fail;
   at_registry();
@@ -1323,5 +1375,6 @@ int test_asrc(const char *tmp) {
   at_garbage();
   at_streams(tmp);
   at_online(tmp);
+  at_youtube_live();
   return g_test_fail - before;
 }

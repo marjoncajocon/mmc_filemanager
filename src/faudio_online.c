@@ -18,7 +18,8 @@
 **     Subscriptions. Each keeps its own list and scroll position, so going
 **     into a podcast and back lands where the user was.
 **   - Playing goes through the music player (aplay_list ->
-**     audio_play_entries): the view never holds audio state of its own; it
+**     audio_play_entries; the item menu's Play next / Add to queue ->
+**     audio_queue_add): the view never holds audio state of its own; it
 **     asks the player once per frame what is playing to mark that row, and
 **     the mini player sits at the bottom like on the other screens.
 **   - Nothing runs while idle: searches, categories, episodes and
@@ -32,7 +33,7 @@
 
 enum { AP_SOURCE, AP_DETAIL, AP_FAV, AP_RECENT, AP_SUBS };
 enum { E_NONE, E_NOKEY, E_QUOTA, E_OFFLINE, E_EMPTY, E_OTHER };
-enum { MI_PLAY = 1, MI_OPEN, MI_FAV, MI_SUB, MI_DOWNLOAD, MI_BROWSER, MI_COPY, MI_REMOVE };
+enum { MI_PLAY = 1, MI_OPEN, MI_FAV, MI_SUB, MI_DOWNLOAD, MI_BROWSER, MI_COPY, MI_REMOVE, MI_QNEXT, MI_QADD, MI_PLADD };
 
 static FmAonlineHooks g_hooks;
 
@@ -474,11 +475,18 @@ static void open_menu(const FmAsrcItem *it, float x, float y) {
   g_menu_item = *it;
   g_menu_live = true;
   bool cont = aitem_container(it);
-  FmMenuItem m[10];
+  FmMenuItem m[14];
   int n = 0;
   memset(m, 0, sizeof m);
   if (cont) { m[n].id = MI_OPEN; m[n].icon = IC_LIST; m[n++].label = it->kind == AITEM_PODCAST ? "Episodes" : "Tracks"; }
   else { m[n].id = MI_PLAY; m[n].icon = IC_PLAY; m[n++].label = "Play"; }
+  if (aitem_playable(it)) {
+    /* the music player's queue and playlists keep it (re-resolved when it plays) */
+    m[n].id = MI_QNEXT; m[n].icon = IC_PLAY_NEXT; m[n++].label = "Play next";
+    m[n].id = MI_QADD; m[n].icon = IC_QUEUE; m[n++].label = "Add to queue";
+    m[n].id = MI_PLADD; m[n].icon = IC_PLAYLIST_ADD; m[n++].label = "Add to playlist\xE2\x80\xA6";
+    m[n++].flags = UI_MI_SEP;
+  }
   if (it->kind == AITEM_PODCAST) {
     bool sub = alib_has(ALIB_SUBS, it);
     m[n].id = MI_SUB; m[n].icon = IC_RSS; m[n++].label = sub ? "Unsubscribe" : "Subscribe";
@@ -533,6 +541,9 @@ static void menu_results(void) {
       break;
     }
     case MI_REMOVE: alib_remove(ALIB_RECENT, it); break;
+    case MI_QNEXT: aplay_queue(it, true); break;
+    case MI_QADD: aplay_queue(it, false); break;
+    case MI_PLADD: aplay_pick_playlist(it, ui.mx, ui.my); break;
     default: break;
   }
   ui_redraw();

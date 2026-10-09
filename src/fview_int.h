@@ -76,6 +76,9 @@ void view_info_dialog(u32 id, const char *title, const char *const *keys, const 
 
 /* Pauses background music (a video is about to play). */
 void audio_pause(void);
+/* Self test: loads list parked (no device, no thread) at cur / pos, so the
+** queue functions run on the real player state; n = 0 unloads it. */
+void audio_queue_test(const FmAudioEntry *list, int n, int cur, double pos);
 
 /* ---- text line index (fview_txt.c) ------------------------------------------------ */
 
