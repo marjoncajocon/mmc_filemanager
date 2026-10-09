@@ -1336,6 +1336,7 @@ static void vt_innertube_live(void) {
   for (int i = 0; i < st->nq; i++)
     printf("    %s %-10s %-6s %5d kbps%s%s%s\n", i == st->cur ? ">" : " ", st->q[i].label, st->q[i].codec, st->q[i].kbps,
            st->q[i].playable ? " stream" : "", st->q[i].cache_only ? " cache" : "", st->q[i].needs_ffmpeg ? " ffmpeg" : "");
+  if (e == FM_OK && getenv("MMCFM_YT_URLS")) printf("  yt video %s\n  yt audio %s\n", st->video, st->audio);
   if (e == FM_OK) {
     t0 = plat_now_ms();
     FmErr ve;
@@ -1347,14 +1348,25 @@ static void vt_innertube_live(void) {
       FmVidPcm pc;
       int ev, nv = 0, na = 0, guard = 0;
       double vt0 = -1, vt1 = -1, at0 = -1, at1 = -1;      /* first and last times: is the pair in step */
+      int arate = 0, ach = 0, amismatch = 0;               /* what the sound decodes to vs what vid_info says */
+      float apeak = 0;
       while ((nv < 60 || na < 60) && guard++ < 5000 && (ev = vid_decode(v, &vf, &pc)) > 0) {
         if (ev == VID_EV_VIDEO) { if (!nv++) vt0 = vf.t; vt1 = vf.t; }
-        else if (ev == VID_EV_AUDIO) { if (!na++) at0 = pc.t; at1 = pc.t; }
+        else if (ev == VID_EV_AUDIO) {
+          if (!na++) at0 = pc.t;
+          at1 = pc.t;
+          arate = pc.rate;
+          ach = pc.channels;
+          if (pc.rate != vid_info(v)->rate || pc.channels != vid_info(v)->channels) amismatch++;
+          for (int k = 0; k < pc.frames * pc.channels; k++) apeak = FM_MAX(apeak, fabsf(pc.pcm[k]));
+        }
       }
       u64 t2 = plat_now_ms();
       printf("  yt play: %s %dx%d, open %d ms, 60 frames + 60 sound blocks %d ms (v%d a%d)\n", vid_info(v)->backend,
              vid_info(v)->w, vid_info(v)->h, (int)(t1 - t0), (int)(t2 - t1), nv, na);
       printf("  yt times: live %d, picture %.2f..%.2f s, sound %.2f..%.2f s\n", st->live, vt0, vt1, at0, at1);
+      printf("  yt sound: info %d Hz %d ch, decoded %d Hz %d ch, %d blocks differ, peak %.3f\n", vid_info(v)->rate,
+             vid_info(v)->channels, arate, ach, amismatch, apeak);
       TEST_CHECK(nv >= 60 && na >= 60);
       vid_close(v);
     }

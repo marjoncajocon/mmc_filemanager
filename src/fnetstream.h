@@ -43,6 +43,11 @@ const char *ns_content_type(const FmNetStream *s);
 ** open starts at a segment boundary at or before it); the playlist's length
 ** in seconds (0 for live). Fixed once open. */
 bool   ns_is_hls(const FmNetStream *s);
+/* Live HLS packed audio (raw AAC/MP3 segments, YouTube live's sound): the
+** ID3 tags the segments start with are cut out of the stream; this is the
+** first one's time, the broadcast clock (s) of the first sample read, or 0.
+** Known once the first bytes arrived. */
+double ns_hls_audio_time(FmNetStream *s);
 /* The read-ahead buffer grows to 4 MB while the network is ahead; a reader
 ** that only needs a little (a second cursor into the same file) caps it. */
 void   ns_limit_ring(FmNetStream *s, size_t max);

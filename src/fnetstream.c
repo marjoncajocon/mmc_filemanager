@@ -83,6 +83,12 @@ typedef struct Hls {
   i64 got;                     /* bytes of the running segment produced so far */
   struct HlsJob *turn;         /* the request whose bytes go into the ring now */
   bool sniffed;
+  /* live packed audio (raw AAC/MP3 segments): each segment starts with an
+  ** ID3 tag holding its time. It is cut out of the stream, so every decoder
+  ** sees plain ADTS (Android's AAC reader stops at a tag mid-stream); the
+  ** first tag's time is kept for ns_hls_audio_time. */
+  i64 strip;                   /* raw bytes to cut at the running segment's start, -1 = not looked yet */
+  double audio_t;              /* the first tag's time (s), 0 = none */
   char *key_uri;               /* the AES-128 key in `key` (fetched once per URI) */
   u8 key[16];
 } Hls;
@@ -321,6 +327,29 @@ static void hls_sniff_type(FmNetStream *s, const u8 *p, size_t n) {
   h->sniffed = true;
 }
 
+/* Live packed audio: the length of the ID3 tag a segment starts with (0 =
+** none), noting the first one's time: the PRIV frame
+** "com.apple.streaming.transportStreamTimestamp", the 90 kHz MPEG-TS time
+** of the segment's first sample. */
+static i64 id3_cut(Hls *h, const u8 *p, size_t n) {
+  static const char kOwner[] = "com.apple.streaming.transportStreamTimestamp";
+  if (n < 10 || memcmp(p, "ID3", 3) != 0 || p[3] < 2 || p[3] > 4) return 0;
+  i64 len = 10 + ((i64)(p[6] & 0x7f) << 21 | (i64)(p[7] & 0x7f) << 14 | (i64)(p[8] & 0x7f) << 7 | (i64)(p[9] & 0x7f));
+  if (p[5] & 0x10) len += 10;                          /* a footer */
+  if (h->audio_t <= 0) {
+    size_t end = (size_t)FM_MIN((i64)n, len);
+    for (size_t i = 10; i + sizeof kOwner + 8 <= end; i++) {
+      if (memcmp(p + i, kOwner, sizeof kOwner) != 0) continue;   /* the owner and its 0 */
+      const u8 *q = p + i + sizeof kOwner;
+      u64 pts = 0;
+      for (int k = 0; k < 8; k++) pts = pts << 8 | q[k];
+      h->audio_t = (double)(pts & 0x1FFFFFFFFull) / 90000.0;
+      break;
+    }
+  }
+  return len;
+}
+
 /* Plain segment bytes of the job holding the turn into the stream (mx held). */
 static bool hls_put(void *u, const u8 *p, size_t n) {
   HlsJob *j = (HlsJob *)u;
@@ -339,8 +368,16 @@ static bool hls_put(void *u, const u8 *p, size_t n) {
     s->head_in = true;
     SDL_CondBroadcast(s->cv);
   }
+  if (h->strip < 0) h->strip = h->got == 0 && h->live && !j->init ? id3_cut(h, p, n) : 0;
+  i64 raw = h->got;                                    /* where p starts in the segment */
   j->seen += (i64)n;
   h->got += (i64)n;
+  if (raw < h->strip) {                                /* the segment's ID3 tag: not passed on */
+    size_t d = (size_t)FM_MIN((i64)n, h->strip - raw);
+    p += d;
+    n -= d;
+    if (!n) return true;
+  }
   h->wpos += (i64)n;
   if (s->discard > 0) {                                /* a seek target further on */
     size_t d = (size_t)FM_MIN((i64)n, s->discard);
@@ -600,6 +637,7 @@ static int hls_worker(void *u) {
     SDL_LockMutex(s->mx);                              /* cur's turn */
     h->turn = cur;
     h->got = 0;
+    h->strip = -1;
     h->seg_pos = h->wpos;
     if (!cur->init && !h->live && h->off[cur->item] < 0) h->off[cur->item] = h->wpos;
     SDL_CondBroadcast(s->cv);
@@ -658,6 +696,7 @@ static int hls_worker(void *u) {
 static void hls_locate(FmNetStream *s, i64 at) {
   Hls *h = s->hls;
   h->got = 0;
+  h->strip = -1;
   h->turn = NULL;
   if (h->live) {                                       /* only forward: from the running segment */
     h->wpos = h->seg_pos;
@@ -997,6 +1036,13 @@ void ns_limit_ring(FmNetStream *s, size_t max) {
   SDL_UnlockMutex(s->mx);
 }
 double ns_hls_start(const FmNetStream *s) { return s->hls ? s->hls->t0 : 0; }
+double ns_hls_audio_time(FmNetStream *s) {
+  if (!s->hls) return 0;
+  SDL_LockMutex(s->mx);
+  double t = s->hls->audio_t;
+  SDL_UnlockMutex(s->mx);
+  return t;
+}
 double ns_hls_duration(const FmNetStream *s) { return s->hls && !s->hls->live ? s->hls->pl.total : 0; }
 
 void ns_station(const FmNetStream *s, char *out, size_t cap) {

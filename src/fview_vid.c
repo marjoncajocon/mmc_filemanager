@@ -839,6 +839,9 @@ static void present_frame(void) {
       fm_log("stream: first frame %s %dx%d at %.1f s: %d ms after open, %d ms after Play (%s)",
              st->cur >= 0 ? st->q[st->cur].label : "", f->w, f->h, f->t, (int)(now - g_on->t_open),
              (int)(now - g_on->t_click), is_url(V.path) ? "stream" : "cache file");
+      fm_log("stream: live %d, sound %s (%d Hz %d ch), pair %d, device %u at %d Hz", (int)st->live,
+             V.info.has_audio ? "yes" : "no", V.info.rate, V.info.channels, (int)(V.audio[0] != 0), (unsigned)V.dev,
+             V.dev_rate);
       stream_test_log("ttff %s %d %d %.2f", st->cur >= 0 ? st->q[st->cur].label : "?", (int)(now - g_on->t_open),
                       (int)(now - g_on->t_click), f->t);
     }

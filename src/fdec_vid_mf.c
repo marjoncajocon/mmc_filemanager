@@ -423,21 +423,9 @@ static void bs_quiesce(NsBS *b) {
 ** clock (YouTube live: hours); this time puts the sound on the same clock.
 ** Seconds, 0 = none. */
 static double id3_ts_time(FmNetStream *ns) {
-  static const char kOwner[] = "com.apple.streaming.transportStreamTimestamp";
-  u8 h[2048];
-  size_t n = ns_peek(ns, h, 10);
-  if (n < 10 || memcmp(h, "ID3", 3) != 0) return 0;
-  size_t len = 10 + ((size_t)(h[6] & 0x7f) << 21 | (size_t)(h[7] & 0x7f) << 14 | (size_t)(h[8] & 0x7f) << 7 |
-                     (size_t)(h[9] & 0x7f));
-  n = ns_peek(ns, h, FM_MIN(len, sizeof h));
-  for (size_t i = 10; i + sizeof kOwner + 8 <= n; i++) {
-    if (memcmp(h + i, kOwner, sizeof kOwner) != 0) continue;  /* the owner and its 0 */
-    const u8 *p = h + i + sizeof kOwner;
-    u64 pts = 0;
-    for (int k = 0; k < 8; k++) pts = pts << 8 | p[k];
-    return (double)(pts & 0x1FFFFFFFFull) / 90000.0;
-  }
-  return 0;
+  u8 c;
+  if (ns_peek(ns, &c, 1) < 1) return 0;               /* the first segment has arrived */
+  return ns_hls_audio_time(ns);                        /* fnetstream cut the tag out, keeping its time */
 }
 
 /* A byte stream for an http(s) URL, or NULL (err says why). */

@@ -94,6 +94,19 @@ public class FmActivity extends SDLActivity {
         return args == null || args.trim().isEmpty() ? new String[0] : args.trim().split("\\s+");
     }
 
+    /* The app was exited (or closed from the recents): the playback service
+    ** and its notification go too, and so does the process. SDL's native side
+    ** has ended by now; the service alone would keep this process alive, and
+    ** a new start in it would run main() again over C state that was already
+    ** shut down (the app closed at once). Rotation and the like do not come
+    ** here (configChanges in the manifest), so this is always the end. */
+    @Override
+    protected void onDestroy() {
+        FmMedia.shutdown(this);
+        super.onDestroy();
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);

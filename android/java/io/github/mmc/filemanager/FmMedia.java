@@ -111,6 +111,21 @@ public class FmMedia extends Service {
         });
     }
 
+    /* FmActivity.onDestroy (main thread): everything goes now, not posted,
+    ** because the process ends right after. */
+    static void shutdown(Context c) {
+        sActive = false;
+        if (sService != null) {
+            if (Build.VERSION.SDK_INT >= 24) sService.stopForeground(STOP_FOREGROUND_REMOVE);
+            else sService.stopForeground(true);
+            sService.stopSelf();
+        }
+        NotificationManager nm = (NotificationManager) c.getSystemService(NOTIFICATION_SERVICE);
+        if (nm != null) nm.cancel(NOTE_ID);
+        if (sApp == null) sApp = c.getApplicationContext();
+        release();
+    }
+
     /* Android 13+: notifications need a grant; asked once per run. Without
     ** it playback still goes on, only the notification is not shown. */
     private static void askNotifications(Activity a) {
