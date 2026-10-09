@@ -66,6 +66,8 @@ void video_bg_stop(void);              /* music is starting: the background vide
 bool video_pip_active(void);           /* the window is the small picture-in-picture one */
 void audio_mini_draw(FmRect r);        /* compact bar: title, play/pause, next, close */
 void audio_stop(void);
+void audio_toggle_play(void);          /* play/pause what is loaded (the tray menu) */
+void audio_next_track(void);
 
 /* ---- playing URLs with metadata (online audio) -------------------------- */
 

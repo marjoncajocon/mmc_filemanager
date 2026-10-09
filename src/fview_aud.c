@@ -1106,6 +1106,16 @@ static bool buffering_locked(void) {
   return P.starved && !P.dec_done && SDL_GetTicks64() - P.starved_at >= STARVE_SHOW_MS;
 }
 
+void audio_toggle_play(void) {
+  if (!P.active) return;
+  int st = audio_state(NULL, 0);
+  set_paused(st == AUDIO_PLAYING || st == AUDIO_BUFFERING);
+}
+
+void audio_next_track(void) {
+  if (P.active) skip(1);
+}
+
 int audio_state(char *ref, size_t cap) {
   if (ref && cap) ref[0] = 0;
   if (!P.active || !g_mx) return AUDIO_IDLE;

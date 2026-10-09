@@ -44,6 +44,7 @@ void conf_defaults(void) {
   conf.view[0] = conf.view[1] = VIEW_LIST;
   conf.active = 0;
   conf.win_x = conf.win_y = -1;
+  conf.tray = conf.tray_min = true;   /* the user asked to hide it from the taskbar */
   conf.win_w = conf.win_h = 0;
   conf.volume = 0.8f;
   viz_preset(&conf.viz, VIZ_PILLS);
@@ -140,6 +141,9 @@ static void set_key(const char *k, const char *raw) {
   if (!strcmp(k, "theme")) conf.theme = to_int(v, 0, THEME_COUNT - 1, 0);
   else if (!strcmp(k, "dark")) conf.dark = to_bool(v);
   else if (!strcmp(k, "system_title")) conf.system_title = to_bool(v);
+  else if (!strcmp(k, "tray")) conf.tray = to_bool(v);
+  else if (!strcmp(k, "tray_min")) conf.tray_min = to_bool(v);
+  else if (!strcmp(k, "tray_close")) conf.tray_close = to_bool(v);
   else if (!strcmp(k, "online_source")) fm_strlcpy(conf.online_source, v, sizeof conf.online_source);
   else if (!strcmp(k, "yt_api_key")) fm_strlcpy(conf.yt_api_key, v, sizeof conf.yt_api_key);
   else if (!strcmp(k, "ytdlp_path")) fm_strlcpy(conf.ytdlp_path, v, sizeof conf.ytdlp_path);
@@ -280,6 +284,9 @@ void conf_save(void) {
   put_i(f, "theme", conf.theme);
   put_i(f, "dark", conf.dark);
   put_i(f, "system_title", conf.system_title);
+  put_i(f, "tray", conf.tray);
+  put_i(f, "tray_min", conf.tray_min);
+  put_i(f, "tray_close", conf.tray_close);
   put(f, "online_source", conf.online_source);
   put(f, "yt_api_key", conf.yt_api_key);
   put(f, "ytdlp_path", conf.ytdlp_path);

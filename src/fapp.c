@@ -18,6 +18,7 @@
 #include "fops.h"
 #include "fconf.h"
 #include "fview.h"
+#include "ftray.h"
 #include "fthumb.h"
 #include "ftitle.h"
 #include "farc.h"
@@ -1988,7 +1989,7 @@ static void dlg_settings(void) {
   float seg_h = DP(ui.touch_mode ? 40 : 34);
   float grid_h = theme_grid_h(c.w - DP(6));
   float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 3 + rh * 5 +
-                  DP(50) + DP(90);
+                  DP(50) + DP(90) + (tray_available() ? rh * (conf.tray ? 3 : 1) : 0);   /* tray */
   float online_h = online_settings_h(c.w - DP(6));   /* online: its section */
   static bool online_jump;
   if (online_settings_focus()) online_jump = true;
@@ -2093,6 +2094,17 @@ static void dlg_settings(void) {
   if (ui_switch(ui_idn(base, 310), rect_cut_top(&r, rh), "System title bar", &conf.system_title)) {
     title_apply();
     conf_dirty();
+  }
+  if (tray_available()) {
+    if (ui_switch(ui_idn(base, 311), rect_cut_top(&r, rh), "Icon in the system tray", &conf.tray)) {
+      tray_apply();
+      conf_dirty();
+    }
+    if (conf.tray) {
+      if (ui_switch(ui_idn(base, 312), rect_cut_top(&r, rh), "Minimize to the tray", &conf.tray_min)) conf_dirty();
+      if (ui_switch(ui_idn(base, 313), rect_cut_top(&r, rh), "Close button hides to the tray", &conf.tray_close))
+        conf_dirty();
+    }
   }
   rect_cut_top(&r, DP(10));
 #endif
@@ -2820,6 +2832,8 @@ static void default_path(int idx, char *out, size_t cap) {
 }
 
 static void restore_window(void) {
+  tray_set_window_icon();              /* the logo on the taskbar and in Alt+Tab */
+  tray_apply();
 #ifndef FM_MOBILE
   if (conf.win_w >= 400 && conf.win_h >= 300) SDL_SetWindowSize(app.win, conf.win_w, conf.win_h);
   if (conf.win_x != -1 || conf.win_y != -1) {
@@ -3068,6 +3082,7 @@ void app_shutdown(void) {
   audio_queue_save_now();              /* the queue, the track and where it was */
   app_close_viewer();
   video_bg_stop();                     /* a video playing in the background */
+  tray_shutdown();
   ops_shutdown();
   cloud_tasks_shutdown();              /* cloud: stop listings and sign-ins */
   if (!g_shot) {
@@ -3111,6 +3126,9 @@ void app_event(const SDL_Event *e) {
   switch (e->type) {
     case SDL_WINDOWEVENT:
       switch (e->window.event) {
+        case SDL_WINDOWEVENT_MINIMIZED:
+          tray_take_minimize();          /* minimize to the tray when that is on */
+          break;
         case SDL_WINDOWEVENT_MOVED:
         case SDL_WINDOWEVENT_SIZE_CHANGED:
         case SDL_WINDOWEVENT_MAXIMIZED:

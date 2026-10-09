@@ -10,6 +10,7 @@
 **     drawing in the background and recreate textures on return.
 */
 #include "fapp.h"
+#include "ftray.h"
 #include "fsdl.h"
 #include "ftest.h"
 #include "fperf.h"
@@ -136,6 +137,7 @@ static void frame(void) {
     if (e.type == SDL_MOUSEBUTTONDOWN) pressed_now = true;
     switch (e.type) {
       case SDL_QUIT:
+        if (tray_take_close()) break;    /* the close button hides to the tray when that is on */
         if (app_can_quit()) app.quit = true;
         break;
       case SDL_APP_TERMINATING:
@@ -161,6 +163,7 @@ static void frame(void) {
     app_event(&e);
     got = SDL_PollEvent(&e) != 0;
   }
+  tray_pump();                           /* the tray icon's clicks, also while hidden */
   if (app.background) return;            /* nothing is drawn while hidden */
   if (!ui_needs_frame()) return;
   int w, h;

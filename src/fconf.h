@@ -66,6 +66,9 @@ typedef struct FmConf {
   int win_x, win_y, win_w, win_h;
   bool win_max;
   bool system_title;          /* OS window frame instead of the themed title bar */
+  bool tray;                  /* icon in the notification area (Windows, ftray.c) */
+  bool tray_min;              /* minimize hides the window to that icon */
+  bool tray_close;            /* the close button too (Quit is in the icon's menu) */
   /* online videos (fvsrc*.c, fonline*.c) */
   char online_source[16];     /* last used source key: "youtube", "archive", ... */
   char yt_api_key[128];       /* YouTube Data API v3 key, "" = none */
