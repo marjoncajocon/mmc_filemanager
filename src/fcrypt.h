@@ -57,6 +57,15 @@ void sha512_init(FmSha512 *s);
 void sha512_update(FmSha512 *s, const void *data, size_t n);
 void sha512_final(FmSha512 *s, u8 out[64]);
 
+/* MD5 (RFC 1321): for checksums services ask for (Content-MD5, Bilibili's
+** request signature), never for security */
+typedef struct FmMd5 { u32 h[4]; u64 len; u8 buf[64]; int n; } FmMd5;
+void md5_init(FmMd5 *m);
+void md5_update(FmMd5 *m, const void *data, size_t n);
+void md5_final(FmMd5 *m, u8 out[16]);
+/* one call, as 32 lowercase hex digits + NUL */
+void md5_hex(const void *data, size_t n, char out[33]);
+
 typedef struct FmHmacSha1 { FmSha1 inner, outer; } FmHmacSha1;
 void hmac_sha1_init(FmHmacSha1 *h, const u8 *key, size_t key_len);
 void hmac_sha1_update(FmHmacSha1 *h, const void *data, size_t n);

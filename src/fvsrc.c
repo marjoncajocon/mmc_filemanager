@@ -39,7 +39,7 @@ WINBASEAPI int WINAPI GetLocaleInfoA(DWORD, DWORD, LPSTR, int);   /* missing fro
 /* ---- registry ----------------------------------------------------------------- */
 
 static const FmVsrc *const kSources[] = {
-  &g_vsrc_youtube, &g_vsrc_archive, &g_vsrc_peertube, &g_vsrc_dailymotion, &g_vsrc_web,
+  &g_vsrc_youtube, &g_vsrc_archive, &g_vsrc_peertube, &g_vsrc_dailymotion, &g_vsrc_bilibili, &g_vsrc_web,
 };
 
 int vsrc_count(void) { return FM_COUNT(kSources); }

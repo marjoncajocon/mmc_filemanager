@@ -26,6 +26,17 @@ extern const FmVsrc g_vsrc_youtube;
 extern const FmVsrc g_vsrc_archive;
 extern const FmVsrc g_vsrc_peertube;
 extern const FmVsrc g_vsrc_dailymotion;
+extern const FmVsrc g_vsrc_bilibili;
+
+/* ---- Bilibili (fvsrc_bilibili.c), exposed for the self test ---------------- */
+void  vsrc_bilibili_mixin(const char *img_url, const char *sub_url, char out[33]);
+typedef struct BlParam { const char *k; char v[256]; } BlParam;
+/* "k=v&..." sorted, wts added, values cleaned and encoded, then &w_rid= */
+void  vsrc_bilibili_sign(BlParam *p, int n, i64 wts, const char *key, char *out, size_t cap);
+bool  vsrc_bilibili_id(const char *s, char *out, size_t cap);
+FmErr vsrc_bilibili_parse_search(const char *json, size_t len, int page, FmVsrcPage *out);
+FmErr vsrc_bilibili_resolve(const FmVsrcConf *c, const char *bv, FmVsrcStream *out, char *err, size_t errcap,
+                            volatile int *cancel);
 extern const FmVsrc g_vsrc_web;
 
 /* ---- helpers (fvsrc.c) ------------------------------------------------------ */

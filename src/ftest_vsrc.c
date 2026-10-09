@@ -12,6 +12,7 @@
 #include "ftest.h"
 #include "fvsrc.h"
 #include "fvsrc_int.h"
+#include "fcrypt.h"
 #include "fplat.h"
 #include "fdec_vid.h"
 #include "fproc.h"
@@ -153,16 +154,16 @@ static const char *kYtdlpSingle =
 /* ---- offline ---------------------------------------------------------------------- */
 
 static void vt_registry(void) {
-  static const char *const kKeys[] = { "youtube", "archive", "peertube", "dailymotion", "web" };
-  TEST_CHECK(vsrc_count() == 5);
-  for (int i = 0; i < vsrc_count() && i < 5; i++) {
+  static const char *const kKeys[] = { "youtube", "archive", "peertube", "dailymotion", "bilibili", "web" };
+  TEST_CHECK(vsrc_count() == FM_COUNT(kKeys));
+  for (int i = 0; i < vsrc_count() && i < FM_COUNT(kKeys); i++) {
     const FmVsrc *s = vsrc_at(i);
     TEST_CHECK(s && !strcmp(s->key, kKeys[i]));
     TEST_CHECK(s && s->name && s->about && s->search && s->resolve);
     TEST_CHECK(s && vsrc_find(s->key) == s);
     TEST_CHECK(s && ((s->flags & VSRC_DIRECT) != 0) != ((s->flags & VSRC_YTDLP) != 0));
   }
-  TEST_CHECK(vsrc_at(-1) == NULL && vsrc_at(5) == NULL);
+  TEST_CHECK(vsrc_at(-1) == NULL && vsrc_at(FM_COUNT(kKeys)) == NULL);
   TEST_CHECK(vsrc_find("nope") == NULL && vsrc_find(NULL) == NULL);
   TEST_CHECK(vsrc_find("web")->flags & VSRC_URL);
 }
@@ -1293,6 +1294,121 @@ static void vt_innertube_live(void) {
   fm_free(st);
 }
 
+
+/* ---- Bilibili ------------------------------------------------------------------------ */
+
+static const char *kBlSearch =
+  "{\"code\":0,\"data\":{\"page\":1,\"numPages\":50,\"result\":["
+  "{\"bvid\":\"BV1Gse26GEqw\",\"title\":\"<em class=\\\"keyword\\\">Cat</em> &amp; dog\",\"author\":\"Up&#39;s\","
+  "\"pic\":\"//i0.hdslb.com/bfs/archive/abc.jpg\",\"duration\":\"14:54\",\"play\":12345,\"pubdate\":1700000000},"
+  "{\"bvid\":\"bad\",\"title\":\"x\"},"
+  "{\"bvid\":\"BV1xx411c7mD\",\"title\":\"two\",\"duration\":\"1:02:03\",\"play\":0}]}}";
+
+static void vt_bilibili(void) {
+  char hex[33];
+  md5_hex("", 0, hex);
+  TEST_CHECK(!strcmp(hex, "d41d8cd98f00b204e9800998ecf8427e"));
+  md5_hex("The quick brown fox jumps over the lazy dog", 43, hex);
+  TEST_CHECK(!strcmp(hex, "9e107d9d372bb6826bd81d3542a419d6"));
+  static char big[1000];
+  memset(big, 'a', sizeof big);
+  md5_hex(big, sizeof big, hex);                   /* crosses blocks */
+  TEST_CHECK(!strcmp(hex, "cabe45dcc9ae5b66ba86600cca6b8ba8"));
+
+  char key[33];
+  vsrc_bilibili_mixin("https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                      "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png", key);
+  TEST_CHECK(!strcmp(key, "ea1db124af3c7062474693fa704f4ff8"));
+  BlParam p[3];
+  memset(p, 0, sizeof p);
+  p[0].k = "foo"; fm_strlcpy(p[0].v, "114", sizeof p[0].v);
+  p[1].k = "bar"; fm_strlcpy(p[1].v, "514", sizeof p[1].v);
+  p[2].k = "zab"; fm_strlcpy(p[2].v, "1919810", sizeof p[2].v);
+  char q[512];
+  vsrc_bilibili_sign(p, 3, 1702204169, key, q, sizeof q);
+  TEST_CHECK(!strcmp(q, "bar=514&foo=114&wts=1702204169&zab=1919810&w_rid=8f6f2b5b3d485fe1886cec6a0be8c5d4"));
+  memset(p, 0, sizeof p);
+  p[0].k = "keyword"; fm_strlcpy(p[0].v, "\xE7\x8C\xAB cat (1)!", sizeof p[0].v);
+  p[1].k = "page"; fm_strlcpy(p[1].v, "2", sizeof p[1].v);
+  vsrc_bilibili_sign(p, 2, 1702204169, key, q, sizeof q);
+  TEST_CHECK(!strcmp(q, "keyword=%E7%8C%AB%20cat%201&page=2&wts=1702204169&w_rid=4d5a93a3320d825ad4d742fc34c57221"));
+
+  char bv[16];
+  TEST_CHECK(vsrc_bilibili_id("https://www.bilibili.com/video/BV1Gse26GEqw/?spm_id_from=333", bv, sizeof bv) &&
+             !strcmp(bv, "BV1Gse26GEqw"));
+  TEST_CHECK(vsrc_bilibili_id("BV1Gse26GEqw", bv, sizeof bv));
+  TEST_CHECK(!vsrc_bilibili_id("https://example.com/video/BV1Gse26GEqw", bv, sizeof bv));
+  TEST_CHECK(!vsrc_bilibili_id("BV1short", bv, sizeof bv));
+
+  FmVsrcPage pg;
+  memset(&pg, 0, sizeof pg);
+  TEST_CHECK(vsrc_bilibili_parse_search(kBlSearch, strlen(kBlSearch), 1, &pg) == FM_OK);
+  TEST_CHECK(pg.count == 2 && !strcmp(pg.next, "b:2"));
+  if (pg.count == 2) {
+    TEST_CHECK(!strcmp(pg.items[0].title, "Cat & dog") && !strcmp(pg.items[0].channel, "Up's"));
+    TEST_CHECK(!strcmp(pg.items[0].thumb, "https://i0.hdslb.com/bfs/archive/abc.jpg@480w_270h_1c.jpg"));
+    TEST_CHECK(pg.items[0].duration == 894 && pg.items[0].views == 12345 && pg.items[0].published[0]);
+    TEST_CHECK(pg.items[1].duration == 3723 && strstr(pg.items[1].page, "/video/BV1xx411c7mD"));
+  }
+  vsrc_page_free(&pg);
+}
+
+/* MMCFM_BILI_TEST=<query>: search, resolve the first result, open and decode it. */
+static void vt_bilibili_live(void) {
+  const char *qs = getenv("MMCFM_BILI_TEST");
+  if (!qs || !*qs) return;
+  FmVsrcConf c;
+  vsrc_conf_snapshot(&c);
+  FmVsrcPage pg;
+  memset(&pg, 0, sizeof pg);
+  u64 t0 = plat_now_ms();
+  FmErr e = g_vsrc_bilibili.search(&c, qs, NULL, &pg, NULL);
+  printf("  bili search: %s, %d results in %d ms %s\n", fm_err_str(e), pg.count, (int)(plat_now_ms() - t0), pg.error);
+  TEST_CHECK(e == FM_OK && pg.count > 5 && pg.next[0]);
+  if (pg.next[0]) {
+    FmVsrcPage p2;
+    memset(&p2, 0, sizeof p2);
+    e = g_vsrc_bilibili.search(&c, qs, pg.next, &p2, NULL);
+    printf("  bili page 2: %s, %d results\n", fm_err_str(e), p2.count);
+    TEST_CHECK(e == FM_OK && p2.count > 5);
+    vsrc_page_free(&p2);
+  }
+  if (pg.count) {
+    FmVsrcItem it = pg.items[0];
+    printf("  bili item: %s \"%.60s\" by %.40s, %.0f s\n", it.id, it.title, it.channel, it.duration);
+    FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+    char err[256];
+    t0 = plat_now_ms();
+    e = g_vsrc_bilibili.resolve(&c, &it, st, NULL, NULL, err, sizeof err, NULL);
+    printf("  bili resolve: %s in %d ms %s\n", fm_err_str(e), (int)(plat_now_ms() - t0), err);
+    for (int i = 0; i < st->nq; i++)
+      printf("    %s %-8s %-6s %s%s\n", i == st->cur ? ">" : " ", st->q[i].label, st->q[i].codec,
+             st->q[i].playable ? "stream" : "", st->q[i].needs_ffmpeg ? "ffmpeg" : "");
+    TEST_CHECK(e == FM_OK && st->video[0]);
+    if (e == FM_OK) {
+      FmErr ve;
+      t0 = plat_now_ms();
+      FmVid *v = vid_open(st->video, 0, &ve);
+      TEST_CHECK(v != NULL);
+      if (v) {
+        FmVidFrame vf;
+        FmVidPcm pc;
+        int ev, nv = 0, na = 0, guard = 0;
+        while ((nv < 60 || na < 30) && guard++ < 5000 && (ev = vid_decode(v, &vf, &pc)) > 0) {
+          if (ev == VID_EV_VIDEO) nv++;
+          else if (ev == VID_EV_AUDIO) na++;
+        }
+        printf("  bili play: %s %dx%d, v%d a%d in %d ms\n", vid_info(v)->backend, vid_info(v)->w, vid_info(v)->h, nv, na,
+               (int)(plat_now_ms() - t0));
+        TEST_CHECK(nv >= 60 && na >= 30);
+        vid_close(v);
+      }
+    }
+    fm_free(st);
+  }
+  vsrc_page_free(&pg);
+}
+
 int test_vsrc(const char *tmp) {
   int before = g_test_fail;
   vt_stream_probe();
@@ -1308,6 +1424,8 @@ int test_vsrc(const char *tmp) {
   vt_pick_stream();
   vt_innertube();
   vt_innertube_live();
+  vt_bilibili();
+  vt_bilibili_live();
   vt_garbage();
   vt_cache(tmp);
   vt_save(tmp);
