@@ -480,8 +480,30 @@ static FmErr bl_resolve(const FmVsrcConf *c, const FmVsrcItem *item, FmVsrcStrea
   return vsrc_bilibili_resolve(c, bv, out, err, errcap, cancel);
 }
 
+/* Saves the MP4 at the size setting (720p or 360p) as "<title> [<BV id>].mp4".
+** Saving needs no decoder, so every format counts as playable here (a
+** system that cannot play H.264 still gets the file). */
+static FmErr bl_download(const FmVsrcConf *c, const FmVsrcItem *item, const char *dir, char *out_path, size_t cap,
+                         FmVsrcProgress cb, void *user, char *err, size_t errcap, volatile int *cancel) {
+  if (cap) out_path[0] = 0;
+  if (errcap) err[0] = 0;
+  char bv[16];
+  if (!vsrc_bilibili_id(item->id, bv, sizeof bv) && !vsrc_bilibili_id(item->page, bv, sizeof bv)) {
+    fm_strlcpy(err, "Not a Bilibili video", errcap);
+    return FM_ERR_NOT_FOUND;
+  }
+  FmVsrcConf c2 = *c;
+  c2.have_ffmpeg_libs = true;
+  FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
+  FmErr e = vsrc_bilibili_resolve(&c2, bv, st, err, errcap, cancel);
+  if (e == FM_OK)
+    e = vsrc_save_stream(c, item, st, dir && *dir ? dir : c->download_dir, out_path, cap, cb, user, err, errcap, cancel);
+  fm_free(st);
+  return e;
+}
+
 const FmVsrc g_vsrc_bilibili = {
   "bilibili", "Bilibili", IC_PLAY_BADGE, VSRC_SEARCH | VSRC_DIRECT,
-  bl_search, bl_resolve, NULL, NULL,
+  bl_search, bl_resolve, bl_download, NULL,
   "Search and play, no key needed: up to 720p signed out. Paste bilibili.com or b23.tv links too",
 };

@@ -1405,6 +1405,30 @@ static void vt_bilibili_live(void) {
       }
     }
     fm_free(st);
+    /* MMCFM_BILI_DL=<dir>: the download button's path, at 360p to keep it short */
+    const char *dl = getenv("MMCFM_BILI_DL");
+    if (dl && *dl) {
+      FmVsrcConf c2 = c;
+      c2.max_height = 360;
+      char out[FM_PATH_MAX], derr[256];
+      u64 t1 = plat_now_ms();
+      e = g_vsrc_bilibili.download(&c2, &it, dl, out, sizeof out, NULL, NULL, derr, sizeof derr, NULL);
+      FmStat fs;
+      bool there = e == FM_OK && plat_stat(out, &fs) && fs.size > 100000;
+      printf("  bili download: %s in %d ms -> %s (%llu bytes) %s\n", fm_err_str(e), (int)(plat_now_ms() - t1), out,
+             there ? (unsigned long long)fs.size : 0ull, derr);
+      TEST_CHECK(there);
+      if (there) {
+        FmErr ve;
+        FmVid *v = vid_open(out, 0, &ve);                    /* the saved file plays */
+        TEST_CHECK(v && vid_info(v)->has_video && vid_info(v)->has_audio && vid_info(v)->duration > 10);
+        if (v) {
+          printf("  bili saved file: %s %dx%d %.0f s\n", vid_info(v)->backend, vid_info(v)->w, vid_info(v)->h,
+                 vid_info(v)->duration);
+          vid_close(v);
+        }
+      }
+    }
   }
   vsrc_page_free(&pg);
 }
