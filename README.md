@@ -2,6 +2,8 @@
 
 MMC File Manager is a dual-panel file manager written in plain C11 on SDL2, styled after X-plore on Android. It also has viewers for images, text, music and video, a media library, online video, photo and audio sources, and cloud storage. One code base builds for Windows, Linux, macOS, FreeBSD, Android (a native APK built without Gradle) and the web (Emscripten).
 
+![MMC File Manager: dual panels, the image viewer, the music player with its visualizer](docs/mmcfm.gif)
+
 **Design goals**
 
 - **Low memory and no idle cost.** Big files are streamed through fixed buffers and are never read whole. The event loop sleeps when nothing moves, so an idle window uses 0% CPU. Thumbnails share atlas pages, and shapes and text are batched into a few draw calls.
@@ -463,6 +465,7 @@ assets/fonts/   Poppins, embedded into the binary at build time
 android/        AndroidManifest.xml, res/, Java (FmActivity, FmFileProvider)
 web/            index.html shell for Emscripten
 tests/fixtures/ RAR archives from libarchive's tests, a small VP9+Opus WebM
+docs/           mmcfm.gif (the README demo)
 icons/          the app logo: mmcfm.ico (+ mmcfm.rc, embedded in the Windows exe),
                 mmcfm.icns (macOS .app), mmcfm.png (Linux/BSD, next to the .desktop),
                 favicon.png (web)
