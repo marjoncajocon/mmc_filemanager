@@ -57,7 +57,12 @@
 #include "fhls.h"
 #include "fsdl.h"
 
-#define RING (256u * 1024u)
+#define RING (256u * 1024u)          /* the ring to start with (and for live radio) */
+/* Files and VOD playlists grow it while the network is ahead of the reader:
+** 256 KB is ~1 s of 720p, so every hiccup on a phone showed "Buffering"
+** (measured: every 3-5 s on a 15 Mbit/s link). 4 MB is ~15 s of 720p. Live
+** streams keep the small ring: their data is not worth hoarding. */
+#define RING_MAX (4u * 1024u * 1024u)
 #define CHUNK (8ll * 1024 * 1024)
 
 /* HLS state (see the top comment); only the worker touches the cursor while
@@ -91,6 +96,8 @@ struct FmNetStream {
   volatile int cancel;
   /* ring, guarded by mx */
   u8 *ring;
+  size_t cap;                  /* its size: RING, growing to cap_max (see grow_ring) */
+  size_t cap_max;              /* RING_MAX unless ns_limit_ring said less */
   size_t rd, wr, fill;         /* read and write index, bytes buffered */
   bool eof, failed, head_in;
   volatile int aborted;        /* ns_abort: reads return 0 at once, nothing restarts */
@@ -154,15 +161,34 @@ static void parse_meta(FmNetStream *s) {
   s->title[n] = 0;
 }
 
+/* A full ring doubles (unwrapped into the new block) while the stream is a
+** file or a VOD playlist; false = keep waiting for the reader. mx held. */
+static bool grow_ring(FmNetStream *s) {
+  bool live = s->hls ? s->hls->live : s->size < 0 && !s->ranges;
+  if (live || s->cap >= s->cap_max) return false;
+  size_t nc = s->cap * 2;
+  u8 *nr = (u8 *)fm_alloc(nc);
+  if (!nr) return false;
+  size_t first = FM_MIN(s->fill, s->cap - s->rd);
+  memcpy(nr, s->ring + s->rd, first);
+  memcpy(nr + first, s->ring, s->fill - first);
+  fm_free(s->ring);
+  s->ring = nr;
+  s->cap = nc;
+  s->rd = 0;
+  s->wr = s->fill;
+  return true;
+}
+
 /* Appends audio bytes to the ring, waiting while it is full. */
 static bool put_audio(FmNetStream *s, const u8 *p, size_t n) {
   while (n > 0) {
-    while (s->fill == RING && !s->cancel) SDL_CondWaitTimeout(s->cv, s->mx, 500);
+    while (s->fill == s->cap && !s->cancel && !grow_ring(s)) SDL_CondWaitTimeout(s->cv, s->mx, 500);
     if (s->cancel) return false;
-    size_t room = RING - s->fill;
-    size_t run = FM_MIN(n, FM_MIN(room, RING - s->wr));
+    size_t room = s->cap - s->fill;
+    size_t run = FM_MIN(n, FM_MIN(room, s->cap - s->wr));
     memcpy(s->ring + s->wr, p, run);
-    s->wr = (s->wr + run) % RING;
+    s->wr = (s->wr + run) % s->cap;
     s->fill += run;
     p += run;
     n -= run;
@@ -816,6 +842,8 @@ FmNetStream *ns_open(const char *url, const char *headers, char *err, size_t err
   s->mx = SDL_CreateMutex();
   s->cv = SDL_CreateCond();
   s->ring = (u8 *)fm_alloc(RING);
+  s->cap = RING;
+  s->cap_max = RING_MAX;
   s->size = -1;
   s->pending = -1;
   bool ok = s->mx && s->cv;
@@ -857,10 +885,10 @@ static bool apply_pending(FmNetStream *s) {
 size_t ns_peek(FmNetStream *s, void *out, size_t n) {
   if (s->pending >= 0 && !apply_pending(s)) return 0;
   SDL_LockMutex(s->mx);
-  if (n > RING / 2) n = RING / 2;
+  if (n > RING / 2) n = RING / 2;           /* the smallest ring: a peek never waits on growth */
   while (s->fill < n && !s->eof && !s->aborted) SDL_CondWaitTimeout(s->cv, s->mx, 500);
   size_t got = FM_MIN(n, s->fill);
-  size_t first = FM_MIN(got, RING - s->rd);
+  size_t first = FM_MIN(got, s->cap - s->rd);
   memcpy(out, s->ring + s->rd, first);
   if (got > first) memcpy((u8 *)out + first, s->ring, got - first);
   SDL_UnlockMutex(s->mx);
@@ -892,9 +920,9 @@ size_t ns_read(FmNetStream *s, void *out, size_t n) {
     if (!s->fill && !got && resume(s)) continue;
     if (!s->fill) break;                 /* end or error */
     s->resumes = 0;
-    size_t run = FM_MIN(n - got, FM_MIN(s->fill, RING - s->rd));
+    size_t run = FM_MIN(n - got, FM_MIN(s->fill, s->cap - s->rd));
     memcpy(o + got, s->ring + s->rd, run);
-    s->rd = (s->rd + run) % RING;
+    s->rd = (s->rd + run) % s->cap;
     s->fill -= run;
     s->pos += (i64)run;
     got += run;
@@ -913,7 +941,7 @@ bool ns_seek(FmNetStream *s, i64 pos) {
   /* a short hop forward inside buffered data: just skip */
   if (pos >= cur && pos - cur <= (i64)s->fill) {
     size_t skip = (size_t)(pos - cur);
-    s->rd = (s->rd + skip) % RING;
+    s->rd = (s->rd + skip) % s->cap;
     s->fill -= skip;
     s->pos = pos;
     SDL_CondBroadcast(s->cv);
@@ -940,6 +968,12 @@ bool ns_live(const FmNetStream *s) { return s->size < 0 && !s->ranges; }
 bool ns_seekable(const FmNetStream *s) { return s->ranges && s->size > 0; }
 const char *ns_content_type(const FmNetStream *s) { return s->ctype; }
 bool ns_is_hls(const FmNetStream *s) { return s->hls != NULL; }
+
+void ns_limit_ring(FmNetStream *s, size_t max) {
+  SDL_LockMutex(s->mx);
+  s->cap_max = FM_MAX(max, (size_t)RING);
+  SDL_UnlockMutex(s->mx);
+}
 double ns_hls_start(const FmNetStream *s) { return s->hls ? s->hls->t0 : 0; }
 double ns_hls_duration(const FmNetStream *s) { return s->hls && !s->hls->live ? s->hls->pl.total : 0; }
 

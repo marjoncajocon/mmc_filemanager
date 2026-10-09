@@ -896,9 +896,12 @@ static bool cand_plays(const Cand *c, const FmVsrcConf *cf) {
   if (cf->have_ffmpeg_libs) return true;
   const char *codec = cand_codec(c);
   switch (c->kind) {
-  case GEN_WEBM: return strcmp(codec, "VP8") && strcmp(codec, "AV1") && strcmp(codec, "H.264");
+  case GEN_WEBM:                       /* MediaCodec (os_dash) also does VP8 */
+    return strcmp(codec, "AV1") && strcmp(codec, "H.264") && (cf->os_dash || strcmp(codec, "VP8"));
   case GEN_MP4: case GEN_HLS: case GEN_MP3: case GEN_M4A: return cf->os_mp4;
-  default: return false;              /* MKV, TS, Ogg, Opus files, other types: FFmpeg */
+  case GEN_MKV: case GEN_TS: case GEN_OGG: case GEN_OPUS:
+    return cf->os_dash;                /* Android's extractors read these; elsewhere FFmpeg */
+  default: return false;               /* other types: FFmpeg */
   }
 }
 

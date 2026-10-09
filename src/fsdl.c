@@ -19,14 +19,39 @@ static int g_sdl_ready;
 
 /* ---- logging ------------------------------------------------------------ */
 
+#ifdef FM_ANDROID
+#  include <android/log.h>
+#endif
+
 void fm_log(const char *fmt, ...) {
   char buf[1024];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(buf, sizeof buf, fmt, ap);
   va_end(ap);
+#ifdef FM_ANDROID
+  __android_log_write(ANDROID_LOG_INFO, "mmcfm", buf);   /* stderr goes nowhere there */
+  /* some phones (Honor, Huawei) keep app info logs out of logcat: a test
+  ** run can have them in its report instead (stdout -> selftest.txt) */
+  static int to_out = -1;
+  if (to_out < 0) to_out = getenv("MMCFM_LOG_STDOUT") != NULL;
+  if (to_out) printf("log: %s\n", buf);
+  /* ... or, for a normal app run, a file (MMCFM_LOG_FILE=<path>) */
+  static FILE *lf;
+  static int lf_tried;
+  if (!lf_tried) {
+    lf_tried = 1;
+    const char *p = getenv("MMCFM_LOG_FILE");
+    if (p && *p) lf = fopen(p, "a");
+  }
+  if (lf) {
+    fprintf(lf, "%llu %s\n", (unsigned long long)SDL_GetTicks64(), buf);
+    fflush(lf);
+  }
+#else
   if (g_sdl_ready) SDL_Log("%s", buf);
   else fprintf(stderr, "mmcfm: %s\n", buf);
+#endif
 }
 
 /* ---- threads ------------------------------------------------------------ */

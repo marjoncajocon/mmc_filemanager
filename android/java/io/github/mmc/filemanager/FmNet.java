@@ -20,6 +20,7 @@ public final class FmNet {
         public int status;
         public long length = -1;
         public String type = "", error = "";
+        boolean ended;   /* the body was read to its end */
     }
 
     /* body != null: a POST (redirects then turn into GETs, as browsers do) */
@@ -87,6 +88,7 @@ public final class FmNet {
         if (c.in == null) return 0;
         try {
             int n = c.in.read(buf);
+            if (n < 0) c.ended = true;
             return n < 0 ? 0 : n;
         } catch (Throwable e) {
             String m = e.getMessage();
@@ -95,9 +97,13 @@ public final class FmNet {
         }
     }
 
+    /* A body read to its end leaves the connection in the system's keep-alive
+       pool: HLS fetches a segment every few seconds and each fresh TLS
+       handshake cost a phone ~0.5-1 s. A body left unread (a cancel, a seek)
+       is disconnected so the pool never keeps a half-read connection. */
     public static void close(Conn c) {
         try { if (c.in != null) c.in.close(); } catch (Throwable e) { /* closing anyway */ }
-        if (c.h != null) c.h.disconnect();
+        if (c.h != null && !c.ended) c.h.disconnect();
         c.in = null;
         c.h = null;
     }

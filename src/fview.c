@@ -115,7 +115,9 @@ float view_chrome(FmViewChrome *c, u32 id, bool autohide) {
   c->mx = ui.mx;
   c->my = ui.my;
   if (c->last_input == 0) c->last_input = ui.now;
-  if (moved || ui.nkeys > 0 || ui.wheel != 0) {
+  /* a press counts as use too (touch has no pointer movement): tapping a
+  ** button must not let the bars hide under the finger */
+  if (moved || ui.nkeys > 0 || ui.wheel != 0 || (ui.pressed && !c->hidden)) {
     c->last_input = ui.now;
     if (moved) c->hidden = false;
   }

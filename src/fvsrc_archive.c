@@ -96,10 +96,16 @@ static FmErr ia_search(const FmVsrcConf *c, const char *query, const char *page_
 /* ---- resolve ------------------------------------------------------------------- */
 
 /* 0 = H.264 MP4, 1 = WebM, 2 = Ogg, 3 = other containers; -1 = not playable here */
-static int file_rank(const char *name, bool libs) {
+/* os: the system decoders stream MKV, MOV and TS too (Android MediaCodec) */
+static int file_rank(const char *name, bool libs, bool os) {
   const char *x = fm_path_ext(name);
   if (!fm_stricmp(x, ".mp4") || !fm_stricmp(x, ".m4v")) return 0;
   if (!fm_stricmp(x, ".webm")) return 1;
+  if (os && !libs) {
+    static const char *const kOs[] = { ".mkv", ".mov", ".ts", ".m2ts" };
+    for (int i = 0; i < FM_COUNT(kOs); i++)
+      if (!fm_stricmp(x, kOs[i])) return 3;
+  }
   if (!libs) return -1;
   if (!fm_stricmp(x, ".ogv")) return 2;
   static const char *const kOther[] = {".mkv", ".mov", ".avi", ".mpeg", ".mpg",
@@ -153,7 +159,7 @@ FmErr vsrc_archive_pick(const char *json, size_t len, const char *id, const FmVs
   int seen = 0;
   for (const FmJsonNode *f = json_first(files); f && seen < 4000; f = json_next(f), seen++) {
     const char *name = json_str(json_get(f, "name"), "");
-    if (file_rank(name, c->have_ffmpeg_libs) < 0) {
+    if (file_rank(name, c->have_ffmpeg_libs, c->os_dash) < 0) {
       if (fm_ends_with_i(name, ".ogv")) ogg_only = true;
       continue;
     }
@@ -165,7 +171,7 @@ FmErr vsrc_archive_pick(const char *json, size_t len, const char *id, const FmVs
   seen = 0;
   for (const FmJsonNode *f = json_first(files); f && seen < 4000; f = json_next(f), seen++) {
     const char *name = json_str(json_get(f, "name"), "");
-    int rank = file_rank(name, c->have_ffmpeg_libs);
+    int rank = file_rank(name, c->have_ffmpeg_libs, c->os_dash);
     if (rank < 0 || !*name || strstr(name, "..") || strlen(name) > 400) continue;
     if (!strcmp(json_str(json_get(f, "private"), ""), "true")) continue;     /* answers 401 */
     double l = vsrc_clock_seconds(json_str(json_get(f, "length"), ""));

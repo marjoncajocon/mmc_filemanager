@@ -68,6 +68,32 @@ public class FmActivity extends SDLActivity {
         return new QuietSurface(context);
     }
 
+    /* ---- test hook ---------------------------------------------------------- */
+
+    /* `adb shell am start -n <pkg>/.FmActivity --es args "--selftest"
+       --es env "MMCFM_YT_TEST=...;MMCFM_TEST_ONLY=vsrc"` runs the self test
+       on a device. Honoured only while <external files>/allow_test exists:
+       a file only the user (or adb) can create, so another app launching the
+       exported activity with extras gets the normal app. Arguments split on
+       spaces, env entries on ';'. */
+    @Override
+    protected String[] getArguments() {
+        Intent it = getIntent();
+        File dir = getExternalFilesDir(null);
+        if (it == null || dir == null || !new File(dir, "allow_test").exists()) return new String[0];
+        String env = it.getStringExtra("env");
+        if (env != null) {
+            for (String kv : env.split(";")) {
+                int k = kv.indexOf('=');
+                if (k <= 0) continue;
+                try { android.system.Os.setenv(kv.substring(0, k).trim(), kv.substring(k + 1), true); }
+                catch (Exception e) { /* skip that one */ }
+            }
+        }
+        String args = it.getStringExtra("args");
+        return args == null || args.trim().isEmpty() ? new String[0] : args.trim().split("\\s+");
+    }
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);

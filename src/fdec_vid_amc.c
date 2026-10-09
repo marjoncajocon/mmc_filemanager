@@ -41,6 +41,7 @@
 */
 #include "fdec_vid_int.h"
 #include "fnetstream.h"
+#include "fplat.h"
 
 #ifdef FM_ANDROID
 
@@ -132,9 +133,16 @@ typedef struct AmcTrack {
 
 /* A URL as the extractor's data source. The extractor may call from its own
 ** threads, so reads are serialised. */
+#define NET_WINS 4
+
 typedef struct AmcNet {
-  FmNetStream *ns;
+  FmNetStream *ns;                     /* the first window's connection: size, live, abort */
+  char *url;                           /* for the other windows' connections */
   pthread_mutex_t mx;
+  /* windows of bytes read (see net_read_at), each with its own connection
+  ** (opened on first use; w[0].ns == ns) */
+  struct { u8 *buf; i64 pos; size_t len; u64 used; FmNetStream *ns; } w[NET_WINS];
+  u64 tick;
 } AmcNet;
 
 typedef struct Amc {
@@ -172,24 +180,91 @@ static void amc_close(void *p);
 
 /* ---- network data source ---------------------------------------------------- */
 
+/* The extractor reads in 2 KB pieces and keeps stepping back a few hundred
+** bytes (MP4 box parsing; measured on the YouTube DASH index: 352 reads,
+** most a seek), and while it opens it swings between the start and points
+** far ahead (measured on Dailymotion HLS: 1527 <-> 958186, a dozen times).
+** Each miss was a new HTTP request on FmNetStream (with HLS a step back
+** re-fetches a segment): a 720p open took 11-34 s on a phone. So reads go
+** through NET_WINS windows of bytes already read (the least recently used
+** one is reused): steps back and swings cost nothing, and the stream is
+** read ahead in NET_STEP pieces. 1 MB per stream.
+** While playing, MP4 fragments are read at two places at once (the data and
+** a cursor far behind it; measured on YouTube DASH: 146 KB <-> 872 KB, both
+** moving on). With one connection each swing was two reconnects of ~0.4 s
+** and the picture stalled every few seconds ("Buffering"). So each window
+** keeps its own connection, reading on from where that window ends; the
+** extra ones keep a small read-ahead (NET_SIDE_RING). */
+#define NET_WIN (256u * 1024u)
+#define NET_STEP (64u * 1024u)
+#define NET_NEAR (256 * 1024)          /* a gap this small is read through, not sought */
+#define NET_SIDE_RING (512u * 1024u)
+
 static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
   AmcNet *n = (AmcNet *)u;
   if (off < 0) return -1;
+  u64 t_in = plat_now_ms();
   pthread_mutex_lock(&n->mx);
-  ssize_t got = 0;
   i64 sz = ns_size(n->ns);
   if (sz >= 0 && off >= sz) {
     pthread_mutex_unlock(&n->mx);
     return 0;                          /* end of stream */
   }
-  if (ns_tell(n->ns) == (i64)off || ns_seek(n->ns, (i64)off)) {
-    size_t r;
-    while ((size_t)got < size && (r = ns_read(n->ns, (u8 *)buf + got, size - (size_t)got)) > 0) got += (ssize_t)r;
-  } else {
-    got = -1;
+  size_t done = 0;
+  bool fail = false;
+  while (done < size) {
+    i64 p = (i64)off + (i64)done;
+    int hit = -1;
+    for (int i = 0; i < NET_WINS && hit < 0; i++)
+      if (n->w[i].len && p >= n->w[i].pos && p < n->w[i].pos + (i64)n->w[i].len) hit = i;
+    if (hit >= 0) {                                           /* already read */
+      i64 end = n->w[hit].pos + (i64)n->w[hit].len;
+      size_t take = FM_MIN(size - done, (size_t)(end - p));
+      memcpy((u8 *)buf + done, n->w[hit].buf + (p - n->w[hit].pos), take);
+      n->w[hit].used = ++n->tick;
+      done += take;
+      continue;
+    }
+    /* a window whose connection reads on to p */
+    int k = -1;
+    i64 lend = 0;
+    for (int i = 0; i < NET_WINS && k < 0; i++) {
+      i64 e = n->w[i].pos + (i64)n->w[i].len;
+      if (n->w[i].ns && n->w[i].len && p >= e && p - e <= NET_NEAR) { k = i; lend = e; }
+    }
+    if (k < 0) {                                              /* elsewhere: reuse the oldest window */
+      k = 0;
+      for (int i = 1; i < NET_WINS; i++)
+        if (n->w[i].used < n->w[k].used) k = i;
+      if (!n->w[k].ns) {
+        char why[160];
+        n->w[k].ns = ns_open(n->url, NULL, why, sizeof why);
+        if (!n->w[k].ns) { fm_log("video: %s", why); fail = true; break; }
+        ns_limit_ring(n->w[k].ns, NET_SIDE_RING);
+      }
+      n->w[k].pos = p;
+      n->w[k].len = 0;
+      lend = p;
+    }
+    FmNetStream *ns = n->w[k].ns;
+    if (ns_tell(ns) != lend && !ns_seek(ns, lend)) { n->w[k].len = 0; fail = true; break; }
+    if (n->w[k].len + NET_STEP > NET_WIN) {                   /* slide: drop its oldest bytes */
+      size_t drop = n->w[k].len + NET_STEP - NET_WIN;
+      memmove(n->w[k].buf, n->w[k].buf + drop, n->w[k].len - drop);
+      n->w[k].len -= drop;
+      n->w[k].pos += (i64)drop;
+    }
+    size_t got = ns_read(ns, n->w[k].buf + n->w[k].len, NET_STEP);
+    n->w[k].used = ++n->tick;
+    if (!got) break;                                          /* end of stream (or aborted) */
+    n->w[k].len += got;
   }
   pthread_mutex_unlock(&n->mx);
-  return got;
+  ssize_t r = fail && !done ? -1 : (ssize_t)done;
+  if (getenv("MMCFM_AMC_TRACE"))
+    fm_log("amc read %lld +%zu -> %zd at %llu ms took %llu", (long long)off, size, r, (unsigned long long)plat_now_ms(),
+           (unsigned long long)(plat_now_ms() - t_in));
+  return r;
 }
 
 static ssize_t net_get_size(void *u) {
@@ -199,10 +274,20 @@ static ssize_t net_get_size(void *u) {
 
 static void net_ds_close(void *u) { FM_UNUSED(u); }   /* amc_close frees it */
 
+/* From any thread: blocked reads on every connection return now. */
+static void net_abort(AmcNet *n) {
+  for (int i = 0; i < NET_WINS; i++)
+    if (n->w[i].ns) ns_abort(n->w[i].ns);
+}
+
 static void net_free(AmcNet *n) {
   if (!n) return;
-  ns_close(n->ns);
+  for (int i = 0; i < NET_WINS; i++) {
+    if (n->w[i].ns) ns_close(n->w[i].ns);
+    fm_free(n->w[i].buf);
+  }
   pthread_mutex_destroy(&n->mx);
+  fm_free(n->url);
   fm_free(n);
 }
 
@@ -216,6 +301,9 @@ static AMediaExtractor *net_extractor(const char *url, AmcNet **net, AMediaDataS
   if (!ns) { fm_log("video: %s", why); return NULL; }
   AmcNet *n = (AmcNet *)fm_calloc(1, sizeof *n);
   n->ns = ns;
+  for (int i = 0; i < NET_WINS; i++) n->w[i].buf = (u8 *)fm_alloc(NET_WIN);
+  n->w[0].ns = ns;
+  n->url = fm_strdup(url);
   pthread_mutex_init(&n->mx, NULL);
   AMediaExtractor *ex = nd.AMediaExtractor_new();
   AMediaDataSource *ds_ = ex ? ds.AMediaDataSource_new() : NULL;
@@ -403,7 +491,7 @@ static void amc_close(void *p) {
   release_held(s);
   track_close(&s->v);
   track_close(&s->a);
-  if (s->net) ns_abort(s->net->ns);    /* a read blocked between segments returns now */
+  if (s->net) net_abort(s->net);       /* a read blocked between segments returns now */
   if (s->ex) nd.AMediaExtractor_delete(s->ex);
   if (s->src) ds.AMediaDataSource_delete(s->src);
   net_free(s->net);                    /* after the extractor: it reads until deleted */

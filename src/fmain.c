@@ -106,12 +106,34 @@ static void frame(void) {
   SDL_Event e;
   int wait = ui_wait_ms();
   bool got;
-  /* Idle and in the background the thread sleeps in the event wait, so the
-  ** CPU stays asleep until input, a timer or app_wake() arrives. */
-  if (app.background) got = wait_event(&e, 1000);
-  else if (wait == 0) got = SDL_PollEvent(&e) != 0;
-  else got = wait_event(&e, wait < 0 ? 1000 : wait);
+  /* A press and its release in one batch (a quick tap while a busy frame,
+  ** such as a playing video, kept the loop away) would reach the widgets in
+  ** the same frame, and press-then-release clicks were lost: the release
+  ** waits for the next frame, which comes at once. */
+  static SDL_Event held_up;
+  static bool have_held;
+  bool pressed_now = false;
+  if (have_held) {
+    have_held = false;
+    e = held_up;
+    got = true;
+  } else if (app.background) {
+    /* Idle and in the background the thread sleeps in the event wait, so
+    ** the CPU stays asleep until input, a timer or app_wake() arrives. */
+    got = wait_event(&e, 1000);
+  } else if (wait == 0) {
+    got = SDL_PollEvent(&e) != 0;
+  } else {
+    got = wait_event(&e, wait < 0 ? 1000 : wait);
+  }
   while (got) {
+    if (e.type == SDL_MOUSEBUTTONUP && pressed_now) {
+      held_up = e;
+      have_held = true;
+      ui_redraw();
+      break;
+    }
+    if (e.type == SDL_MOUSEBUTTONDOWN) pressed_now = true;
     switch (e.type) {
       case SDL_QUIT:
         if (app_can_quit()) app.quit = true;
@@ -212,7 +234,16 @@ int main(int argc, char **argv) {
   const char *shot = NULL;
   int shot_w = 1180, shot_h = 740, shot_frames = 6;
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--selftest") == 0) return test_run_all();
+    if (strcmp(argv[i], "--selftest") == 0) {
+#ifdef FM_ANDROID
+      /* no console here: the report goes to <external files>/selftest.txt,
+      ** read back with adb (see FmActivity.getArguments) */
+      const char *ext = SDL_AndroidGetExternalStoragePath();
+      char out[FM_PATH_MAX];
+      if (ext && fm_path_join(out, sizeof out, ext, "selftest.txt")) freopen(out, "w", stdout);
+#endif
+      return test_run_all();
+    }
     if (strcmp(argv[i], "--version") == 0) {
       printf("mmcfm %s\n", FM_VERSION);
       return 0;

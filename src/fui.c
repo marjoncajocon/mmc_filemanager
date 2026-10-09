@@ -135,7 +135,18 @@ static void finger_update(void) {
   }
 }
 
+static int g_input_trace = -1;        /* MMCFM_INPUT_TRACE=1: where presses land (device debugging) */
+
 void ui_event(const SDL_Event *e) {
+  if (g_input_trace < 0) g_input_trace = getenv("MMCFM_INPUT_TRACE") != NULL;
+  int trace = g_input_trace;
+  if (trace && (e->type == SDL_MOUSEBUTTONDOWN || e->type == SDL_MOUSEBUTTONUP))
+    fm_log("input: %s at %d,%d (pt->px %.3f) ui %gx%g, top layer %d (next %d)",
+           e->type == SDL_MOUSEBUTTONDOWN ? "down" : "up", e->button.x, e->button.y, (double)g_px_per_pt, (double)ui.w,
+           (double)ui.h, ui.top_layer, ui.next_top);
+  else if (trace && (e->type == SDL_FINGERDOWN || e->type == SDL_FINGERUP))
+    fm_log("input: finger %s at %.3f,%.3f", e->type == SDL_FINGERDOWN ? "down" : "up", (double)e->tfinger.x,
+           (double)e->tfinger.y);
   switch (e->type) {
     case SDL_MOUSEMOTION:
       ui.mx = e->motion.x * g_px_per_pt;
@@ -430,6 +441,9 @@ int ui_hit(u32 id, FmRect r) {
     f |= UI_HOVER;
     ui.hot = id;
   }
+  if (g_input_trace > 0 && (ui.pressed || ui.released) && inside)
+    fm_log("input: %s hits %08x [%g,%g %gx%g] layer %d", ui.pressed ? "press" : "release", id, (double)r.x,
+           (double)r.y, (double)r.w, (double)r.h, ui.layer);
   if (ui.pressed && inside && rect_has(r, ui.press_x, ui.press_y)) {
     ui.active = id;
     f |= UI_PRESS;

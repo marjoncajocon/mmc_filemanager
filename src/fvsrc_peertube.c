@@ -144,7 +144,7 @@ FmErr vsrc_peertube_pick(const char *json, size_t len, const FmVsrcConf *c, FmVs
         lists[nl++] = json_get(p, "files");
     for (int l = 0; l < nl; l++)
       for (const FmJsonNode *f = json_first(lists[l]); f && n < 128; f = json_next(f)) {
-        if (f->type != JSON_OBJ || !playable(f, c->have_ffmpeg_libs)) continue;
+        if (f->type != JSON_OBJ || !playable(f, c->have_ffmpeg_libs || c->os_dash)) continue;
         PtFile *p = &fs[n++];
         p->n = f;
         p->res = (int)json_num(json_path(f, "resolution.id"), 0);

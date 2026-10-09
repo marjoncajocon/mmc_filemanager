@@ -299,8 +299,11 @@ static void recent_remove_at(int i) {
 void lib_note_played(const char *path) {
   if (!path || !path[0] || strchr(path, '\n')) return;
   /* files opened from archives are temporary copies: not worth remembering */
-  char cache[FM_PATH_MAX];
-  if (plat_place(PLACE_CACHE, cache, sizeof cache) && fm_path_is_inside(path, cache)) return;
+  /* (on Android the temp folder lives inside the cache: that one counts) */
+  char cache[FM_PATH_MAX], tmp[FM_PATH_MAX];
+  if (plat_place(PLACE_CACHE, cache, sizeof cache) && fm_path_is_inside(path, cache) &&
+      !(plat_place(PLACE_TEMP, tmp, sizeof tmp) && fm_path_is_inside(path, tmp)))
+    return;
   if (g.nrecent > 0 && path_cmp(g.recent[0], path) == 0) return;
   for (int i = 0; i < g.nrecent; i++)
     if (path_cmp(g.recent[i], path) == 0) { recent_remove_at(i); break; }

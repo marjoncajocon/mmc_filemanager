@@ -114,6 +114,12 @@ static void visitor_set(const char *v) {
   SDL_AtomicUnlock(&g_lock);
 }
 
+static void visitor_forget(void) {
+  SDL_AtomicLock(&g_lock);
+  g_visitor[0] = 0;
+  SDL_AtomicUnlock(&g_lock);
+}
+
 static void token_put(const char *tok, char *out, size_t cap) {
   out[0] = 0;
   if (!tok || !*tok) return;
@@ -376,6 +382,7 @@ FmErr vsrc_innertube_resolve(const FmVsrcConf *c, const char *id, FmVsrcStream *
     fm_strlcpy(err, "Not a YouTube video id", errcap);
     return FM_ERR_FORMAT;
   }
+  if (c->fresh) visitor_forget();            /* the old session's links were refused */
   FmJson j;
   FmErr e = player(id, &j, err, errcap, cancel);
   if (e != FM_OK) return e;
@@ -455,7 +462,9 @@ static void add_video(const FmJsonNode *v, FmVsrcPage *out) {
   const FmJsonNode *last = NULL;
   for (const FmJsonNode *t = json_first(th); t; t = json_next(t)) last = t;
   const char *tu = json_str(json_get(last, "url"), "");
-  if (vsrc_url_ok(tu)) fm_strlcpy(it->thumb, tu, sizeof it->thumb);
+  /* "hq720.jpg?sqp=...&rs=..." is served as WebP (no decoder here); the
+  ** same path without the query is the JPEG */
+  if (vsrc_url_ok(tu)) fm_strlcpy(it->thumb, tu, FM_MIN(sizeof it->thumb, strcspn(tu, "?") + 1));
   else fm_snprintf(it->thumb, sizeof it->thumb, "https://i.ytimg.com/vi/%s/hqdefault.jpg", id);
   fm_snprintf(it->page, sizeof it->page, "https://www.youtube.com/watch?v=%s", id);
 }

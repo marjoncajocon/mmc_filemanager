@@ -164,6 +164,7 @@ static void test_ns_dump(void) {
   FmNetStream *ns = ns_open(url, NULL, err, sizeof err);
   if (!ns) { printf("  ns: open failed: %s\n", err); return; }
   FILE *f = fm_fopen(out, "wb");
+  u64 t0 = plat_now_ms();
   static u8 buf[65536];
   i64 total = 0;
   size_t n;
@@ -183,7 +184,9 @@ static void test_ns_dump(void) {
     }
   }
   fclose(f);
-  printf("  ns: %lld bytes (size %lld), seekprobe %d, pause %d ms\n", (long long)total, (long long)ns_size(ns), seekprobe,
+  u64 ms = plat_now_ms() - t0;
+  printf("  ns: %lld bytes (size %lld) in %llu ms (%.1f Mbit/s), seekprobe %d, pause %d ms\n", (long long)total,
+         (long long)ns_size(ns), (unsigned long long)ms, ms ? (double)total * 8 / 1000.0 / (double)ms : 0, seekprobe,
          pause);
   ns_close(ns);
 }

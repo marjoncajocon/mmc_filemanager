@@ -599,13 +599,20 @@ static int on_resolve(void *u) {
 }
 
 /* Asks the adapter again on a worker: height 0 = the current setting. */
+static bool online_resolve_ex(int height, bool cache, int want, const char *note, bool fresh);
+
 static bool online_resolve(int height, bool cache, int want, const char *note) {
+  return online_resolve_ex(height, cache, want, note, false);
+}
+
+static bool online_resolve_ex(int height, bool cache, int want, const char *note, bool fresh) {
   VOnline *o = g_on;
   if (!o || o->thr) return false;
   o->resume_at = play_pos();
   o->rconf = o->conf;
   if (height >= 144) o->rconf.max_height = height;
   o->rconf.force_cache = cache;
+  o->rconf.fresh = fresh;
   fm_free(o->res);
   o->res = (FmVsrcStream *)fm_calloc(1, sizeof *o->res);
   o->cancel = 0;
@@ -651,7 +658,7 @@ static bool online_failed(const char *why) {
   if (!is_url(V.path)) return false;             /* a cache file that fails is just broken */
   if (!o->retried) {
     o->retried = true;
-    return online_resolve(cur_height(), false, -1, "Reconnecting\xE2\x80\xA6");
+    return online_resolve_ex(cur_height(), false, -1, "Reconnecting\xE2\x80\xA6", true);
   }
   return false;
 }
@@ -1199,6 +1206,9 @@ static void vid_view_frame(FmRect area) {
   bool playing = ready && !V.paused && !V.ended;
   screensaver(playing);
   float chrome = view_chrome(&V.chrome, ui_id("vid.chrome"), playing && !V.seek_drag && !V.viz_panel);
+  if (ui.pressed && getenv("MMCFM_INPUT_TRACE"))
+    fm_log("vid: press with chrome %.2f (shown %d), ready %d, state %d, playing %d", (double)chrome, (int)V.chrome.shown,
+           (int)ready, (int)state, (int)playing);
 
   /* audio-only, or the picture never came: the visualizer takes its place */
   bool no_pic = false;
