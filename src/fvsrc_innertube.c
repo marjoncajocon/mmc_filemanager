@@ -519,12 +519,19 @@ FmErr vsrc_innertube_resolve(const FmVsrcConf *c, const char *id, FmVsrcStream *
     e = pick(json_root(&j), c, out, err, errcap);
     json_free(&j);
     if (e != FM_OK || round == 1) break;
-    FmNetResp r;
-    memset(&r, 0, sizeof r);
-    FmErr pe = net_get(out->video, "Range: bytes=0-0\r\n", 4096, &r, cancel);
-    int st = r.status;
-    net_resp_free(&r);
-    if (pe == FM_ERR_CANCEL) return pe;
+    /* the picture, then the sound beside it: a refused sound link alone
+    ** played the picture silent */
+    int st = 0;
+    for (int k = 0; k < 2 && st != 403; k++) {
+      const char *u = k ? out->audio : out->video;
+      if (!u[0]) continue;
+      FmNetResp r;
+      memset(&r, 0, sizeof r);
+      FmErr pe = net_get(u, "Range: bytes=0-0\r\n", 4096, &r, cancel);
+      st = r.status;
+      net_resp_free(&r);
+      if (pe == FM_ERR_CANCEL) return pe;
+    }
     if (st != 403) break;
     fm_log("youtube: links refused (403), asking again with a new session");
     visitor_forget();

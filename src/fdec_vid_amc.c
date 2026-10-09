@@ -67,7 +67,7 @@
   X(AMediaFormat_delete) X(AMediaFormat_getString) X(AMediaFormat_getInt32) \
   X(AMediaFormat_getInt64) X(AMediaFormat_getFloat) X(AMediaFormat_setInt32) \
   X(AMediaFormat_getBuffer) \
-  X(AMediaCodec_createDecoderByType) X(AMediaCodec_configure) X(AMediaCodec_start) \
+  X(AMediaCodec_createDecoderByType) X(AMediaCodec_createCodecByName) X(AMediaCodec_configure) X(AMediaCodec_start) \
   X(AMediaCodec_stop) X(AMediaCodec_delete) X(AMediaCodec_flush) \
   X(AMediaCodec_dequeueInputBuffer) X(AMediaCodec_getInputBuffer) \
   X(AMediaCodec_queueInputBuffer) X(AMediaCodec_dequeueOutputBuffer) \
@@ -162,6 +162,10 @@ typedef struct Amc {
   bool ex_eos, progress;
   int early;                           /* frames dropped for an impossible layout */
   double skip_until;
+  /* Android's AAC reader gives every sample of an unsized (live) stream the
+  ** same time; such a repeat is counted on from the samples decoded */
+  double a_raw;                        /* the decoder's last time, -1 = none yet */
+  double a_next;                       /* where the sound heard so far ends */
   ssize_t held;                        /* video output buffer handed out, -1 none */
   /* video output layout */
   int color, bw, bh, stride, slice, cl, ct, cr, cb, layout;
@@ -388,7 +392,10 @@ static void codec_name(const char *mime, char *out, size_t cap) {
 
 /* Creates and starts a decoder for track i; false leaves t empty. */
 static bool track_open(Amc *s, AmcTrack *t, size_t i, AMediaFormat *f, const char *mime, bool video) {
-  AMediaCodec *c = nd.AMediaCodec_createDecoderByType(mime);
+  /* MMCFM_AMC_CODEC=name: a test picks the picture decoder (the emulator's
+  ** c2.goldfish one vs Android's own c2.android.avc.decoder) */
+  const char *force = video ? getenv("MMCFM_AMC_CODEC") : NULL;
+  AMediaCodec *c = force && force[0] ? nd.AMediaCodec_createCodecByName(force) : nd.AMediaCodec_createDecoderByType(mime);
   if (!c) return false;
   if (video) nd.AMediaFormat_setInt32(f, "color-format", COLOR_FLEX);
   if (nd.AMediaCodec_configure(c, f, NULL, NULL, 0) != AMEDIA_OK || nd.AMediaCodec_start(c) != AMEDIA_OK) {
@@ -441,6 +448,7 @@ static void *amc_open(const char *path, int flags, FmVidInfo *in) {
   Amc *s = (Amc *)fm_calloc(1, sizeof *s);
   s->fd = fd;
   s->held = -1;
+  s->a_raw = -1;
   s->v.idx = s->a.idx = -1;
   s->info = in;
   s->ex = nd.AMediaExtractor_new();
@@ -594,6 +602,9 @@ static bool feed(Amc *s) {
       u8 *buf = nd.AMediaCodec_getInputBuffer(t->codec, (size_t)bi, &cap);
       ssize_t n = buf && cap ? nd.AMediaExtractor_readSampleData(s->ex, buf, cap) : -1;
       int64_t us = nd.AMediaExtractor_getSampleTime(s->ex);
+      if (getenv("MMCFM_AMC_TRACE") && t->queued < 8)
+        fm_log("amc in: %s sample %d at %lld us, %d bytes, offset %lld us", t == &s->v ? "video" : "audio",
+               (int)t->queued, (long long)us, (int)n, (long long)s->t_off_us);
       if (s->hls && !s->t_checked && us >= 0) {
         s->t_checked = true;
         if (s->hls_start > 5 && (double)us / 1e6 < s->hls_start - 5) s->t_off_us = (int64_t)(s->hls_start * 1e6);
@@ -781,6 +792,12 @@ static bool audio_emit(Amc *s, const u8 *buf, size_t size, i64 us, FmVidPcm *pc)
   int n = (int)(size / ((size_t)bps * sc));
   if (n <= 0 || s->a_rate <= 0) return false;
   double t = us >= 0 ? us / 1e6 : -1;
+  static int trace;
+  if (getenv("MMCFM_AMC_TRACE") && trace++ < 12)
+    fm_log("amc out: audio at %lld us, %d frames, raw %.6f next %.6f", (long long)us, n, s->a_raw, s->a_next);
+  if (t >= 0 && t == s->a_raw) t = s->a_next;          /* a repeat: the time did not move */
+  else s->a_raw = t;
+  if (t >= 0) s->a_next = t + (double)n / s->a_rate;
   if (t >= 0 && t + (double)n / s->a_rate < s->skip_until) return false;
   int oc = s->info->channels;
   float *out = grow(&s->pcm, &s->pcm_cap, n * oc);
@@ -946,6 +963,7 @@ static bool amc_seek(void *p, double t) {
     s->ex_eos = false;
     s->skip_until = ok ? t : 0;
     s->rs_have = false;
+    s->a_raw = -1;
     return ok;
   }
   int64_t us = (int64_t)(t * 1e6);
@@ -958,6 +976,7 @@ static bool amc_seek(void *p, double t) {
   s->ex_eos = false;
   s->skip_until = ok || t <= 30 ? t : 0;
   s->rs_have = false;
+  s->a_raw = -1;
   return ok;
 }
 
