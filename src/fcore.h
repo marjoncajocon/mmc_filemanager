@@ -87,6 +87,7 @@
 #  define FM_ASM 1
 #endif
 
+#define FM_AUTHOR_LINE "Developed by MMC Solo Dev (Marjon Cajocon)"
 #ifndef FM_VERSION
 #  define FM_VERSION "0.1.0"
 #endif

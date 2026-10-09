@@ -10,6 +10,8 @@ MMC File Manager is a dual-panel file manager written in plain C11 on SDL2, styl
 - **Old systems keep working.** Newer OS APIs are looked up dynamically and have a fallback. For example, Windows 11 gets rounded window corners and Windows 7, 8 and 10 get a window region instead. Media Foundation needs Windows 7 or later.
 - **tcc must compile it.** A 32-bit Windows build with Tiny C Compiler is part of the build matrix, so the code avoids `_Atomic`, VLAs and other extensions.
 
+Developed by **MMC Solo Dev (Marjon Cajocon)**.
+
 Version: 0.1.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party code).
 
 ---
@@ -298,6 +300,27 @@ BUILD_TAG=b ./build.sh linux-x64 --jobs=8 &
 
 ---
 
+### Release files
+
+`release.sh` builds every target in release mode and packs each one into a single file, flat in `release/<version>/`, ready to drag into a GitHub release:
+
+```sh
+D:/mmc-shell/mmc-shell.exe release.sh                  # all targets, version from build.sh
+D:/mmc-shell/mmc-shell.exe release.sh win-x64 android  # only these
+D:/mmc-shell/mmc-shell.exe release.sh --version=0.2.0 --upload   # + a draft GitHub release (gh CLI)
+```
+
+| File | Contents |
+|---|---|
+| `mmcfm-<ver>-win-x64.zip`, `-win-arm64.zip`, `-win-x86-tcc.zip` | `mmcfm.exe` |
+| `mmcfm-<ver>-linux-x64.tar.gz`, `-linux-arm64`, `-freebsd-x64` | `mmcfm`, `mmcfm.desktop`, `mmcfm.png` |
+| `mmcfm-<ver>-macos-x64.tar.gz`, `-macos-arm64` | `MMC File Manager.app` |
+| `mmcfm-<ver>-android.apk` | the APK |
+| `mmcfm-<ver>-web.zip` | `index.html`, `index.js`, `index.wasm`, `favicon.png` |
+| `SHA256SUMS.txt` | checksums of all of the above |
+
+Each archive holds one folder `mmcfm-<ver>-<target>/` with `LICENSE` and `LICENSES.md`. Builds use `BUILD_TAG=rel`, so `dist/<target>/` is untouched. Options: `--version=X`, `--jobs=N`, `--with-ffmpeg=DIR` (desktop zig builds), `--upload` (creates a **draft** release `vX` with `gh`; publish it on GitHub after a look). Set `KEYSTORE`/`KEY_ALIAS`/`KEY_PASS` for a release-signed APK; otherwise it carries the debug key. A target whose toolchain is missing is reported as failed and the rest still pack.
+
 ## Running
 
 ```sh
@@ -446,6 +469,7 @@ icons/          the app logo: mmcfm.ico (+ mmcfm.rc, embedded in the Windows exe
 tools/          gen_themes.py (generates src/ftheme_data.h); make_icons.py (draws
                 icons/*, src/flogo.h and android/res/mipmap-*; needs Pillow, run by hand)
 build.sh        the one build script
+release.sh      builds all targets and packs them into release/<version>/
 ```
 
 | Prefix | Role |

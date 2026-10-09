@@ -248,7 +248,7 @@ int main(int argc, char **argv) {
       return test_run_all();
     }
     if (strcmp(argv[i], "--version") == 0) {
-      printf("mmcfm %s\n", FM_VERSION);
+      printf("mmcfm %s\n%s\n", FM_VERSION, FM_AUTHOR_LINE);
       return 0;
     }
     if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shot = argv[++i];

@@ -1989,7 +1989,8 @@ static void dlg_settings(void) {
   float seg_h = DP(ui.touch_mode ? 40 : 34);
   float grid_h = theme_grid_h(c.w - DP(6));
   float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 3 + rh * 5 +
-                  DP(50) + DP(90) + (tray_available() ? rh * (conf.tray ? 3 : 1) : 0);   /* tray */
+                  DP(50) + DP(90) + font_line_h(ui.m.font_small) + DP(6) +   /* about: the credit */
+                  (tray_available() ? rh * (conf.tray ? 3 : 1) : 0);   /* tray */
   float online_h = online_settings_h(c.w - DP(6));   /* online: its section */
   static bool online_jump;
   if (online_settings_focus()) online_jump = true;
@@ -2169,6 +2170,8 @@ static void dlg_settings(void) {
     fm_snprintf(ver, sizeof ver, "MMC File Manager %s", FM_VERSION);
     FmRect a = rect_cut_top(&r, font_line_h(ui.m.font) + DP(4));
     font_draw(FONT_BOLD, ui.m.font, a.x, a.y, ver, -1, T.text);
+    a = rect_cut_top(&r, font_line_h(ui.m.font_small) + DP(6));
+    font_draw(FONT_REGULAR, ui.m.font_small, a.x, a.y, FM_AUTHOR_LINE, -1, T.text2);
     font_draw_wrap(FONT_REGULAR, ui.m.font_small, r.x, r.y, r.w,
                    "MMC File Manager is free software: you can use, study, share and improve it.",
                    T.text2, true);

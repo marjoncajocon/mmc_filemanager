@@ -540,7 +540,7 @@ if [ "$TARGET" != android ]; then
       if [ "$CCKIND" != tcc ] && [ -f icons/mmcfm.rc ]; then
         if [ ! -f "$OBJDIR/mmcfm.res" ] || [ icons/mmcfm.ico -nt "$OBJDIR/mmcfm.res" ]; then
           echo "  rc  icons/mmcfm.rc"
-          "$ZIG" rc /i icons /fo "$OBJDIR/mmcfm.res" icons/mmcfm.rc || die "zig rc failed"
+          "$ZIG" rc -i icons -fo "$OBJDIR/mmcfm.res" -- icons/mmcfm.rc || die "zig rc failed"
         fi
         OBJS="$OBJS $OBJDIR/mmcfm.res"
       fi

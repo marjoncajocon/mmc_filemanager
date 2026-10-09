@@ -35,3 +35,6 @@ desktop.ini
 
 # local session notes (not for the public repo)
 /memory.md
+
+# release archives (release.sh)
+/release/
