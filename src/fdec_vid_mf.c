@@ -128,14 +128,26 @@ typedef struct NsBS {
   QWORD cursor;
   /* live streams cannot rewind, but Media Foundation's AAC/MP3 sources probe
   ** the first bytes and seek back (MF_E_BYTESTREAM_NOT_SEEKABLE otherwise):
-  ** the last HIST bytes read are kept so such seeks are served from memory */
+  ** the last HIST (TS: HIST_TS) bytes read are kept so such seeks are served
+  ** from memory */
   u8 *hist;
-  size_t hist_len;
+  size_t hist_len, hist_cap;
   QWORD hist_start;          /* stream position of hist[0] */
   QWORD live_pos;            /* how far the live stream has been read */
+  /* live TS while the source opens (see HIST_TS): past what has arrived the
+  ** probe is answered with null packets instead of waiting for the broadcast
+  ** to produce 3 MiB (a minute and more at low bitrates); synth_from = where
+  ** that started (0 = not yet). The real bytes come after its rewind. */
+  bool probing;
+  QWORD synth_from;
+  double id3_t;              /* live packed audio: when its first sample plays (s), 0 = unknown */
 } NsBS;
 
 #define HIST (512u * 1024u)
+/* the MPEG-TS source reads 3 MiB ahead while it opens, then goes back to
+** the start (measured on YouTube live, 2026-10-09: any bitrate) */
+#define HIST_TS (4096u * 1024u)
+#define PROBE_REAL (192u * 1024u)    /* real bytes the probe sees at least (a first segment) */
 
 typedef struct ReadRes {
   IUnknownVtbl *lpVtbl;
@@ -215,12 +227,23 @@ static HRESULT STDMETHODCALLTYPE bs_setpos(IMFByteStream *p, QWORD pos) {
   if (size >= 0 && (i64)pos > size) return E_INVALIDARG;
   if (BS(p)->hist && pos < BS(p)->hist_start) return E_FAIL;   /* fell out of the window */
   SDL_LockMutex(BS(p)->mx);
+  if (BS(p)->probing && pos + (1u << 20) < BS(p)->cursor) BS(p)->probing = false;   /* the probe's rewind */
   BS(p)->cursor = pos;                        /* reads seek there when they run */
   BS(p)->eof = false;
   SDL_UnlockMutex(BS(p)->mx);
   return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE bs_iseos(IMFByteStream *p, BOOL *eos) { *eos = BS(p)->eof; return S_OK; }
+/* MPEG-TS null packets (PID 0x1FFF, ignored by demuxers) for the stream
+** positions at..at+n, on the 188-byte grid of the stream. */
+static void ts_null_fill(QWORD at, BYTE *buf, ULONG n) {
+  static const u8 kHead[4] = { 0x47, 0x1F, 0xFF, 0x10 };
+  for (ULONG i = 0; i < n; i++) {
+    unsigned o = (unsigned)((at + i) % 188);
+    buf[i] = o < 4 ? kHead[o] : 0xFF;
+  }
+}
+
 /* Live: reads cb bytes at `at` through the rewind window. */
 static ULONG read_live(NsBS *b, QWORD at, BYTE *buf, ULONG cb) {
   if (at < b->hist_start) return 0;
@@ -234,12 +257,20 @@ static ULONG read_live(NsBS *b, QWORD at, BYTE *buf, ULONG cb) {
       done += (ULONG)take;
       continue;
     }
+    /* the window never grows past synth_from while probing: once the probe
+    ** is ahead of the broadcast it stays on null packets until its rewind */
+    if (b->probing && (b->synth_from || (b->hist_len >= PROBE_REAL && !ns_buffered(b->ns)))) {
+      if (!b->synth_from) b->synth_from = p;
+      ts_null_fill(p, buf + done, cb - done);
+      done = cb;
+      break;
+    }
     /* read on from the live position into the window, then copy */
     u8 tmp[16384];
     size_t got = ns_read(b->ns, tmp, sizeof tmp);
     if (!got) break;
-    if (b->hist_len + got > HIST) {                   /* slide: drop the oldest */
-      size_t drop = b->hist_len + got - HIST;
+    if (b->hist_len + got > b->hist_cap) {            /* slide: drop the oldest */
+      size_t drop = b->hist_len + got - b->hist_cap;
       memmove(b->hist, b->hist + drop, b->hist_len - drop);
       b->hist_len -= drop;
       b->hist_start += drop;
@@ -385,6 +416,30 @@ static void bs_quiesce(NsBS *b) {
   SDL_UnlockMutex(b->mx);
 }
 
+/* Live HLS packed audio (raw AAC/MP3 segments) starts each segment with an
+** ID3 tag whose PRIV frame "com.apple.streaming.transportStreamTimestamp"
+** holds the 90 kHz MPEG-TS time of its first sample. Media Foundation counts
+** such audio from 0, while the picture beside it (TS) keeps the broadcast's
+** clock (YouTube live: hours); this time puts the sound on the same clock.
+** Seconds, 0 = none. */
+static double id3_ts_time(FmNetStream *ns) {
+  static const char kOwner[] = "com.apple.streaming.transportStreamTimestamp";
+  u8 h[2048];
+  size_t n = ns_peek(ns, h, 10);
+  if (n < 10 || memcmp(h, "ID3", 3) != 0) return 0;
+  size_t len = 10 + ((size_t)(h[6] & 0x7f) << 21 | (size_t)(h[7] & 0x7f) << 14 | (size_t)(h[8] & 0x7f) << 7 |
+                     (size_t)(h[9] & 0x7f));
+  n = ns_peek(ns, h, FM_MIN(len, sizeof h));
+  for (size_t i = 10; i + sizeof kOwner + 8 <= n; i++) {
+    if (memcmp(h + i, kOwner, sizeof kOwner) != 0) continue;  /* the owner and its 0 */
+    const u8 *p = h + i + sizeof kOwner;
+    u64 pts = 0;
+    for (int k = 0; k < 8; k++) pts = pts << 8 | p[k];
+    return (double)(pts & 0x1FFFFFFFFull) / 90000.0;
+  }
+  return 0;
+}
+
 /* A byte stream for an http(s) URL, or NULL (err says why). */
 static IMFByteStream *net_bytestream(const char *url, char *err, size_t errcap) {
   if (!mf.create_reader_bs || !mf.create_async || !mf.invoke) return NULL;
@@ -394,7 +449,12 @@ static IMFByteStream *net_bytestream(const char *url, char *err, size_t errcap) 
   b->lpVtbl = &g_bs_vtbl;
   b->ref = 1;
   b->ns = ns;
-  if (!ns_seekable(ns)) b->hist = (u8 *)fm_alloc(HIST);   /* live: rewind window */
+  if (!ns_seekable(ns)) {                                  /* live: rewind window */
+    b->probing = strstr(ns_content_type(ns), "mp2t") != NULL;
+    b->hist_cap = b->probing ? HIST_TS : HIST;
+    b->hist = (u8 *)fm_alloc(b->hist_cap);
+    if (ns_is_hls(ns) && strstr(ns_content_type(ns), "audio/")) b->id3_t = id3_ts_time(ns);
+  }
   b->mx = SDL_CreateMutex();
   b->cv = SDL_CreateCond();
   b->thr = b->mx && b->cv ? fm_thread_create(bs_reader, "mf-bytestream", b) : NULL;
@@ -716,6 +776,10 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
     m->hls = true;
     m->hls_start = ns_hls_start(m->bs->ns);
     if (info->duration <= 0) info->duration = ns_hls_duration(m->bs->ns);
+    if (m->bs->id3_t > 0) {                  /* live packed audio: the broadcast's clock */
+      m->t_off = (LONGLONG)(m->bs->id3_t * 1e7);
+      m->t_checked = true;
+    }
   }
 
   /* MPEG-TS sources report no seeking: mf_seek then reopens and skips */
@@ -729,6 +793,11 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
   fm_strlcpy(info->backend, "Media Foundation", sizeof info->backend);
   if (info->has_video) codec_name(m->rd, MF_SOURCE_READER_FIRST_VIDEO_STREAM, info->vcodec, sizeof info->vcodec);
   if (info->has_audio) codec_name(m->rd, MF_SOURCE_READER_FIRST_AUDIO_STREAM, info->acodec, sizeof info->acodec);
+  if (m->bs) {                               /* open: playback reads only real bytes */
+    SDL_LockMutex(m->bs->mx);
+    m->bs->probing = false;
+    SDL_UnlockMutex(m->bs->mx);
+  }
   return m;
 }
 
@@ -961,8 +1030,8 @@ static bool mf_seek(void *st, double t) {
     m->ai = n->ai;
     m->pix = n->pix;
     m->hls_start = n->hls_start;
-    m->t_off = 0;
-    m->t_checked = false;
+    m->t_off = n->t_off;                      /* 0 / unchecked, or live packed audio's clock */
+    m->t_checked = n->t_checked;
     mf_close(n);
     m->skip_until = t;
   }

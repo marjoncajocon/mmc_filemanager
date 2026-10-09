@@ -184,6 +184,13 @@ static void dm_codecs(const char *codecs, char *name, size_t cap, bool *h264, bo
 
 FmErr vsrc_dailymotion_pick(const char *m3u8, size_t len, const char *base, const FmDmMeta *m,
                             const FmVsrcConf *c, FmVsrcStream *out) {
+  FmErr e = vsrc_hls_pick(m3u8, len, base, m->duration, c, out);
+  out->live = m->live;
+  return e;
+}
+
+FmErr vsrc_hls_pick(const char *m3u8, size_t len, const char *base, double duration, const FmVsrcConf *c,
+                    FmVsrcStream *out) {
   out->nq = 0;
   out->cur = -1;
   FmHlsMaster *ms = (FmHlsMaster *)fm_alloc(sizeof *ms);
@@ -191,18 +198,24 @@ FmErr vsrc_dailymotion_pick(const char *m3u8, size_t len, const char *base, cons
     fm_free(ms);
     return FM_ERR_FORMAT;
   }
-  /* tallest first; one entry per picture size (the more bits win) */
+  /* tallest first; one entry per picture size and codec (the more bits
+  ** win: YouTube lists 240p twice, with HE-AAC and with AAC sound) */
   int order[HLS_MAX_VARIANTS], n = 0;
   for (int i = 0; i < ms->n; i++) {
     const FmHlsVariant *v = &ms->v[i];
     if (strlen(v->uri) >= VSRC_QURL || (v->audio_uri && strlen(v->audio_uri) >= sizeof out->audio)) continue;
     int h = v->width > 0 && v->width < v->height ? v->width : v->height;
+    char vc[24];
+    bool h264_, aac_;
+    dm_codecs(v->codecs, vc, sizeof vc, &h264_, &aac_);
     int at = n;
     bool dup = false;
     for (int k = 0; k < n; k++) {
       const FmHlsVariant *o = &ms->v[order[k]];
       int oh = o->width > 0 && o->width < o->height ? o->width : o->height;
-      if (oh == h && o->fps == v->fps && !strcmp(o->codecs, v->codecs)) {
+      char oc[24];
+      dm_codecs(o->codecs, oc, sizeof oc, &h264_, &aac_);
+      if (oh == h && o->fps == v->fps && !strcmp(oc, vc)) {
         if (v->bandwidth > o->bandwidth) order[k] = i;
         dup = true;
         break;
@@ -225,7 +238,7 @@ FmErr vsrc_dailymotion_pick(const char *m3u8, size_t len, const char *base, cons
     if (q->height > 0) fm_snprintf(q->label, sizeof q->label, q->fps > 30 ? "%dp%d" : "%dp", q->height, q->fps);
     else fm_snprintf(q->label, sizeof q->label, "%d kbps", (v->avg_bandwidth ? v->avg_bandwidth : v->bandwidth) / 1000);
     q->kbps = (v->avg_bandwidth ? v->avg_bandwidth : v->bandwidth) / 1000;
-    q->bytes = m->duration > 0 && q->kbps > 0 ? (i64)(q->kbps * 125.0 * m->duration) : 0;
+    q->bytes = duration > 0 && q->kbps > 0 ? (i64)(q->kbps * 125.0 * duration) : 0;
     /* the stream reader joins TS or fMP4 segments into one file; Media
     ** Foundation and MediaCodec read both (H.264 + AAC), FFmpeg anything */
     q->playable = c->have_ffmpeg_libs || (c->os_mp4 && h264 && aac);
@@ -251,7 +264,7 @@ FmErr vsrc_dailymotion_pick(const char *m3u8, size_t len, const char *base, cons
     out->width = v ? v->width : 0;
     out->height = v ? v->height : 0;
   }
-  out->duration = m->duration;
+  out->duration = duration;
   out->local = false;
   out->headers[0] = 0;
   hls_master_free(ms);

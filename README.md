@@ -20,6 +20,12 @@ Version: 0.1.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party c
 
 ## Features
 
+### Home screen
+
+- The app opens on a home screen of big tiles: File manager, Online videos, Online audio, Online photos, Media library and Cloud storage (keys 1-6). Two columns on a phone, three on a wide window.
+- The online views open over it, so their Back button returns here; the Home button in the file panels' top bar brings it back.
+- Settings > "Start on the home screen" (on) turns it off; started with a file or a test flag, the app skips it (`--demo-home` forces it).
+
 ### File management
 
 - Two panels. Every operation goes from the active panel to the other one, and the middle action bar shows arrows pointing at the target.
@@ -33,6 +39,8 @@ Version: 0.1.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party c
   - "open with system app"
 - Drag and drop between panels: drag to copy, Shift to move.
 - List and grid views, with image and video thumbnails decoded in the background and cached on disk.
+- Settings > "Online thumbnails": off stops downloading pictures for online videos, photos and audio (saves mobile data). Pictures already in the cache still show; the rest get placeholders.
+- **Android background play**: music and a background video keep playing with the screen off or the app hidden. A notification and the lock screen show the title and cover with Previous / Play-Pause / Next / Stop; headset and Bluetooth buttons work. A call or another player pauses it, and so does unplugging the headphones. Android 13+ asks for the notification permission the first time something plays.
 - Sort by name (natural order), size, date or type, folders first, show hidden files.
 - Filter/search row per panel, bookmarks, history, and places in the sidebar.
 - Archives can be browsed like folders, extracted, and opened file by file:
@@ -72,7 +80,7 @@ Version: 0.1.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party c
     4. the built-in portable decoder (WebM with VP9 and Opus) on every target, tcc and web included
   - Picture shapes: Fit, Fill, Stretch, 16:9, 4:3, 21:9, 1:1, 9:16 and Original (key A).
   - Touch lock.
-  - **Play in background (sound only)** (key B): online videos switch to the audio-only quality.
+  - **Play in background (sound only)** (key B): online videos switch to the audio-only quality. On Android a playing video does this by itself when you leave the app.
   - **Picture in picture** (desktop, key P): the window shrinks to a small always-on-top player in the bottom-right corner. Android's system PiP is not done yet.
   - Visualizer overlay and equalizer.
 
@@ -96,15 +104,16 @@ Search, stream with a buffer, pick a quality from the menu (it reopens at the cu
 
 | Source | Notes |
 |---|---|
-| YouTube | Built in through YouTube's InnerTube API, with no key and no yt-dlp. 144p to 2160p60. An optional free Data API v3 key (Settings) makes search use the official API. |
+| YouTube | Built in through YouTube's InnerTube API, with no key and no yt-dlp. 144p to 2160p60. Live streams play natively too (HLS, 144p to 1080p, H.264 + AAC): built in on Windows (Media Foundation) and Android 9+, through FFmpeg on Linux, macOS and the web build. Scheduled and ended live streams say so. An optional free Data API v3 key (Settings) makes search use the official API. |
 | Internet Archive | Direct streams, no key. |
 | PeerTube | Through SepiaSearch, no key. |
 | Dailymotion | Native, with its own HLS reader, no key. |
 | Bilibili | Native (WBI-signed web API). Up to 720p when not signed in. Accepts bilibili.com and b23.tv links. |
 | Any site | Paste a page link. Plays pages that contain a plain video (media links, JSON-LD, og:video, `<video>`). |
 
-- **yt-dlp is optional.** It is a fallback for playlists, live streams, cache-first playback and HLS downloads. Settings can download it ("Get yt-dlp"). Current yt-dlp needs a JavaScript runtime (deno or node) for YouTube.
+- **yt-dlp is optional.** It is a fallback for playlists, live streams on other sites, cache-first playback and HLS downloads. Settings can download it ("Get yt-dlp"). Current yt-dlp needs a JavaScript runtime (deno or node) for YouTube.
 - HLS is supported (TS or fMP4, AES-128, live reload), and so are separate video and audio streams played as a pair, and expired links that are resolved again.
+- Live streams show a red LIVE badge instead of the time and seek bar, cannot be skipped through or downloaded, and reconnect at the live edge when the stream drops.
 
 ### Online photos
 

@@ -278,6 +278,7 @@ static int worker(void *u) {
     return 0;
   }
   V.info = *vid_info(vid);
+  if (g_on && g_on->st.live) V.info.duration = 0;   /* a decoder's guess from the first bytes */
   V.state = VS_READY;
   SDL_UnlockMutex(V.mx);
   app_wake();
@@ -359,8 +360,12 @@ static void screensaver(bool off) {
   else SDL_EnableScreenSaver();
 }
 
+/* A live stream (online, on air): no length, no seeking; reopening joins
+** at the live edge. */
+static bool live_now(void) { return g_on && g_on->st.live; }
+
 static void set_paused(bool p) {
-  if (V.ended && !p) {
+  if (V.ended && !p && !live_now()) {
     /* replay */
     SDL_LockMutex(V.mx);
     V.seek_req = true;
@@ -375,6 +380,7 @@ static void set_paused(bool p) {
 }
 
 static void seek_to(double t) {
+  if (live_now()) return;
   double d = V.info.duration;
   if (d > 0) t = FM_CLAMP(t, 0.0, FM_MAX(0.0, d - 0.1));
   if (t < 0) t = 0;
@@ -582,8 +588,10 @@ static void restart_worker(const char *video, const char *audio, int flags, doub
   ui_redraw();
 }
 
-/* Where playback is (or was going to resume). */
+/* Where playback is (or was going to resume). Live: 0, the live edge (its
+** clock is the broadcast's running time, not a place to seek back to). */
 static double play_pos(void) {
+  if (live_now()) return 0;
   if (g_on && g_on->thr) return g_on->resume_at;
   if (V.seek_req || !V.clock_set) return V.seek_req ? V.seek_to : V.clock;
   return V.clock;
@@ -851,7 +859,7 @@ static void info_card(void) {
   else fm_strlcpy(a, "none", sizeof a);
   const char *keys[] = { "Name", "Video", "Size", "Frame rate", "Length", "Audio", "Decoder" };
   const char *vals[] = { V.title, V.info.vcodec, dims, V.info.fps > 0 ? fps : "unknown",
-                         V.info.duration > 0 ? dur : "unknown", a, V.info.backend };
+                         live_now() ? "live" : V.info.duration > 0 ? dur : "unknown", a, V.info.backend };
   view_info_dialog(ui_id("vid.info"), "Video info", keys, vals, FM_COUNT(keys), &V.info_open);
 }
 
@@ -869,6 +877,18 @@ static double buffered_end(void) {
     best = best < 0 ? e : FM_MIN(best, e);
   }
   return best;
+}
+
+/* The red "LIVE" pill at x, centred on cy (the music player's, faded with
+** the controls); returns its width. */
+static float live_pill(float x, float cy, float fs, float alpha) {
+  const char *l = "LIVE";
+  float h = font_line_h(fs) + DP(6), w = font_width(FONT_BOLD, fs, l, -1) + DP(26);
+  FmRect b = { x, cy - h * 0.5f, w, h };
+  gfx_rrect(b, h * 0.5f, col_alpha(T.danger, alpha));
+  gfx_circle(b.x + DP(10), cy, DP(3), col_alpha(VIEW_FG, alpha));
+  font_draw(FONT_BOLD, fs, b.x + DP(17), cy - font_line_h(fs) * 0.5f, l, -1, col_alpha(VIEW_FG, alpha));
+  return w;
 }
 
 static void vid_seek_bar(FmRect r) {
@@ -1133,8 +1153,9 @@ static void stream_checks(int *state, bool *ready) {
   const char *why = NULL;
   if (*state == VS_ERROR && V.err != FM_ERR_CANCEL && V.err != FM_ERR_NOMEM) why = "open";
   else if (*ready && dec_err) why = "decode error";
-  else if (*ready && V.ended && V.info.duration > 0 && V.clock < V.info.duration - 3 && is_url(V.path))
-    why = "ended early";
+  else if (*ready && V.ended && is_url(V.path) &&
+           (live_now() || (V.info.duration > 0 && V.clock < V.info.duration - 3)))
+    why = live_now() ? "live stream dropped" : "ended early";   /* live: ended or not, ask again */
   if (why && !o->gave_up) {
     bool was_ended = V.ended;
     if (was_ended) { V.ended = false; V.paused = false; }   /* it stopped by itself, not by the user */
@@ -1397,6 +1418,23 @@ static void from_background(void) {
 
 bool video_mini_active(void) { return V.open && V.background; }
 
+bool video_media_info(FmMediaInfo *m) {
+  memset(m, 0, sizeof *m);
+  if (!V.open || (!V.background && app.viewer != &g_view_video)) return false;
+  fm_strlcpy(m->title, V.title, sizeof m->title);
+  m->playing = !V.paused && !V.ended;
+  m->track = -2;                       /* a video, not a music track */
+  return true;
+}
+
+void video_media_toggle(void) {
+  if (V.open) set_paused(!V.paused);
+}
+
+void video_app_hidden(void) {
+  if (V.open && !V.background && !V.paused && !V.ended && app.viewer == &g_view_video) to_background();
+}
+
 /* --demo-video FILE [--demo-video-bg AT[,BACK]]: opens FILE; at AT seconds
 ** it goes to the background, at BACK it comes back (logged, for checks). */
 static double g_demo_bg = -1, g_demo_fg = -1, g_demo_pip = -1;
@@ -1516,7 +1554,9 @@ void video_mini_draw(FmRect r) {
   font_draw_ellipsis(FONT_BOLD, ui.m.font, c.x, y, V.title, c.w, T.text);
   char a[24], d[24], line[96];
   view_fmt_time(V.clock, a, sizeof a);
-  if (dur > 0) {
+  if (live_now()) {
+    fm_strlcpy(line, "LIVE  \xC2\xB7  sound only, tap for the picture", sizeof line);
+  } else if (dur > 0) {
     view_fmt_time(dur, d, sizeof d);
     fm_snprintf(line, sizeof line, "%s / %s  \xC2\xB7  sound only, tap for the picture", a, d);
   } else {
@@ -1641,8 +1681,8 @@ static void vid_view_frame(FmRect area) {
     if (ui_key(SDLK_b, 0) && V.info.has_audio && V.info.has_video) { to_background(); return; }
     if (ui_key(SDLK_p, 0) && V.info.has_video && !pip_on()) { pip_enter(); return; }
     if (ui_key(SDLK_SPACE, 0) || ui_key(SDLK_k, 0) || ui_key(SDLK_AUDIOPLAY, 0)) set_paused(!V.paused);
-    if (ui_key(SDLK_RIGHT, 0)) { seek_to(V.clock + 10); view_chrome_poke(&V.chrome); }
-    if (ui_key(SDLK_LEFT, 0)) { seek_to(V.clock - 10); view_chrome_poke(&V.chrome); }
+    if (!live_now() && ui_key(SDLK_RIGHT, 0)) { seek_to(V.clock + 10); view_chrome_poke(&V.chrome); }
+    if (!live_now() && ui_key(SDLK_LEFT, 0)) { seek_to(V.clock - 10); view_chrome_poke(&V.chrome); }
     if (ui_key(SDLK_UP, 0)) set_volume(V.volume + 0.05f);
     if (ui_key(SDLK_DOWN, 0)) set_volume(V.volume - 0.05f);
     if (ui_key(SDLK_m, 0)) set_volume(V.volume > 0 ? 0 : 0.8f);
@@ -1664,7 +1704,7 @@ static void vid_view_frame(FmRect area) {
     V.tap_pending = false;
     V.ignore_click = true;
     if (touchish) {
-      float rel = (ui.mx - area.x) / area.w;
+      float rel = live_now() ? 0.5f : (ui.mx - area.x) / area.w;     /* live: no skipping */
       if (rel < 0.35f) { seek_to(V.clock - 10); V.skip_flash = -1; V.skip_flash_t = ui.now; }
       else if (rel > 0.65f) { seek_to(V.clock + 10); V.skip_flash = 1; V.skip_flash_t = ui.now; }
       else set_paused(!V.paused);
@@ -1795,22 +1835,33 @@ static void vid_view_frame(FmRect area) {
     FmRect c = rect_inset2(bot, DP(16), DP(8));
     FmRect seek = rect_cut_top(&c, DP(28));
     FmColor fg = col_alpha(VIEW_FG, chrome), fg2 = col_alpha(VIEW_FG2, chrome);
-    vid_seek_bar(seek);
+    bool live = live_now();
+    if (!live) vid_seek_bar(seek);        /* live: nothing to seek in */
     float s = FM_MAX(ui.m.hit, DP(40));
     FmRect row = rect_center(c, c.w, FM_MIN(c.h, s));
     FmRect b = rect_cut_left(&row, s);
     if (ui_icon_btn(ui_id("vid.play"), b, V.paused || V.ended ? IC_PLAY : IC_PAUSE, fg, "Play / pause (Space)"))
       set_paused(!V.paused);
-    if (ui_icon_btn(ui_id("vid.back10"), rect_cut_left(&row, s), IC_ARROW_LEFT, fg, "Back 10 s (Left)")) seek_to(V.clock - 10);
-    if (ui_icon_btn(ui_id("vid.fwd10"), rect_cut_left(&row, s), IC_ARROW_RIGHT, fg, "Forward 10 s (Right)")) seek_to(V.clock + 10);
+    if (live) {                           /* the red pill instead of the skips and the time */
+      rect_cut_left(&row, DP(8));
+      float pw = live_pill(row.x, row.y + row.h * 0.5f, ui.m.font_small, chrome);
+      rect_cut_left(&row, pw + DP(4));
+    } else {
+      if (ui_icon_btn(ui_id("vid.back10"), rect_cut_left(&row, s), IC_ARROW_LEFT, fg, "Back 10 s (Left)"))
+        seek_to(V.clock - 10);
+      if (ui_icon_btn(ui_id("vid.fwd10"), rect_cut_left(&row, s), IC_ARROW_RIGHT, fg, "Forward 10 s (Right)"))
+        seek_to(V.clock + 10);
+    }
     char tb[64], a[24], d[24];
     view_fmt_time(V.seek_drag ? V.seek_t * V.info.duration : V.clock, a, sizeof a);
     view_fmt_time(V.info.duration, d, sizeof d);
     if (V.info.duration > 0) fm_snprintf(tb, sizeof tb, "%s / %s", a, d);
     else fm_strlcpy(tb, a, sizeof tb);
-    rect_cut_left(&row, DP(8));
-    float tw = font_width(FONT_REGULAR, ui.m.font_small, tb, -1);
-    ui_label(rect_cut_left(&row, tw + DP(4)), tb, FONT_REGULAR, ui.m.font_small, fg2, UI_LEFT);
+    if (!live) {
+      rect_cut_left(&row, DP(8));
+      float tw = font_width(FONT_REGULAR, ui.m.font_small, tb, -1);
+      ui_label(rect_cut_left(&row, tw + DP(4)), tb, FONT_REGULAR, ui.m.font_small, fg2, UI_LEFT);
+    }
     quality_chip(&row, fg, fg2);
     /* picture shape cycles (the ⋮ menu lists them all); touch lock on phones */
     if (ui_icon_btn(ui_id("vid.aspect"), rect_cut_right(&row, s), IC_FIT, fg, "Picture shape (A)"))

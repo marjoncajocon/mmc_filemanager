@@ -1116,6 +1116,45 @@ void audio_next_track(void) {
   if (P.active) skip(1);
 }
 
+void audio_prev_track(void) {
+  if (P.active) skip(-1);
+}
+
+bool audio_media_info(FmMediaInfo *m, bool want_cover) {
+  memset(m, 0, sizeof *m);
+  if (!P.active || !g_mx || P.parked) return false;   /* parked: the saved queue, not played yet */
+  int st = audio_state(NULL, 0);
+  lock();
+  const Ent *e = ent_at(P.heard);
+  TrackMeta *t = meta_for(P.heard);
+  m->track = P.heard;
+  m->can_skip = P.nq > 1;
+  m->live = (t && t->live) || (e && e->live);
+  if (t && t->title[0]) {
+    fm_strlcpy(m->title, t->title, sizeof m->title);
+    fm_strlcpy(m->artist, t->artist[0] ? t->artist : t->album, sizeof m->artist);
+  } else if (e) {
+    fm_strlcpy(m->title, e->title && e->title[0] ? e->title : fm_path_base(e->url ? e->url : ""), sizeof m->title);
+    fm_strlcpy(m->artist, e->artist ? e->artist : "", sizeof m->artist);
+  }
+  if (want_cover && t && t->cover.px && t->cover.w > 0 && t->cover.h > 0 && t->cover.w <= 1024 && t->cover.h <= 1024) {
+    size_t n = (size_t)t->cover.w * t->cover.h * 4;
+    m->cover = (u8 *)fm_alloc(n);
+    if (m->cover) {
+      memcpy(m->cover, t->cover.px, n);
+      m->cover_w = t->cover.w;
+      m->cover_h = t->cover.h;
+    }
+  }
+  bool ended = P.ended;
+  unlock();
+  /* the end of the queue while nothing is drawn: stop the device as the
+  ** player's own drawing does (not under the lock: the callback takes it) */
+  if (ended && P.dev && !P.paused) { P.paused = true; SDL_PauseAudioDevice(P.dev, 1); }
+  m->playing = st == AUDIO_PLAYING || st == AUDIO_BUFFERING;
+  return true;
+}
+
 int audio_state(char *ref, size_t cap) {
   if (ref && cap) ref[0] = 0;
   if (!P.active || !g_mx) return AUDIO_IDLE;

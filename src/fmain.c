@@ -11,6 +11,7 @@
 */
 #include "fapp.h"
 #include "ftray.h"
+#include "fmedia.h"
 #include "fsdl.h"
 #include "ftest.h"
 #include "fperf.h"
@@ -164,7 +165,11 @@ static void frame(void) {
     got = SDL_PollEvent(&e) != 0;
   }
   tray_pump();                           /* the tray icon's clicks, also while hidden */
-  if (app.background) return;            /* nothing is drawn while hidden */
+  media_pump();                          /* the notification's buttons (Android) */
+  if (app.background) {                  /* nothing is drawn while hidden; music goes on */
+    media_bg_pump();
+    return;
+  }
   if (!ui_needs_frame()) return;
   int w, h;
   SDL_GetRendererOutputSize(app.ren, &w, &h);
@@ -268,6 +273,10 @@ int main(int argc, char **argv) {
   SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
   SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
   SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+  /* Android: leaving the screen must not freeze the main loop nor pause the
+  ** sound; music and a background video keep playing (fmedia.c) */
+  SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+  SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO, "0");
   SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
   SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
   SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");

@@ -24,6 +24,7 @@
 #include "farc.h"
 #include "flib.h"
 #include "fonline.h"
+#include "fhome.h"
 #include "fphoto.h"                    /* photos */
 #include "faudio_online.h"             /* audio */
 #include "fcloud_app.h"                /* cloud */
@@ -322,6 +323,29 @@ static void open_online(void) {
   if (photo_is_open()) photo_close();   /* photos */
   if (aonline_is_open()) aonline_close();   /* audio */
   online_open(NULL);
+}
+
+static void open_settings(void);
+static void open_photos(void);
+static void open_aonline(void);
+
+/* home: a tile was picked (fhome.c) */
+static void home_pick(int act) {
+  switch (act) {
+    case HOME_FILES: home_close(); break;
+    case HOME_VIDEOS: open_online(); break;
+    case HOME_AUDIO: open_aonline(); break;
+    case HOME_PHOTOS: open_photos(); break;
+    case HOME_LIBRARY: open_library(LIB_SEC_SONGS); break;
+    case HOME_CLOUD: home_close(); cloud_ui_home(); break;   /* a sheet over the panels */
+    case HOME_SETTINGS: open_settings(); break;
+    case HOME_THEME:
+      conf.dark = !T.dark;
+      theme_apply(conf.theme, conf.dark, conf.accent);
+      conf_dirty();
+      break;
+    default: break;
+  }
 }
 
 static void online_reveal_path(const char *path) {   /* online: "Show in folder" */
@@ -1988,7 +2012,7 @@ static void dlg_settings(void) {
   float rh = DP(ui.touch_mode ? 50 : 42), sl = font_line_h(ui.m.font_small) + DP(14);
   float seg_h = DP(ui.touch_mode ? 40 : 34);
   float grid_h = theme_grid_h(c.w - DP(6));
-  float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 3 + rh * 5 +
+  float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 3 + rh * 7 +
                   DP(50) + DP(90) + font_line_h(ui.m.font_small) + DP(6) +   /* about: the credit */
                   (tray_available() ? rh * (conf.tray ? 3 : 1) : 0);   /* tray */
   float online_h = online_settings_h(c.w - DP(6));   /* online: its section */
@@ -2122,6 +2146,15 @@ static void dlg_settings(void) {
       if (!conf.thumbnails) thumb_cancel_all();
       conf_dirty();
     }
+    /* online pictures (videos, photos, audio covers): off saves mobile data;
+    ** ones already in the cache still show */
+    if (ui_switch(ui_idn(base, 305), rect_cut_top(&r, rh), "Online thumbnails (off saves data)",
+                  &conf.online_thumbs)) {
+      if (conf.online_thumbs) othumb_retry_skipped();
+      else othumb_forget_queue();
+      conf_dirty();
+    }
+    if (ui_switch(ui_idn(base, 306), rect_cut_top(&r, rh), "Start on the home screen", &conf.start_home)) conf_dirty();
     if (ui_switch(ui_idn(base, 303), rect_cut_top(&r, rh), "Ask before deleting", &conf.confirm_delete))
       conf_dirty();
     bool tr = conf.use_trash;
@@ -2267,6 +2300,9 @@ static void draw_top(FmRect r) {
   FmRect b = rect_center(rect_cut_right(&in, bs), bs, bs);
   title_nodrag(b);
   if (ui_icon_btn(ui_idn(base, 2), b, IC_SETTINGS, T.text2, "Settings")) open_settings();
+  b = rect_center(rect_cut_right(&in, bs), bs, bs);
+  title_nodrag(b);
+  if (ui_icon_btn(ui_idn(base, 6), b, IC_HOME, T.text2, "Home")) home_open();
   if (theme_has_both(conf.theme)) {
     b = rect_center(rect_cut_right(&in, bs), bs, bs);
     title_nodrag(b);
@@ -3078,6 +3114,8 @@ void app_init(void) {
     const char *st = arg_value("--demo-cloud");
     cloud_ui_demo(st && st[0] != '-' ? st : NULL);
   }
+  /* home: when started plainly (no file, no test or demo flag) */
+  if ((conf.start_home && app.argc <= 1) || arg_flag("--demo-home")) home_open();
   ui_redraw();
 }
 
@@ -3156,6 +3194,7 @@ void app_event(const SDL_Event *e) {
       g_vols_dirty = g_places_dirty = true;
       break;
     case SDL_APP_WILLENTERBACKGROUND:
+      video_app_hidden();              /* a playing video goes on as sound */
       conf_flush(true);
       audio_queue_save_now();          /* Android may end the app from the background */
       pl_flush();
@@ -3215,6 +3254,13 @@ void app_frame(void) {
   /* audio: the online audio view, also under the viewers */
   if (aonline_is_open()) {
     aonline_frame(FM_RECT(0, 0, ui.w, ui.h));
+    draw_dialogs();
+    title_outline();
+    return;
+  }
+  /* home: the big tiles, under the online views (their Back comes here) */
+  if (home_is_open()) {
+    home_pick(home_frame(FM_RECT(0, 0, ui.w, ui.h)));
     draw_dialogs();
     title_outline();
     return;

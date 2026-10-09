@@ -54,6 +54,8 @@ typedef struct FmConf {
   bool confirm_delete;
   bool use_trash;
   bool thumbnails;
+  bool start_home;             /* open on the home screen (big tiles) */
+  bool online_thumbs;          /* download thumbnails of online items (off: saves data) */
   int sort[2];                /* per panel */
   bool sort_desc[2];
   int view[2];                /* VIEW_* per panel */

@@ -20,6 +20,9 @@ void online_init(bool readonly);
 void online_shutdown(void);
 /* Every frame, open or not: finished searches, downloads, thumbnails. */
 void online_pump(void);
+/* the "Online thumbnails" setting changed: off drops the queue, on retries */
+void othumb_forget_queue(void);
+void othumb_retry_skipped(void);
 /* Device lost: thumbnails are fetched again. */
 void online_render_reset(void);
 

@@ -167,4 +167,23 @@ enum { AUDIO_IDLE, AUDIO_BUFFERING, AUDIO_PLAYING, AUDIO_PAUSED, AUDIO_FAILED };
 ** files). For the online view's "now playing" rows. */
 int  audio_state(char *ref, size_t cap);
 
+/* ---- the system's media controls (Android notification, lock screen) --- */
+
+typedef struct FmMediaInfo {
+  char title[256], artist[256];
+  bool playing;               /* false: paused or ended */
+  bool live, can_skip;        /* can_skip: there are other tracks */
+  int track;                  /* changes with the track (the art is sent again) */
+  int cover_w, cover_h;
+  u8 *cover;                  /* RGBA copy when asked for; fm_free it */
+} FmMediaInfo;
+/* What the music player plays, without drawing (also while the app is in
+** the background); false when nothing is loaded. */
+bool audio_media_info(FmMediaInfo *m, bool want_cover);
+void audio_prev_track(void);
+/* The same for a video, in the player or in the background. */
+bool video_media_info(FmMediaInfo *m);
+void video_media_toggle(void);         /* play/pause the video */
+void video_app_hidden(void);           /* the app left the screen: a playing video goes on as sound */
+
 #endif

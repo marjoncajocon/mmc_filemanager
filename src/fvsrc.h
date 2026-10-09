@@ -112,6 +112,7 @@ typedef struct FmVsrcStream {
   /* the qualities, best first; cur = the one video/audio play (-1 = none) */
   int nq, cur;
   FmVsrcQuality q[VSRC_QMAX];
+  bool live;              /* on air now: no length, no seeking, no saving */
 } FmVsrcStream;
 
 /* Progress for long steps (downloads into the cache): frac 0..1, or < 0 when

@@ -58,6 +58,7 @@ typedef struct ThE {
   u64 seq;                   /* request order, for LIFO */
   u64 t_tex, t_fail;
   bool undecodable;          /* the bytes came but are no picture stb reads (WebP): never again */
+  bool skipped;              /* not downloaded: "Online thumbnails" was off */
   volatile int cancel;
 } ThE;
 
@@ -219,7 +220,7 @@ static int worker(void *u) {
     size_t n = 0;
     u8 *data = disk_read(url, &n);
     bool from_disk = data != NULL;
-    if (!data) {
+    if (!data && conf.online_thumbs) {      /* off: only what the disk cache has, no data used */
       FmNetResp r;
       memset(&r, 0, sizeof r);
       char jpg[160];
@@ -253,6 +254,7 @@ static int worker(void *u) {
         e->state = TS_FAILED;
         e->t_fail = SDL_GetTicks64();
         e->undecodable = fetched;
+        e->skipped = !fetched && !conf.online_thumbs;
       }
     }
     if (im.px) img_free(&im);
@@ -442,6 +444,17 @@ void othumb_reset(void) {
     else if (e->state == TS_QUEUED) e->state = TS_FREE;
   }
   SDL_UnlockMutex(G.mx);
+}
+
+/* The "Online thumbnails" switch went on: what was skipped while it was off
+** loads now, not after the retry delay. */
+void othumb_retry_skipped(void) {
+  if (!G.init || !G.mx) return;
+  SDL_LockMutex(G.mx);
+  for (int i = 0; i < OT_ENTRIES; i++)
+    if (G.e[i].state == TS_FAILED && G.e[i].skipped) G.e[i].state = TS_FREE;
+  SDL_UnlockMutex(G.mx);
+  ui_redraw();
 }
 
 size_t othumb_bytes(void) { return G.tex_bytes; }

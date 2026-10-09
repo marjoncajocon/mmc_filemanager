@@ -437,6 +437,10 @@ static void take_prep(void) {
 
 static void download_item(const FmVsrc *s, const FmVsrcItem *it) {
   if (!s) return;
+  if (it->live) {                     /* it never ends: nothing to save */
+    ui_toast("A live stream cannot be downloaded");
+    return;
+  }
   if ((s->flags & VSRC_YTDLP) && !otools(false)->ytdlp && !s->download) {
     ui_toast("Downloads from %s need yt-dlp (Settings)", s->name);
     return;

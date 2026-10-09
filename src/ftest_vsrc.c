@@ -1177,6 +1177,43 @@ static const char *kItPlayer =
   IT_FMT(251, "audio/webm; codecs=\\\"opus\\\"", "")
   "]}}";
 
+/* a live reply (visionOS client, 2026-10-09, trimmed) and its master playlist:
+** video-only TS variants, the sound in two AUDIO groups (HE-AAC, AAC) */
+static const char *kItLive =
+  "{\"playabilityStatus\":{\"status\":\"OK\",\"liveStreamability\":{\"liveStreamabilityRenderer\":{\"videoId\":"
+  "\"Q9GprU4Hi-Q\",\"pollDelayMs\":\"15000\"}}},\"streamingData\":{\"expiresInSeconds\":\"21540\","
+  "\"adaptiveFormats\":[],\"hlsManifestUrl\":\"https://manifest.googlevideo.com/api/manifest/hls_variant/expire/"
+  "1791564346/id/Q9GprU4Hi-Q.1/source/yt_live_broadcast/file/index.m3u8\"},\"videoDetails\":{\"videoId\":"
+  "\"Q9GprU4Hi-Q\",\"title\":\"News live\",\"lengthSeconds\":\"0\",\"isLive\":true,\"isLiveContent\":true}}";
+
+#define IT_HLS "https://manifest.googlevideo.com/api/manifest/hls_playlist/id/Q9GprU4Hi-Q.1/itag/"
+static const char *kItLiveMaster =
+  "#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n"
+  "#EXT-X-MEDIA:URI=\"" IT_HLS "233/sgoap/itag%3D139/playlist/index.m3u8\",TYPE=AUDIO,GROUP-ID=\"233\",NAME=\"Default\","
+  "DEFAULT=YES,AUTOSELECT=YES\n"
+  "#EXT-X-MEDIA:URI=\"" IT_HLS "234/sgoap/itag%3D140/playlist/index.m3u8\",TYPE=AUDIO,GROUP-ID=\"234\",NAME=\"Default\","
+  "DEFAULT=YES,AUTOSELECT=YES\n"
+  "#EXT-X-MEDIA:URI=\"" IT_HLS "387/captions/1/playlist/index.m3u8\",TYPE=SUBTITLES,GROUP-ID=\"vtt\",LANGUAGE=\"en\","
+  "NAME=\"en\",DEFAULT=NO,AUTOSELECT=YES\n"
+  "#EXT-X-STREAM-INF:BANDWIDTH=507418,CODECS=\"avc1.4D4015,mp4a.40.5\",RESOLUTION=426x240,FRAME-RATE=30,"
+  "VIDEO-RANGE=SDR,AUDIO=\"233\",SUBTITLES=\"vtt\",CLOSED-CAPTIONS=NONE\n" IT_HLS "229/sgovp/a/playlist/index.m3u8\n"
+  "#EXT-X-STREAM-INF:BANDWIDTH=591418,CODECS=\"avc1.4D4015,mp4a.40.2\",RESOLUTION=426x240,FRAME-RATE=30,"
+  "VIDEO-RANGE=SDR,AUDIO=\"234\",SUBTITLES=\"vtt\",CLOSED-CAPTIONS=NONE\n" IT_HLS "229/sgovp/b/playlist/index.m3u8\n"
+  "#EXT-X-STREAM-INF:BANDWIDTH=962461,CODECS=\"avc1.4D401E,mp4a.40.2\",RESOLUTION=640x360,FRAME-RATE=30,"
+  "VIDEO-RANGE=SDR,AUDIO=\"234\",SUBTITLES=\"vtt\",CLOSED-CAPTIONS=NONE\n" IT_HLS "230/sgovp/playlist/index.m3u8\n"
+  "#EXT-X-STREAM-INF:BANDWIDTH=1282517,CODECS=\"avc1.4D401F,mp4a.40.2\",RESOLUTION=854x480,FRAME-RATE=30,"
+  "VIDEO-RANGE=SDR,AUDIO=\"234\",SUBTITLES=\"vtt\",CLOSED-CAPTIONS=NONE\n" IT_HLS "231/sgovp/playlist/index.m3u8\n"
+  "#EXT-X-STREAM-INF:BANDWIDTH=269034,CODECS=\"avc1.42C00B,mp4a.40.5\",RESOLUTION=256x144,FRAME-RATE=15,"
+  "VIDEO-RANGE=SDR,AUDIO=\"233\",SUBTITLES=\"vtt\",CLOSED-CAPTIONS=NONE\n" IT_HLS "269/sgovp/playlist/index.m3u8\n"
+  "#EXT-X-STREAM-INF:BANDWIDTH=2922155,CODECS=\"avc1.4D4020,mp4a.40.2\",RESOLUTION=1280x720,FRAME-RATE=60,"
+  "VIDEO-RANGE=SDR,AUDIO=\"234\",SUBTITLES=\"vtt\",CLOSED-CAPTIONS=NONE\n" IT_HLS "232/sgovp/playlist/index.m3u8\n";
+
+/* a scheduled live stream (trimmed) */
+static const char *kItUpcoming =
+  "{\"playabilityStatus\":{\"status\":\"LIVE_STREAM_OFFLINE\",\"reason\":\"This live event will begin in 10 hours.\","
+  "\"liveStreamability\":{\"liveStreamabilityRenderer\":{\"offlineSlate\":{\"liveStreamOfflineSlateRenderer\":"
+  "{\"scheduledStartTime\":\"1791579600\"}}}}},\"videoDetails\":{\"isUpcoming\":true,\"isLiveContent\":true}}";
+
 static void vt_innertube(void) {
   char id[16];
   TEST_CHECK(vsrc_innertube_id("https://www.youtube.com/watch?v=aqz-KE-bpKQ&t=10", id, sizeof id) &&
@@ -1225,8 +1262,37 @@ static void vt_innertube(void) {
   TEST_CHECK(strstr(st->video, "itag=243") && strstr(st->audio, "itag=251"));
   /* refused / not a reply */
   const char *live = "{\"playabilityStatus\":{\"status\":\"OK\"},\"videoDetails\":{\"isLive\":true}}";
-  TEST_CHECK(vsrc_innertube_pick(live, strlen(live), &c, st, err, sizeof err) == FM_ERR_UNSUPPORTED);
+  TEST_CHECK(vsrc_innertube_pick(live, strlen(live), &c, st, err, sizeof err) == FM_ERR_UNSUPPORTED &&
+             strstr(err, "live stream"));
+  TEST_CHECK(vsrc_innertube_live_pick(live, strlen(live), kItLiveMaster, strlen(kItLiveMaster), &c, st, err,
+                                      sizeof err) == FM_ERR_UNSUPPORTED && strstr(err, "yt-dlp"));
   TEST_CHECK(vsrc_innertube_pick("nope", 4, &c, st, err, sizeof err) == FM_ERR_FORMAT);
+  TEST_CHECK(vsrc_innertube_pick(kItUpcoming, strlen(kItUpcoming), &c, st, err, sizeof err) == FM_ERR_NOT_FOUND &&
+             strstr(err, "hasn't started yet (it starts 20"));
+  const char *offline = "{\"playabilityStatus\":{\"status\":\"LIVE_STREAM_OFFLINE\"},\"videoDetails\":{}}";
+  TEST_CHECK(vsrc_innertube_pick(offline, strlen(offline), &c, st, err, sizeof err) == FM_ERR_NOT_FOUND &&
+             !strcmp(err, "This live stream is offline"));
+
+  /* live: the master playlist's variants are the qualities, tallest first,
+  ** one 240p (the AAC copy, more bits), the sound from the AUDIO group */
+  size_t ln = strlen(kItLive), mn = strlen(kItLiveMaster);
+  c.os_mp4 = true;
+  c.max_height = 480;
+  TEST_CHECK(vsrc_innertube_live_pick(kItLive, ln, kItLiveMaster, mn, &c, st, err, sizeof err) == FM_OK);
+  TEST_CHECK(st->live && st->duration == 0 && st->nq == 5);
+  TEST_CHECK(q_find(st, "720p60") == 0 && q_find(st, "480p") == 1 && q_find(st, "144p") == 4);
+  TEST_CHECK(st->cur == 1 && strstr(st->video, "/itag/231/") && strstr(st->audio, "/itag/234/"));
+  TEST_CHECK(!strncmp(st->video, "https://manifest.googlevideo.com/api/manifest/hls_playlist/", 59));
+  TEST_CHECK(!st->q[1].muxed && st->q[1].playable && !strcmp(st->q[1].codec, "H.264") && st->q[1].kbps == 1282);
+  int k240 = q_find(st, "240p");
+  TEST_CHECK(k240 == 3 && strstr(st->q[k240].url, "/229/sgovp/b/"));
+  /* without FFmpeg or the system's MP4 decoders: listed, nothing plays */
+  c.os_mp4 = false;
+  TEST_CHECK(vsrc_innertube_live_pick(kItLive, ln, kItLiveMaster, mn, &c, st, err, sizeof err) == FM_ERR_UNSUPPORTED &&
+             st->nq == 5 && st->q[0].needs_ffmpeg && strstr(err, "FFmpeg"));
+  c.have_ffmpeg_libs = true;
+  TEST_CHECK(vsrc_innertube_live_pick(kItLive, ln, kItLiveMaster, mn, &c, st, err, sizeof err) == FM_OK);
+  TEST_CHECK(vsrc_innertube_live_pick(kItLive, ln, "<html>", 6, &c, st, err, sizeof err) == FM_ERR_FORMAT);
   fm_free(st);
 }
 
@@ -1280,13 +1346,15 @@ static void vt_innertube_live(void) {
       FmVidFrame vf;
       FmVidPcm pc;
       int ev, nv = 0, na = 0, guard = 0;
+      double vt0 = -1, vt1 = -1, at0 = -1, at1 = -1;      /* first and last times: is the pair in step */
       while ((nv < 60 || na < 60) && guard++ < 5000 && (ev = vid_decode(v, &vf, &pc)) > 0) {
-        if (ev == VID_EV_VIDEO) nv++;
-        else if (ev == VID_EV_AUDIO) na++;
+        if (ev == VID_EV_VIDEO) { if (!nv++) vt0 = vf.t; vt1 = vf.t; }
+        else if (ev == VID_EV_AUDIO) { if (!na++) at0 = pc.t; at1 = pc.t; }
       }
       u64 t2 = plat_now_ms();
       printf("  yt play: %s %dx%d, open %d ms, 60 frames + 60 sound blocks %d ms (v%d a%d)\n", vid_info(v)->backend,
              vid_info(v)->w, vid_info(v)->h, (int)(t1 - t0), (int)(t2 - t1), nv, na);
+      printf("  yt times: live %d, picture %.2f..%.2f s, sound %.2f..%.2f s\n", st->live, vt0, vt1, at0, at1);
       TEST_CHECK(nv >= 60 && na >= 60);
       vid_close(v);
     }

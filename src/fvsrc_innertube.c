@@ -22,26 +22,42 @@
 **     600-1000 characters, longer than FmVsrcPage.next, so they stay here in
 **     a small ring and the page carries "i:<slot>".
 **   - Formats that would need deciphering (signatureCipher), OTF segment
-**     streams and live DASH are skipped; live videos say so, and the yt-dlp
-**     path (when present) takes over.
+**     streams and live DASH are skipped.
+**   - Live streams play from the HLS master playlist the same reply names
+**     (streamingData.hlsManifestUrl; the visionOS client lists it, measured
+**     2026-10-09): its variants become the quality menu, like Dailymotion's
+**     (vsrc_hls_pick). Each variant is H.264 in MPEG-TS with the sound as a
+**     separate packed-AAC playlist (the pair the player already opens), and
+**     fnetstream follows the live edge. A reply without the address is asked
+**     again as the iOS app (kPlayerLive) before giving up to yt-dlp; live
+**     streams that have not started or have ended say so in words.
 */
 #include "fvsrc.h"
 #include "fvsrc_int.h"
 #include "fjson.h"
 #include "fnet.h"
+#include "fhls.h"
 #include "fsdl.h"
 #include <ctype.h>
 #include <stdarg.h>
 
 #define IT_API "https://www.youtube.com/youtubei/v1/"
 
-/* the player client (see the header) */
-static const struct {
+/* the player clients (see the header) */
+typedef struct ItClient {
   const char *name, *version, *id, *make, *model, *os, *os_ver, *ua;
-} kPlayer = {
+} ItClient;
+static const ItClient kPlayer = {
   "VISIONOS", "1.02", "101", "Apple", "RealityDevice17,1", "visionOS", "26.5.23O471",
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) "
   "Version/26.0 Safari/605.1.15",
+};
+/* asked only when kPlayer's reply for a live stream lacks the HLS address.
+** Measured 2026-10-09 it plays but lists no hlsManifestUrl either (it wants a
+** PO token for that now); kept as the cheap second try clients rotate to */
+static const ItClient kPlayerLive = {
+  "IOS", "20.10.4", "5", "Apple", "iPhone16,2", "iPhone", "18.3.2.22D82",
+  "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
 };
 
 /* the search client */
@@ -174,23 +190,23 @@ bool vsrc_innertube_id(const char *s, char *out, size_t cap) {
 
 /* ---- the player call ---------------------------------------------------------------- */
 
-static FmErr player_call(const char *id, const char *visitor, FmNetResp *r, char *err, size_t errcap,
-                         volatile int *cancel) {
+static FmErr player_call(const ItClient *cl, const char *id, const char *visitor, FmNetResp *r, char *err,
+                         size_t errcap, volatile int *cancel) {
   Sb body = { 0 };
   sb_s(&body, "{\"context\":{\"client\":{\"clientName\":");
-  sb_q(&body, kPlayer.name);
+  sb_q(&body, cl->name);
   sb_s(&body, ",\"clientVersion\":");
-  sb_q(&body, kPlayer.version);
+  sb_q(&body, cl->version);
   sb_s(&body, ",\"deviceMake\":");
-  sb_q(&body, kPlayer.make);
+  sb_q(&body, cl->make);
   sb_s(&body, ",\"deviceModel\":");
-  sb_q(&body, kPlayer.model);
+  sb_q(&body, cl->model);
   sb_s(&body, ",\"userAgent\":");
-  sb_q(&body, kPlayer.ua);
+  sb_q(&body, cl->ua);
   sb_s(&body, ",\"osName\":");
-  sb_q(&body, kPlayer.os);
+  sb_q(&body, cl->os);
   sb_s(&body, ",\"osVersion\":");
-  sb_q(&body, kPlayer.os_ver);
+  sb_q(&body, cl->os_ver);
   sb_s(&body, ",\"hl\":\"en\"");
   if (visitor[0]) { sb_s(&body, ",\"visitorData\":"); sb_q(&body, visitor); }
   sb_s(&body, "}},\"videoId\":");
@@ -200,7 +216,7 @@ static FmErr player_call(const char *id, const char *visitor, FmNetResp *r, char
   int n = fm_snprintf(hdr, sizeof hdr,
                       "Content-Type: application/json\r\nX-YouTube-Client-Name: %s\r\n"
                       "X-YouTube-Client-Version: %s\r\nOrigin: https://www.youtube.com\r\nUser-Agent: %s\r\n",
-                      kPlayer.id, kPlayer.version, kPlayer.ua);
+                      cl->id, cl->version, cl->ua);
   if (visitor[0] && n > 0 && (size_t)n < sizeof hdr)
     fm_snprintf(hdr + n, sizeof hdr - (size_t)n, "X-Goog-Visitor-Id: %s\r\n", visitor);
   memset(r, 0, sizeof *r);
@@ -221,14 +237,40 @@ static FmErr player_call(const char *id, const char *visitor, FmNetResp *r, char
   return FM_OK;
 }
 
-/* The player reply for id, parsed into j (json_free). FM_OK only when the
-** video plays; else err says why in words. */
-static FmErr player(const char *id, FmJson *j, char *err, size_t errcap, volatile int *cancel) {
+/* Why a reply with a status other than OK does not play, in words.
+** FM_ERR_NOT_FOUND = a live stream that is not on air (yt-dlp would not
+** play it either), FM_ERR_ACCESS = sign-in or age checks. */
+static FmErr refusal(const FmJsonNode *root, char *err, size_t errcap) {
+  const char *st = json_str(json_path(root, "playabilityStatus.status"), "");
+  if (!strcmp(st, "LIVE_STREAM_OFFLINE")) {
+    if (json_bool(json_path(root, "videoDetails.isUpcoming"), false)) {
+      double at = json_num(json_path(root, "playabilityStatus.liveStreamability.liveStreamabilityRenderer."
+                                           "offlineSlate.liveStreamOfflineSlateRenderer.scheduledStartTime"), 0);
+      char when[32];
+      if (at > 0) fm_snprintf(err, errcap, "This live stream hasn't started yet (it starts %s)",
+                              fm_fmt_time((i64)at, when, sizeof when));
+      else fm_strlcpy(err, "This live stream hasn't started yet", errcap);
+    } else {
+      fm_strlcpy(err, "This live stream is offline", errcap);
+    }
+    return FM_ERR_NOT_FOUND;
+  }
+  const char *why = json_str(json_path(root, "playabilityStatus.reason"), "");
+  if (!why[0]) why = json_str(json_path(root, "playabilityStatus.messages.0"), "");
+  if (why[0]) fm_snprintf(err, errcap, "YouTube: %s", why);
+  else fm_snprintf(err, errcap, "YouTube will not play this video here (%s)", st[0] ? st : "no status");
+  return !strcmp(st, "LOGIN_REQUIRED") || !strcmp(st, "AGE_VERIFICATION_REQUIRED") ? FM_ERR_ACCESS
+                                                                                     : FM_ERR_UNSUPPORTED;
+}
+
+/* The player reply for id as client cl, parsed into j (json_free). FM_OK
+** only when the video plays; else err says why in words. */
+static FmErr player(const ItClient *cl, const char *id, FmJson *j, char *err, size_t errcap, volatile int *cancel) {
   char visitor[1024];
   visitor_get(visitor, sizeof visitor);
   for (int round = 0; round < 2; round++) {
     FmNetResp r;
-    FmErr e = player_call(id, visitor, &r, err, errcap, cancel);
+    FmErr e = player_call(cl, id, visitor, &r, err, errcap, cancel);
     if (e != FM_OK) return e;
     e = json_parse(j, (const char *)r.data, r.len);
     net_resp_free(&r);
@@ -247,13 +289,9 @@ static FmErr player(const char *id, FmJson *j, char *err, size_t errcap, volatil
       json_free(j);
       continue;
     }
-    const char *why = json_str(json_path(root, "playabilityStatus.reason"), "");
-    if (!why[0]) why = json_str(json_path(root, "playabilityStatus.messages.0"), "");
-    if (why[0]) fm_snprintf(err, errcap, "YouTube: %s", why);
-    else fm_snprintf(err, errcap, "YouTube will not play this video here (%s)", st[0] ? st : "no status");
+    e = refusal(root, err, errcap);
     json_free(j);
-    return !strcmp(st, "LOGIN_REQUIRED") || !strcmp(st, "AGE_VERIFICATION_REQUIRED") ? FM_ERR_ACCESS
-                                                                                       : FM_ERR_UNSUPPORTED;
+    return e;
   }
   return FM_ERR_ACCESS;
 }
@@ -354,7 +392,7 @@ static void fill_item(const FmJsonNode *root, const char *id, FmVsrcItem *it) {
   fm_strlcpy(it->channel, json_str(json_get(vd, "author"), ""), sizeof it->channel);
   it->duration = json_num(json_get(vd, "lengthSeconds"), 0);
   it->views = (i64)json_num(json_get(vd, "viewCount"), -1);
-  it->live = json_bool(json_get(vd, "isLive"), false) || json_bool(json_get(vd, "isLiveContent"), false);
+  it->live = json_bool(json_get(vd, "isLive"), false);       /* on air now (isLiveContent: ever was) */
   fm_snprintf(it->thumb, sizeof it->thumb, "https://i.ytimg.com/vi/%s/hqdefault.jpg", id);
   fm_snprintf(it->page, sizeof it->page, "https://www.youtube.com/watch?v=%s", id);
 }
@@ -369,6 +407,87 @@ FmErr vsrc_innertube_pick(const char *json, size_t len, const FmVsrcConf *c, FmV
   if (json_parse(&j, json, len) != FM_OK) return FM_ERR_FORMAT;
   FmErr e = pick(json_root(&j), c, out, err, errcap);
   json_free(&j);
+  return e;
+}
+
+/* ---- live streams ------------------------------------------------------------------------ */
+
+static bool is_live(const FmJsonNode *root) { return json_bool(json_path(root, "videoDetails.isLive"), false); }
+
+/* the HLS master playlist's address in a live reply, NULL when none */
+static const char *live_hls(const FmJsonNode *root) {
+  const char *u = json_str(json_path(root, "streamingData.hlsManifestUrl"), "");
+  return vsrc_url_ok(u) && strlen(u) < HLS_URL_MAX ? u : NULL;
+}
+
+/* master playlist text (fetched from base) -> the qualities */
+static FmErr live_pick(const char *m3u8, size_t len, const char *base, const FmVsrcConf *c, FmVsrcStream *out,
+                       char *err, size_t errcap) {
+  FmErr e = vsrc_hls_pick(m3u8, len, base, 0, c, out);
+  out->live = true;
+  if (e == FM_ERR_FORMAT) fm_strlcpy(err, "YouTube sent a live playlist this app does not understand", errcap);
+  else if (e == FM_ERR_UNSUPPORTED)
+    fm_strlcpy(err, c->have_ffmpeg_libs ? "None of this live stream's formats can be decoded here"
+                                        : "Live streams (H.264 in HLS) need the FFmpeg libraries on this system",
+               errcap);
+  return e;
+}
+
+FmErr vsrc_innertube_live_pick(const char *json, size_t len, const char *m3u8, size_t mlen, const FmVsrcConf *c,
+                               FmVsrcStream *out, char *err, size_t errcap) {
+  memset(out, 0, sizeof *out);
+  out->cur = -1;
+  FmJson j;
+  if (json_parse(&j, json, len) != FM_OK) return FM_ERR_FORMAT;
+  const FmJsonNode *root = json_root(&j);
+  const char *hls = live_hls(root);
+  FmErr e;
+  if (!is_live(root)) e = FM_ERR_FORMAT;
+  else if (!hls) e = pick(root, c, out, err, errcap);                  /* the refusal */
+  else e = live_pick(m3u8, mlen, hls, c, out, err, errcap);
+  json_free(&j);
+  return e;
+}
+
+/* The live stream of a reply: its HLS address, asked again as kPlayerLive
+** when kPlayer's reply has none, then the master playlist's qualities. */
+static FmErr live_resolve(const char *id, const FmJsonNode *root, const FmVsrcConf *c, FmVsrcStream *out, char *err,
+                          size_t errcap, volatile int *cancel) {
+  char url[HLS_URL_MAX];
+  const char *hls = live_hls(root);
+  if (hls) {
+    fm_strlcpy(url, hls, sizeof url);
+  } else {
+    FmJson j;
+    url[0] = 0;
+    char ignored[160];
+    if (player(&kPlayerLive, id, &j, ignored, sizeof ignored, cancel) == FM_OK) {
+      if ((hls = live_hls(json_root(&j))) != NULL) fm_strlcpy(url, hls, sizeof url);
+      json_free(&j);
+    }
+    if (cancel && *cancel) { fm_strlcpy(err, "Cancelled", errcap); return FM_ERR_CANCEL; }
+    if (!url[0]) {
+      fm_strlcpy(err, "This live stream can't be played without yt-dlp", errcap);
+      return FM_ERR_UNSUPPORTED;
+    }
+    fm_log("youtube: live address from the %s client", kPlayerLive.name);
+  }
+  FmNetResp r;
+  memset(&r, 0, sizeof r);
+  FmErr e = net_get(url, NULL, VSRC_MAX_REPLY, &r, cancel);
+  if (e == FM_ERR_CANCEL) { fm_strlcpy(err, "Cancelled", errcap); net_resp_free(&r); return e; }
+  if (e != FM_OK) {
+    fm_snprintf(err, errcap, "Network error: %s", r.error[0] ? r.error : fm_err_str(e));
+    net_resp_free(&r);
+    return e;
+  }
+  if (r.status != 200) {
+    vsrc_http_error("YouTube", r.status, err, errcap);
+    net_resp_free(&r);
+    return FM_ERR_IO;
+  }
+  e = live_pick((const char *)r.data, r.len, url, c, out, err, errcap);
+  net_resp_free(&r);
   return e;
 }
 
@@ -390,8 +509,13 @@ FmErr vsrc_innertube_resolve(const FmVsrcConf *c, const char *id, FmVsrcStream *
   FmErr e = FM_OK;
   for (int round = 0; round < 2; round++) {
     FmJson j;
-    e = player(id, &j, err, errcap, cancel);
+    e = player(&kPlayer, id, &j, err, errcap, cancel);
     if (e != FM_OK) return e;
+    if (is_live(json_root(&j))) {
+      e = live_resolve(id, json_root(&j), c, out, err, errcap, cancel);
+      json_free(&j);
+      return e;
+    }
     e = pick(json_root(&j), c, out, err, errcap);
     json_free(&j);
     if (e != FM_OK || round == 1) break;
@@ -408,9 +532,13 @@ FmErr vsrc_innertube_resolve(const FmVsrcConf *c, const char *id, FmVsrcStream *
   return e;
 }
 
+/* A reply's formats (an on-demand video). A live one has no formats this
+** path plays without its HLS address (live_resolve); a refusal says why. */
 static FmErr pick(const FmJsonNode *root, const FmVsrcConf *c, FmVsrcStream *out, char *err, size_t errcap) {
-  if (json_bool(json_path(root, "videoDetails.isLive"), false)) {
-    fm_strlcpy(err, "Live streams play through yt-dlp only, for now", errcap);
+  const char *st = json_str(json_path(root, "playabilityStatus.status"), "OK");
+  if (strcmp(st, "OK") != 0) return refusal(root, err, errcap);
+  if (is_live(root)) {
+    fm_strlcpy(err, "This live stream can't be played without yt-dlp", errcap);
     return FM_ERR_UNSUPPORTED;
   }
   size_t len = 0;
@@ -430,7 +558,7 @@ FmErr vsrc_innertube_item(const char *id, FmVsrcItem *it, char *err, size_t errc
   memset(it, 0, sizeof *it);
   it->views = -1;
   FmJson j;
-  FmErr e = player(id, &j, err, errcap, cancel);
+  FmErr e = player(&kPlayer, id, &j, err, errcap, cancel);
   if (e != FM_OK) return e;
   fill_item(json_root(&j), id, it);
   json_free(&j);

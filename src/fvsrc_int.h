@@ -116,7 +116,8 @@ void  vsrc_cache_key(const char *site, const FmVsrcItem *item, int height, char 
 /* A video id from an id or a YouTube link (watch, youtu.be, shorts, embed, live). */
 bool  vsrc_innertube_id(const char *s, char *out, size_t cap);
 /* Stream URLs and the quality list for one video id, like vsrc_ytdlp_resolve
-** (never downloads). */
+** (never downloads). Live streams too (out->live). FM_ERR_NOT_FOUND = a live
+** stream not on air (err says so; yt-dlp would not play it either). */
 FmErr vsrc_innertube_resolve(const FmVsrcConf *c, const char *id, FmVsrcStream *out, char *err, size_t errcap,
                              volatile int *cancel);
 /* Title, channel, length ... of one video (a pasted link). */
@@ -128,6 +129,10 @@ FmErr vsrc_innertube_parse_search(const char *json, size_t len, FmVsrcPage *out)
 /* The quality list and the default pick from a player reply (exposed for the self test). */
 FmErr vsrc_innertube_pick(const char *json, size_t len, const FmVsrcConf *c, FmVsrcStream *out, char *err,
                           size_t errcap);
+/* A live reply (json) and its master playlist (m3u8, as fetched from the
+** reply's hlsManifestUrl) -> the qualities, out->live set (for the self test). */
+FmErr vsrc_innertube_live_pick(const char *json, size_t len, const char *m3u8, size_t mlen, const FmVsrcConf *c,
+                               FmVsrcStream *out, char *err, size_t errcap);
 
 void vsrc_youtube_search_url(const FmVsrcConf *c, const char *query, const char *token, char *out,
                              size_t cap);
@@ -162,5 +167,9 @@ FmErr vsrc_dailymotion_parse_meta(const char *json, size_t len, FmDmMeta *m, cha
 ** FM_ERR_UNSUPPORTED = nothing decodes here, FM_ERR_FORMAT = not a master. */
 FmErr vsrc_dailymotion_pick(const char *m3u8, size_t len, const char *base, const FmDmMeta *m,
                             const FmVsrcConf *c, FmVsrcStream *out);
+/* The same for any HLS master playlist (duration 0 = live or unknown):
+** Dailymotion and YouTube live. */
+FmErr vsrc_hls_pick(const char *m3u8, size_t len, const char *base, double duration, const FmVsrcConf *c,
+                    FmVsrcStream *out);
 
 #endif

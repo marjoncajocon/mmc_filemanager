@@ -257,7 +257,9 @@ static FmErr yt_resolve(const FmVsrcConf *c, const FmVsrcItem *item, FmVsrcStrea
   if (errcap) err[0] = 0;
   if (!c->force_cache && item_id(item, vid, sizeof vid)) {
     e = vsrc_innertube_resolve(c, vid, out, err, errcap, cancel);
-    if (e == FM_OK || e == FM_ERR_CANCEL) return e;
+    /* yt-dlp plays no live stream either: one not on air (NOT_FOUND) or one
+    ** listed but not decodable here (live set) keeps this message */
+    if (e == FM_OK || e == FM_ERR_CANCEL || e == FM_ERR_NOT_FOUND || out->live) return e;
     fm_log("youtube: built-in resolve failed: %s", err);
   }
   if (ytdlp_usable(c)) {
@@ -281,6 +283,10 @@ static FmErr yt_download(const FmVsrcConf *c, const FmVsrcItem *item, const char
   if (!item_id(item, vid, sizeof vid)) { fm_strlcpy(err, "Not a YouTube video", errcap); return FM_ERR_NOT_FOUND; }
   FmVsrcStream *st = (FmVsrcStream *)fm_calloc(1, sizeof *st);
   FmErr e = vsrc_innertube_resolve(c, vid, st, err, errcap, cancel);
+  if (e == FM_OK && st->live) {
+    fm_strlcpy(err, "A live stream cannot be downloaded", errcap);
+    e = FM_ERR_UNSUPPORTED;
+  }
   if (e == FM_OK)
     e = vsrc_save_stream(c, item, st, dir && *dir ? dir : c->download_dir, out_path, cap, cb, user, err, errcap,
                          cancel);
