@@ -777,10 +777,13 @@ static FmErr mg_call(MgApi *api, const char *cmd, FmJson *j, const FmJsonNode **
   char hc[256] = "";
   int wait = 250;
   FmErr e = FM_ERR_IO;
+  /* one request id for all the retries of this command: MEGA binds a 402
+  ** proof-of-work challenge to the id that got it, and a solved challenge
+  ** sent with another id is answered with a new 402 (verified 2026-10-09) */
+  u32 seq;
+  plat_random(&seq, sizeof seq);
   for (int attempt = 0; attempt < 7; attempt++) {
     if (api->cancel && *api->cancel) { e = FM_ERR_CANCEL; break; }
-    u32 seq;
-    plat_random(&seq, sizeof seq);
     char url[384], hdr[384];
     int ul = fm_snprintf(url, sizeof url, MG_API "?id=%u", (unsigned)seq);
     if (api->sid[0]) ul += fm_snprintf(url + ul, sizeof url - (size_t)ul, "&sid=%s", api->sid);
@@ -857,6 +860,8 @@ static FmErr mg_call(MgApi *api, const char *cmd, FmJson *j, const FmJsonNode **
     e = FM_OK;
     break;
   }
+  if (e != FM_OK && e != FM_ERR_CANCEL && api->errcap && !api->err[0])
+    fm_snprintf(api->err, api->errcap, "MEGA did not accept the request after several tries; try again later");
   fm_free(body);
   return e;
 }
