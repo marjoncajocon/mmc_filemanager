@@ -202,6 +202,13 @@ static void amc_close(void *p);
 #define NET_BACK (64 * 1024)            /* a new window starts this far before the asked byte */
 #define NET_RUN (1024 * 1024)           /* read straight on this far: the data cursor, read ahead fully */
 
+/* MMCFM_AMC_TRACE=1 logs every extractor read (device debugging) */
+static bool amc_trace(void) {
+  static int t = -1;
+  if (t < 0) t = getenv("MMCFM_AMC_TRACE") != NULL;
+  return t > 0;
+}
+
 static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
   AmcNet *n = (AmcNet *)u;
   if (off < 0) return -1;
@@ -247,7 +254,7 @@ static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
       if (!n->w[k].ns) {
         char why[160];
         n->w[k].ns = ns_open(n->url, NULL, why, sizeof why);
-        if (!n->w[k].ns) { fm_log("video: %s", why); fail = true; break; }
+        if (!n->w[k].ns) { fm_log("video: %s", why); vid_note_net_error(why); fail = true; break; }
         ns_limit_ring(n->w[k].ns, NET_SIDE_RING);
       }
       /* the extractor steps back a little right after a jump: start early */
@@ -257,7 +264,7 @@ static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
       n->w[k].run = 0;
     }
     FmNetStream *ns = n->w[k].ns;
-    if (getenv("MMCFM_AMC_TRACE") && ns_tell(ns) != lend) {
+    if (amc_trace() && ns_tell(ns) != lend) {
       char wl[256];
       size_t o = 0;
       for (int i = 0; i < NET_WINS; i++)
@@ -285,7 +292,7 @@ static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
   }
   pthread_mutex_unlock(&n->mx);
   ssize_t r = fail && !done ? -1 : (ssize_t)done;
-  if (getenv("MMCFM_AMC_TRACE"))
+  if (amc_trace())
     fm_log("amc read %lld +%zu -> %zd at %llu ms took %llu", (long long)off, size, r, (unsigned long long)plat_now_ms(),
            (unsigned long long)(plat_now_ms() - t_in));
   return r;
@@ -322,7 +329,7 @@ static AMediaExtractor *net_extractor(const char *url, AmcNet **net, AMediaDataS
   *src = NULL;
   char why[160];
   FmNetStream *ns = ns_open(url, NULL, why, sizeof why);
-  if (!ns) { fm_log("video: %s", why); return NULL; }
+  if (!ns) { fm_log("video: %s", why); vid_note_net_error(why); return NULL; }
   AmcNet *n = (AmcNet *)fm_calloc(1, sizeof *n);
   n->ns = ns;
   for (int i = 0; i < NET_WINS; i++) n->w[i].buf = (u8 *)fm_alloc(NET_WIN);

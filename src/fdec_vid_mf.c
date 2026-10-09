@@ -673,7 +673,7 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
   if (is_url(path)) {
     char e[160];
     bs = net_bytestream(path, e, sizeof e);
-    if (!bs) fm_log("video: %s: %s", path, e);
+    if (!bs) { fm_log("video: %s: %s", path, e); vid_note_net_error(e); }
   }
   m->rd = make_reader(url, bs, true);
   if (!m->rd) m->rd = make_reader(url, bs, false);

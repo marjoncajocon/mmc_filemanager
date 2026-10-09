@@ -884,6 +884,23 @@ static const char *g_vid_force;
 
 void vid_force_backend(const char *name) { g_vid_force = name; }
 
+static SDL_SpinLock g_net_lock;
+static char g_net_err[160];
+
+void vid_note_net_error(const char *why) {
+  SDL_AtomicLock(&g_net_lock);
+  fm_strlcpy(g_net_err, why ? why : "", sizeof g_net_err);
+  SDL_AtomicUnlock(&g_net_lock);
+}
+
+void vid_last_net_error(char *out, size_t cap) {
+  SDL_AtomicLock(&g_net_lock);
+  fm_strlcpy(out, g_net_err, cap);
+  SDL_AtomicUnlock(&g_net_lock);
+}
+
+void vid_clear_net_error(void) { vid_note_net_error(""); }
+
 bool vid_os_streams(void) {
 #if defined(FM_ANDROID)
   return amc_can_stream();

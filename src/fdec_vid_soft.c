@@ -177,7 +177,7 @@ static bool io_open(SoftIo *io, const char *path) {
   if (is_url(path)) {
     char err[160];
     io->ns = ns_open(path, NULL, err, sizeof err);
-    if (!io->ns) { fm_log("video (built-in): %.200s: %s", path, err); return false; }
+    if (!io->ns) { fm_log("video (built-in): %.200s: %s", path, err); vid_note_net_error(err); return false; }
     if (ns_peek(io->ns, magic, 4) != 4) return false;
   } else {
     io->f = fm_fopen(path, "rb");

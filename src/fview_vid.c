@@ -488,6 +488,7 @@ static bool open_impl(const char *path, const char *audio, const char *title, bo
   V.mx = SDL_CreateMutex();
   V.cv = SDL_CreateCond();
   audio_pause();
+  vid_clear_net_error();               /* a refusal reported now belongs to this video */
   if (V.mx && V.cv) V.thr = fm_thread_create(worker, "video", NULL);
   if (!V.thr) { V.state = VS_ERROR; V.err = FM_ERR_NOMEM; }
   view_chrome_poke(&V.chrome);
@@ -565,6 +566,7 @@ static void restart_worker(const char *video, const char *audio, int flags, doub
     g_on->gave_up = false;
     g_on->fail[0] = 0;
   }
+  vid_clear_net_error();
   V.thr = fm_thread_create(worker, "video", NULL);
   if (!V.thr) { V.state = VS_ERROR; V.err = FM_ERR_NOMEM; }
   ui_redraw();
@@ -1265,10 +1267,26 @@ static void vid_view_frame(FmRect area) {
   if (state == VS_ERROR) {
     /* the system decoders (Media Foundation / MediaCodec) cover the common
     ** formats; FFmpeg is the way to the rest (FLV, RealMedia, odd codecs) */
-    bool need_ff = (V.err == FM_ERR_UNSUPPORTED || V.err == FM_ERR_FORMAT) && !ff_available() && !(g_on && g_on->fail[0]);
-    const char *msg = need_ff ? "Your system's decoders cannot play it. Put the FFmpeg 4 to 8 libraries next to the "
-                                "app (or use a build made with --with-ffmpeg), or open it with the system player."
+    /* a stream the server refused (or that broke after playing) is not a
+    ** format problem: say what the network said instead */
+    char net[160];
+    net[0] = 0;
+    if (V.stream) vid_last_net_error(net, sizeof net);
+    bool need_ff = (V.err == FM_ERR_UNSUPPORTED || V.err == FM_ERR_FORMAT) && !ff_available() &&
+                   !(g_on && g_on->fail[0]) && !net[0] && !V.have_frame;
+#ifdef FM_ANDROID
+    const char *ff_msg = "This phone's decoders cannot play this format. Pick another quality, or open it with "
+                         "another player app.";
+#else
+    const char *ff_msg = "Your system's decoders cannot play it. Put the FFmpeg 4 to 8 libraries next to the "
+                         "app (or use a build made with --with-ffmpeg), or open it with the system player.";
+#endif
+    char netmsg[224];
+    if (net[0]) fm_snprintf(netmsg, sizeof netmsg, "The video's server stopped sending it (%s). Try again in a minute, "
+                                                    "or pick another quality.", net);
+    const char *msg = need_ff ? ff_msg
                       : g_on && g_on->fail[0] ? g_on->fail
+                      : net[0] ? netmsg
                       : V.stream ? "The video could not be opened. Check the internet connection, or pick another "
                                    "quality in Settings > Online videos."
                                  : "The file could not be decoded. It may be damaged, or use a codec that is not "

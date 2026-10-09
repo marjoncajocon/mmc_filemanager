@@ -1125,5 +1125,9 @@ static FmErr web_download(const FmVsrcConf *c, const FmVsrcItem *item, const cha
 const FmVsrc g_vsrc_web = {
   "web", "Any site", IC_LINK, VSRC_SEARCH | VSRC_URL | VSRC_DIRECT,
   web_search, web_resolve, web_download, NULL,
+#if defined(FM_ANDROID) || defined(FM_WEB)
+  "Paste a video page link: plays straight from pages with a plain video in them",
+#else
   "Paste a video page link: plays directly from most sites; yt-dlp (Settings) adds ~1800 more",
+#endif
 };

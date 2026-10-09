@@ -70,6 +70,12 @@ bool   vid_is_mpeg1(const char *path);
 /* The system decoders stream http(s) MP4, including DASH fragments
 ** (Media Foundation; MediaCodec on Android 9+). Decided at run time. */
 bool   vid_os_streams(void);
+/* Why the last http(s) open failed in words ("The server answered 429"),
+** "" when none did: a stream no decoder could open is then not a format
+** problem. vid_note_net_error is for the backends. */
+void   vid_note_net_error(const char *why);
+void   vid_last_net_error(char *out, size_t cap);
+void   vid_clear_net_error(void);
 
 /* FFmpeg loader: loads once (thread safe), true when usable. */
 bool   ff_available(void);
