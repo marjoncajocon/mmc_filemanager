@@ -30,6 +30,7 @@
 static const FmPsrc *const kSources[] = {
   &g_psrc_openverse, &g_psrc_wikimedia, &g_psrc_nasa, &g_psrc_artic,
   &g_psrc_pexels, &g_psrc_unsplash, &g_psrc_pixabay,
+  &g_psrc_redgifs, &g_psrc_yandere, &g_psrc_e621,      /* adult branch */
 };
 
 int psrc_count(void) { return FM_COUNT(kSources); }

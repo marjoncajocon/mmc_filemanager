@@ -31,6 +31,13 @@ extern const FmPsrc g_psrc_artic;
 extern const FmPsrc g_psrc_pexels;
 extern const FmPsrc g_psrc_unsplash;
 extern const FmPsrc g_psrc_pixabay;
+/* adult branch (fpsrc_adult.c) */
+extern const FmPsrc g_psrc_redgifs;
+extern const FmPsrc g_psrc_yandere;
+extern const FmPsrc g_psrc_e621;
+FmErr psrc_redgifs_parse(const char *json, size_t len, int page, FmPsrcPage *out);
+FmErr psrc_yandere_parse(const char *json, size_t len, int page, FmPsrcPage *out);
+FmErr psrc_e621_parse(const char *json, size_t len, int page, FmPsrcPage *out);
 
 /* ---- helpers (fpsrc.c) ------------------------------------------------------ */
 

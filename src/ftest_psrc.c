@@ -152,18 +152,18 @@ static const char *kPixabayKeyError = "[ERROR 400] Invalid or missing API key (h
 
 static void pt_registry(void) {
   static const char *const kKeys[] = { "openverse", "wikimedia", "nasa", "artic", "pexels", "unsplash",
-                                       "pixabay" };
-  TEST_CHECK(psrc_count() == 7);
-  for (int i = 0; i < psrc_count() && i < 7; i++) {
+                                       "pixabay", "redgifs", "yandere", "e621" };
+  TEST_CHECK(psrc_count() == FM_COUNT(kKeys));
+  for (int i = 0; i < psrc_count() && i < FM_COUNT(kKeys); i++) {
     const FmPsrc *s = psrc_at(i);
     TEST_CHECK(s && !strcmp(s->key, kKeys[i]));
     TEST_CHECK(s && s->name && s->about && s->search && (s->flags & PSRC_SEARCH));
     TEST_CHECK(s && psrc_find(s->key) == s);
     TEST_CHECK(s && strlen(s->key) < sizeof ((FmPsrcItem *)0)->source);
-    TEST_CHECK(s && ((s->flags & PSRC_NEEDKEY) != 0) == (i >= 4));
+    TEST_CHECK(s && ((s->flags & PSRC_NEEDKEY) != 0) == (i >= 4 && i <= 6));
     TEST_CHECK(s && !(s->flags & PSRC_SIGNIN));
   }
-  TEST_CHECK(psrc_at(-1) == NULL && psrc_at(7) == NULL);
+  TEST_CHECK(psrc_at(-1) == NULL && psrc_at(FM_COUNT(kKeys)) == NULL);
   TEST_CHECK(psrc_find("nope") == NULL && psrc_find(NULL) == NULL);
   TEST_CHECK(psrc_find("artic")->img_headers && strstr(psrc_find("artic")->img_headers, "AIC-User-Agent:"));
   TEST_CHECK(psrc_find("unsplash")->saved != NULL && psrc_find("pexels")->saved == NULL);
@@ -970,6 +970,90 @@ static void pt_online(const char *tmp) {
   }
 }
 
+/* ---- adult branch: RedGifs, Yande.re, e621 ------------------------------------------ */
+
+static const char kRgJson[] =
+  "{\"page\":1,\"pages\":5000,\"total\":10000,\"gifs\":["
+  "{\"id\":\"lightpinkflakyaphid\",\"description\":\"\",\"userName\":\"someone\",\"width\":2048,\"height\":2731,"
+  "\"avgColor\":\"#a0b0c0\",\"type\":2,\"urls\":{\"thumbnail\":\"https://media.redgifs.com/X-small.jpg\","
+  "\"sd\":\"https://media.redgifs.com/X-medium.jpg\",\"hd\":\"https://media.redgifs.com/X-large.jpg\"}},"
+  "{\"id\":\"aclip\",\"type\":1,\"urls\":{\"hd\":\"https://media.redgifs.com/Y.mp4\",\"sd\":\"https://media.redgifs.com/Y-mobile.mp4\"}}]}";
+static const char kYdJson[] =
+  "[{\"id\":1269822,\"tags\":\"landscape sky\",\"author\":\"charunetra\",\"file_ext\":\"jpg\","
+  "\"preview_url\":\"https://assets.yande.re/data/preview/06/a7/06a7.jpg\","
+  "\"sample_url\":\"https://files.yande.re/sample/06a7/yande.re%201.jpg\","
+  "\"file_url\":\"https://files.yande.re/image/06a7/yande.re%2012.jpg\",\"width\":\"9600\",\"height\":\"5400\","
+  "\"sample_width\":1500,\"sample_height\":844},"
+  "{\"id\":2,\"file_ext\":\"mp4\",\"preview_url\":\"https://a/p.jpg\",\"sample_url\":\"https://a/s.mp4\"}]";
+static const char kE6Json[] =
+  "{\"posts\":[{\"id\":6766279,\"rating\":\"q\",\"tags\":{\"artist\":[\"nifteris\"],\"general\":[\"landscape\",\"sky\"]},"
+  "\"file\":{\"width\":5120,\"height\":2880,\"ext\":\"jpg\",\"url\":\"https://static1.e621.net/data/1a/dc/1adc.jpg\"},"
+  "\"sample\":{\"has\":true,\"width\":1511,\"height\":850,\"url\":\"https://static1.e621.net/data/sample/1a/dc/1adc.jpg\"},"
+  "\"preview\":{\"width\":455,\"height\":256,\"url\":\"https://static1.e621.net/data/preview/1a/dc/1adc.jpg\"}},"
+  "{\"id\":7,\"file\":{\"ext\":\"webm\",\"url\":\"https://x/v.webm\"},\"sample\":{\"has\":false},\"preview\":{\"url\":\"https://x/p.jpg\"}},"
+  "{\"id\":8,\"file\":{\"ext\":\"png\",\"url\":null},\"sample\":{\"has\":false,\"url\":null},\"preview\":{\"url\":null}}]}";
+
+static void pt_adult(void) {
+  FmPsrcPage p;
+  memset(&p, 0, sizeof p);
+  TEST_CHECK(psrc_redgifs_parse(kRgJson, sizeof kRgJson - 1, 1, &p) == FM_OK);
+  TEST_CHECK(p.count == 1 && !strcmp(p.items[0].id, "lightpinkflakyaphid") && strstr(p.items[0].full, "large.jpg") &&
+             strstr(p.items[0].thumb, "small.jpg") && p.items[0].width == 2048 && p.items[0].color == 0xa0b0c0 &&
+             !strcmp(p.next, "2"));
+  psrc_page_free(&p);
+  memset(&p, 0, sizeof p);
+  TEST_CHECK(psrc_yandere_parse(kYdJson, sizeof kYdJson - 1, 1, &p) == FM_OK);
+  TEST_CHECK(p.count == 1 && !strcmp(p.items[0].id, "1269822") && strstr(p.items[0].full, "/sample/") &&
+             strstr(p.items[0].original, "/image/") && p.items[0].width == 1500 && p.items[0].height == 844 &&
+             !strcmp(p.items[0].author, "charunetra") && !p.next[0]);
+  psrc_page_free(&p);
+  memset(&p, 0, sizeof p);
+  TEST_CHECK(psrc_e621_parse(kE6Json, sizeof kE6Json - 1, 1, &p) == FM_OK);
+  TEST_CHECK(p.count == 1 && !strcmp(p.items[0].id, "6766279") && strstr(p.items[0].full, "/sample/") &&
+             !strcmp(p.items[0].author, "nifteris") && !strcmp(p.items[0].title, "landscape sky") &&
+             p.items[0].width == 1511);
+  psrc_page_free(&p);
+  /* Safe search on: RedGifs refuses */
+  FmPsrcConf c;
+  memset(&c, 0, sizeof c);
+  c.safe_search = true;
+  memset(&p, 0, sizeof p);
+  TEST_CHECK(g_psrc_redgifs.search(&c, "x", NULL, &p, NULL) == FM_ERR_UNSUPPORTED && strstr(p.error, "Safe search"));
+  psrc_page_free(&p);
+}
+
+/* MMCFM_ADULT_PHOTO_TEST=<query>: each of the three against its site, Safe
+** search off, then the first picture fetched and decoded. */
+static void pt_adult_live(const char *tmp) {
+  const char *q = getenv("MMCFM_ADULT_PHOTO_TEST");
+  if (!q || !*q) return;
+  FmPsrcConf c;
+  memset(&c, 0, sizeof c);
+  fm_path_join(c.cache_dir, sizeof c.cache_dir, tmp, "online-photos");
+  static const FmPsrc *const kS[] = { &g_psrc_redgifs, &g_psrc_yandere, &g_psrc_e621 };
+  for (int i = 0; i < FM_COUNT(kS); i++) {
+    FmPsrcPage p;
+    memset(&p, 0, sizeof p);
+    u64 t0 = plat_now_ms();
+    FmErr e = kS[i]->search(&c, q, NULL, &p, NULL);
+    printf("  %s: %s, %d pictures in %d ms, next \"%s\" %s\n", kS[i]->name, fm_err_str(e), p.count,
+           (int)(plat_now_ms() - t0), p.next, p.error);
+    TEST_CHECK(e == FM_OK && p.count > 3);
+    if (p.count) {
+      char path[FM_PATH_MAX], err[200] = "";
+      e = psrc_fetch(&c, &p.items[0], NULL, path, sizeof path, NULL, NULL, err, sizeof err, NULL);
+      FmImage im;
+      memset(&im, 0, sizeof im);
+      FmErr de = e == FM_OK ? img_load(path, 512, 512, &im, NULL, NULL) : e;
+      printf("    first: %dx%d, fetch %s, decode %s (%dx%d) %s\n", p.items[0].width, p.items[0].height, fm_err_str(e),
+             fm_err_str(de), im.w, im.h, err);
+      TEST_CHECK(de == FM_OK && im.w > 0);
+      img_free(&im);
+    }
+    psrc_page_free(&p);
+  }
+}
+
 int test_psrc(const char *tmp) {
   int before = g_test_fail;
   pt_registry();
@@ -987,5 +1071,7 @@ int test_psrc(const char *tmp) {
   pt_cache(tmp);
   pt_fetch_offline(tmp);
   pt_online(tmp);
+  pt_adult();
+  pt_adult_live(tmp);
   return g_test_fail - before;
 }
