@@ -127,7 +127,7 @@ int cloud_mock_count(void) {
   return n;
 }
 
-static FmErr wait(volatile int *cancel) {
+static FmErr mock_wait(volatile int *cancel) {
   for (int t = 0; t < g_delay; t += 20) {
     if (cancel && *cancel) return FM_ERR_CANCEL;
     SDL_Delay(20);
@@ -142,7 +142,7 @@ static FmErr signed_in(const FmCloudAcct *a, char *err, size_t cap) {
 }
 
 static FmErr m_login(FmCloudAcct *a, char *err, size_t errcap, volatile int *cancel) {
-  if (wait(cancel) != FM_OK) return FM_ERR_CANCEL;
+  if (mock_wait(cancel) != FM_OK) return FM_ERR_CANCEL;
   if (!a->user[0] || !strcmp(a->secret, "wrong")) {
     fm_strlcpy(err, "Wrong e-mail or password", errcap);
     return FM_ERR_PASSWORD;
@@ -154,7 +154,7 @@ static FmErr m_login(FmCloudAcct *a, char *err, size_t errcap, volatile int *can
 }
 
 static FmErr m_list(FmCloudAcct *a, const char *dir_id, FmCloudList *out, volatile int *cancel) {
-  if (wait(cancel) != FM_OK) return FM_ERR_CANCEL;
+  if (mock_wait(cancel) != FM_OK) return FM_ERR_CANCEL;
   FmErr e = signed_in(a, out->error, sizeof out->error);
   if (e != FM_OK) return e;
   lock();
@@ -272,7 +272,7 @@ static FmErr m_upload(FmCloudAcct *a, const char *dir_id, const char *local_path
 
 static FmErr m_mkdir(FmCloudAcct *a, const char *parent_id, const char *name, FmCloudEntry *out, char *err,
                      size_t errcap, volatile int *cancel) {
-  if (wait(cancel) != FM_OK) return FM_ERR_CANCEL;
+  if (mock_wait(cancel) != FM_OK) return FM_ERR_CANCEL;
   FmErr r = signed_in(a, err, errcap);
   if (r != FM_OK) return r;
   lock();
@@ -302,7 +302,7 @@ static void drop(int i) {
 }
 
 static FmErr m_remove(FmCloudAcct *a, const FmCloudEntry *e, char *err, size_t errcap, volatile int *cancel) {
-  if (wait(cancel) != FM_OK) return FM_ERR_CANCEL;
+  if (mock_wait(cancel) != FM_OK) return FM_ERR_CANCEL;
   FmErr r = signed_in(a, err, errcap);
   if (r != FM_OK) return r;
   lock();
@@ -319,7 +319,7 @@ static FmErr m_remove(FmCloudAcct *a, const FmCloudEntry *e, char *err, size_t e
 
 static FmErr m_rename(FmCloudAcct *a, const FmCloudEntry *e, const char *new_name, char *err, size_t errcap,
                       volatile int *cancel) {
-  if (wait(cancel) != FM_OK) return FM_ERR_CANCEL;
+  if (mock_wait(cancel) != FM_OK) return FM_ERR_CANCEL;
   FmErr r = signed_in(a, err, errcap);
   if (r != FM_OK) return r;
   lock();
@@ -338,7 +338,7 @@ static FmErr m_rename(FmCloudAcct *a, const FmCloudEntry *e, const char *new_nam
 
 static FmErr m_move(FmCloudAcct *a, const FmCloudEntry *e, const char *new_parent_id, char *err, size_t errcap,
                     volatile int *cancel) {
-  if (wait(cancel) != FM_OK) return FM_ERR_CANCEL;
+  if (mock_wait(cancel) != FM_OK) return FM_ERR_CANCEL;
   FmErr r = signed_in(a, err, errcap);
   if (r != FM_OK) return r;
   lock();

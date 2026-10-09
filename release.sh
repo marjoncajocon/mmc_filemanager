@@ -61,6 +61,13 @@ done
 [ -n "$VERSION" ] || { echo "no version (APP_VERSION in build.sh)" >&2; exit 1; }
 
 TAG=rel
+# Inside mmc-shell, build.sh runs in mmc-shell again (its builtin zip, and no
+# MSYS path rewriting); a plain ./build.sh would start Git Bash instead.
+if [ -n "${MMC_ROOT:-}" ] && [ -x "$MMC_ROOT/mmc-shell.exe" ]; then
+  BUILD=("$MMC_ROOT/mmc-shell.exe" build.sh)
+else
+  BUILD=(./build.sh)
+fi
 OUT="release/$VERSION"
 STAGE="build/release-stage"
 mkdir -p "$OUT"
@@ -95,7 +102,7 @@ for t in $TARGETS; do
     *) echo "unknown target $t"; FAILED="$FAILED $t"; continue ;;
   esac
   rm -rf "$dist"
-  if ! BUILD_TAG=$TAG ./build.sh $args --jobs="$JOBS"; then
+  if ! BUILD_TAG=$TAG "${BUILD[@]}" $args --jobs="$JOBS"; then
     echo "!! $t did not build"
     FAILED="$FAILED $t"
     continue
