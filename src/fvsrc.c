@@ -487,6 +487,13 @@ static void user_region(char *out, size_t cap) {
   buf[0] = 0;
 #ifdef FM_WIN
   if (!GetLocaleInfoA(LOCALE_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, buf, (int)sizeof buf)) buf[0] = 0;
+#elif defined(FM_ANDROID)
+  /* no LANG there: the phone's language setting ("en_PH") through SDL */
+  SDL_Locale *loc = SDL_GetPreferredLocales();
+  if (loc) {
+    if (loc[0].language && loc[0].country) fm_strlcpy(buf, loc[0].country, sizeof buf);
+    SDL_free(loc);
+  }
 #else
   const char *l = getenv("LC_ALL");
   if (!l || !*l) l = getenv("LC_MESSAGES");
