@@ -83,10 +83,13 @@ targz() {   # targz ARCHIVE DIR-IN-STAGE
   fi
 }
 
+# Zips are stored without compression (zip -0): mmc-shell's builtin zip
+# writes corrupt data when it compresses big files (the exe). The download is
+# bigger, but every unzip tool opens it.
 zipdir() {  # zipdir ARCHIVE DIR-IN-STAGE
   local abs
   abs="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
-  (cd "$STAGE" && zip -r -q -9 "$abs" "$2")
+  (cd "$STAGE" && zip -r -q -0 "$abs" "$2")
 }
 
 OK=""
