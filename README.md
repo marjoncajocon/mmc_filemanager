@@ -440,7 +440,11 @@ assets/fonts/   Poppins, embedded into the binary at build time
 android/        AndroidManifest.xml, res/, Java (FmActivity, FmFileProvider)
 web/            index.html shell for Emscripten
 tests/fixtures/ RAR archives from libarchive's tests, a small VP9+Opus WebM
-tools/          gen_themes.py (generates src/ftheme_data.h)
+icons/          the app logo: mmcfm.ico (+ mmcfm.rc, embedded in the Windows exe),
+                mmcfm.icns (macOS .app), mmcfm.png (Linux/BSD, next to the .desktop),
+                favicon.png (web)
+tools/          gen_themes.py (generates src/ftheme_data.h); make_icons.py (draws
+                icons/*, src/flogo.h and android/res/mipmap-*; needs Pillow, run by hand)
 build.sh        the one build script
 ```
 

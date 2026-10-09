@@ -27,38 +27,15 @@
 
 /* ---- the logo as pixels ------------------------------------------------------ */
 
-#define LOGO 32
-static u32 g_logo[LOGO * LOGO];        /* 0xAARRGGBB */
-
-static void logo_draw(void) {
-  static bool done;
-  if (done) return;
-  done = true;
-  for (int y = 0; y < LOGO; y++)
-    for (int x = 0; x < LOGO; x++) {
-      /* rounded square, radius 7, 1 px inset; coverage from the corner distance */
-      float fx = x + 0.5f, fy = y + 0.5f, r = 7.0f, lo = 1.0f + r, hi = LOGO - 1.0f - r;
-      float cx = fx < lo ? lo : fx > hi ? hi : fx, cy = fy < lo ? lo : fy > hi ? hi : fy;
-      float dx = fx - cx, dy = fy - cy;
-      float d = sqrtf(dx * dx + dy * dy) - r;
-      float a = d <= -0.5f ? 1.0f : d >= 0.5f ? 0.0f : 0.5f - d;
-      if (fx < 1 || fy < 1 || fx > LOGO - 1 || fy > LOGO - 1) a = 0;
-      /* blue, lighter at the top */
-      float t = fy / LOGO;
-      u32 R = (u32)(96 - 37 * t), G = (u32)(165 - 35 * t), B = (u32)(250 - 4 * t);
-      /* white folder: tab 9..15 x 9..11, body 8..24 x 11..23 */
-      bool tab = fx >= 9 && fx <= 15 && fy >= 9 && fy <= 11.5f;
-      bool body = fx >= 8 && fx <= 24 && fy >= 11 && fy <= 23;
-      if (tab || body) R = G = B = 255;
-      g_logo[y * LOGO + x] = ((u32)(a * 255.0f + 0.5f) << 24) | (R << 16) | (G << 8) | B;
-    }
-}
+/* tools/make_icons.py draws it, the same logo as the exe, .app and launcher */
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+#include "flogo.h"
+#endif
 
 void tray_set_window_icon(void) {
 #if !defined(FM_MOBILE) && !defined(FM_WEB)
   if (!app.win) return;
-  logo_draw();
-  SDL_Surface *s = SDL_CreateRGBSurfaceWithFormatFrom(g_logo, LOGO, LOGO, 32, LOGO * 4, SDL_PIXELFORMAT_ARGB8888);
+  SDL_Surface *s = SDL_CreateRGBSurfaceWithFormatFrom((void *)kLogo64, 64, 64, 32, 64 * 4, SDL_PIXELFORMAT_ARGB8888);
   if (s) {
     SDL_SetWindowIcon(app.win, s);
     SDL_FreeSurface(s);
@@ -189,8 +166,13 @@ static bool window_make(void) {
   g_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"mmcfm-tray", L"mmcfm tray", WS_POPUP, 0, 0, 0, 0, NULL, NULL, inst, NULL);
   if (!g_hwnd) return false;
   g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-  logo_draw();
-  /* the logo as an HICON: a 32-bit colour bitmap and an (unused) mask */
+  /* the exe's own icon at the tray's size (zig builds embed icons/mmcfm.ico);
+  ** else (tcc) the logo pixels as an HICON */
+  g_icon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                             GetSystemMetrics(SM_CYSMICON), 0);
+  if (g_icon) return true;
+  enum { LOGO = 32 };
+  /* a 32-bit colour bitmap and an (unused) mask */
   BITMAPV5HEADER bi;
   memset(&bi, 0, sizeof bi);
   bi.bV5Size = sizeof bi;
@@ -212,7 +194,7 @@ static bool window_make(void) {
     /* premultiplied, as Windows expects for 32-bit icons */
     u32 *px = (u32 *)bits;
     for (int i = 0; i < LOGO * LOGO; i++) {
-      u32 c = g_logo[i], a = c >> 24;
+      u32 c = kLogo32[i], a = c >> 24;
       u32 r = ((c >> 16) & 255) * a / 255, g = ((c >> 8) & 255) * a / 255, b = (c & 255) * a / 255;
       px[i] = (a << 24) | (r << 16) | (g << 8) | b;
     }

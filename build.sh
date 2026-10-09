@@ -533,6 +533,19 @@ if [ "$TARGET" != android ]; then
   [ "$CCKIND" = tcc ] && OBJDIR="build/win-x86-tcc-$MODE${BUILD_TAG:+-$BUILD_TAG}"
   if [ -n "${BUILD_TAG:-}" ]; then rest="${OUT#$OUTDIR}"; OUTDIR="$OUTDIR-$BUILD_TAG"; OUT="$OUTDIR$rest"; fi
   compile_all "$CC" "$CFLAGS" "$VCFLAGS" "$OBJDIR"
+  # The exe's icon (icons/, made by tools/make_icons.py): zig compiles the
+  # resource script; tcc cannot, its build sets the window icon at run time.
+  case "$TARGET" in
+    win-*)
+      if [ "$CCKIND" != tcc ] && [ -f icons/mmcfm.rc ]; then
+        if [ ! -f "$OBJDIR/mmcfm.res" ] || [ icons/mmcfm.ico -nt "$OBJDIR/mmcfm.res" ]; then
+          echo "  rc  icons/mmcfm.rc"
+          "$ZIG" rc /i icons /fo "$OBJDIR/mmcfm.res" icons/mmcfm.rc || die "zig rc failed"
+        fi
+        OBJS="$OBJS $OBJDIR/mmcfm.res"
+      fi
+      ;;
+  esac
   mkdir -p "$OUTDIR"
   echo "  ld  $OUT"
   # shellcheck disable=SC2086
@@ -547,6 +560,9 @@ if [ "$TARGET" != android ]; then
       fi
       ;;
     linux-*|freebsd-*)
+      # the icon the .desktop names (copy both to ~/.local/share/applications
+      # and ~/.local/share/icons/hicolor/256x256/apps to install)
+      cp icons/mmcfm.png "$OUTDIR/$APP.png"
       sed -e "s/@APP@/$APP/g" -e "s/@NAME@/$APP_NAME/g" > "$OUTDIR/$APP.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
@@ -563,6 +579,7 @@ EOF
       rm -rf "$BUNDLE"
       mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Frameworks" "$BUNDLE/Contents/Resources"
       mv "$OUT" "$BUNDLE/Contents/MacOS/$APP"
+      cp icons/mmcfm.icns "$BUNDLE/Contents/Resources/$APP.icns"
       cat > "$BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -574,6 +591,7 @@ EOF
   <key>CFBundleShortVersionString</key><string>$APP_VERSION</string>
   <key>CFBundleExecutable</key><string>$APP</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>$APP.icns</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSMinimumSystemVersion</key><string>10.13</string>
 </dict></plist>
@@ -582,6 +600,7 @@ EOF
       OUT="$BUNDLE"
       ;;
     web)
+      cp icons/favicon.png "$OUTDIR/favicon.png"
       ;;
   esac
   [ -n "$FFMPEG_DIR" ] && copy_ffmpeg
