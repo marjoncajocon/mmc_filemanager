@@ -8,6 +8,9 @@
 #define NODRAG_MAX 24
 
 static bool g_custom;
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+static bool g_pip;                      /* picture in picture (title_pip) */
+#endif
 static FmRect g_nodrag_next[NODRAG_MAX];  /* filled during the frame */
 static int g_nnodrag_next;
 #if !defined(FM_MOBILE) && !defined(FM_WEB)
@@ -41,7 +44,7 @@ static SDL_HitTestResult hit_test(SDL_Window *win, const SDL_Point *pt, void *da
   }
   float k = ui_px_per_pt();
   float x = (float)pt->x * k, y = (float)pt->y * k;
-  if (!rect_has(g_bar, x, y)) return SDL_HITTEST_NORMAL;
+  if (!g_pip && !rect_has(g_bar, x, y)) return SDL_HITTEST_NORMAL;   /* PiP: the whole window drags */
   for (int i = 0; i < g_nnodrag; i++)
     if (rect_has(g_nodrag[i], x, y)) return SDL_HITTEST_NORMAL;
   return SDL_HITTEST_DRAGGABLE;
@@ -50,14 +53,21 @@ static SDL_HitTestResult hit_test(SDL_Window *win, const SDL_Point *pt, void *da
 void title_apply(void) {
   if (!app.win) return;
   g_custom = !conf.system_title;
-  SDL_SetWindowBordered(app.win, g_custom ? SDL_FALSE : SDL_TRUE);
-  SDL_SetWindowHitTest(app.win, g_custom ? hit_test : NULL, NULL);
+  bool own = g_custom || g_pip;
+  SDL_SetWindowBordered(app.win, own ? SDL_FALSE : SDL_TRUE);
+  SDL_SetWindowHitTest(app.win, own ? hit_test : NULL, NULL);
   ui_redraw();
+}
+
+void title_pip(bool on) {
+  g_pip = on;
+  title_apply();
 }
 
 #else
 
 void title_apply(void) { g_custom = false; }
+void title_pip(bool on) { FM_UNUSED(on); }
 
 #endif
 

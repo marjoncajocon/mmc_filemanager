@@ -791,6 +791,7 @@ static void start_list(FmArena arena, char **paths, Ent *ents, int cnt, int inde
   P.icy_idx = -1;
   viz_reset();
   P.heard = index;
+  video_bg_stop();                     /* one sound at a time */
   P.active = true;
   P.viewer_open = viewer;
   view_chrome_poke(&P.chrome);

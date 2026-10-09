@@ -57,6 +57,13 @@ void image_view_title(const char *title);
 /* ---- background audio (mini player) ------------------------------------ */
 
 bool audio_mini_active(void);          /* something loaded and the viewer is closed */
+/* A video playing in the background (sound only, the player hidden): the
+** mini bar takes the music player's place; tapping it brings the picture back. */
+bool video_mini_active(void);
+void video_mini_draw(FmRect r);
+void video_bg_pump(void);              /* every frame: keeps a hidden video going */
+void video_bg_stop(void);              /* music is starting: the background video ends */
+bool video_pip_active(void);           /* the window is the small picture-in-picture one */
 void audio_mini_draw(FmRect r);        /* compact bar: title, play/pause, next, close */
 void audio_stop(void);
 

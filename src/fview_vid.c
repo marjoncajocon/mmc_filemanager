@@ -41,6 +41,7 @@
 **     (fnetstream) holds data.
 */
 #include "fview_int.h"
+#include "ftitle.h"
 #include "flib.h"
 #include "fplat.h"
 #include "fconf.h"
@@ -137,6 +138,12 @@ static struct {
   float viz_snap[VIZ_FFT];
   bool viz_overlay;        /* over the picture (toolbar toggle) */
   bool locked;             /* touch lock: input ignored until unlocked */
+  /* background play: sound only, the player hidden, a mini bar instead.
+  ** bg_q = the online quality to go back to (-1: none); bg_flags = the open
+  ** flags of a local file before it went sound-only */
+  bool background;
+  int bg_q, bg_flags;
+  char bg_video[FM_PATH_MAX], bg_audio[FM_PATH_MAX];
   u64 lock_hint_until;     /* unlock button visible until then */
   bool viz_panel;          /* settings shown */
   FmEq eq;                 /* equalizer state (callback, under mx) */
@@ -451,7 +458,10 @@ static void online_free(void) {
   fm_free(o);
 }
 
+static void pip_exit(void);
+
 static void vid_view_close(void) {
+  pip_exit();
   online_free();
   if (!V.open) return;
   if (V.thr) {
@@ -891,7 +901,8 @@ static void vid_seek_bar(FmRect r) {
   if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
 }
 
-enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ, VM_ASPECT, VM_LOCK, VM_QUALITY, VM_AR0 = 100, VM_Q0 = 200 };
+enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ, VM_ASPECT, VM_LOCK, VM_QUALITY, VM_BG, VM_PIP, VM_AR0 = 100,
+       VM_Q0 = 200 };
 
 /* "VP9 · 1.4 Mb/s", or why it cannot be chosen */
 static void quality_detail(const FmVsrcQuality *q, char *out, size_t cap) {
@@ -1181,17 +1192,17 @@ static void stream_checks(int *state, bool *ready) {
   }
 }
 
-static void vid_view_frame(FmRect area) {
-  gfx_rect(area, VIEW_BG);
+/* What the player does every frame besides drawing: the resolve worker,
+** starting, the clock, the next picture, the end, stream failures. Shared by
+** the visible player and the hidden one (background play). */
+static void tick(int *state, bool *ready) {
   on_pump();
-  int state;
   SDL_LockMutex(V.mx);
-  state = V.state;
+  *state = V.state;
   SDL_UnlockMutex(V.mx);
-  if (state == VS_READY && !V.started) start_playback();
-  bool ready = state == VS_READY && V.started;
-
-  if (ready) {
+  if (*state == VS_READY && !V.started) start_playback();
+  *ready = *state == VS_READY && V.started;
+  if (*ready) {
     update_clock();
     present_frame();
     SDL_LockMutex(V.mx);
@@ -1204,7 +1215,329 @@ static void vid_view_frame(FmRect area) {
       view_chrome_poke(&V.chrome);
     }
   }
-  if (g_on) stream_checks(&state, &ready);
+  if (g_on) stream_checks(state, ready);
+}
+
+/* ---- picture in picture (desktop) ------------------------------------------------ */
+
+/* The whole window becomes a small always-on-top video window in the
+** screen's bottom right corner, like a browser's picture-in-picture: drag it
+** anywhere, resize it from its edges; the full app comes back as it was. One
+** window, so no second renderer and no texture sharing: the app's own
+** window is shrunk and restored. (Phones have the system's own PiP.) */
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+static struct { bool on; int x, y, w, h; bool maxed; } PIP;
+
+static void pip_enter(void) {
+  if (PIP.on || !app.win || !V.info.has_video) return;
+  Uint32 fl = SDL_GetWindowFlags(app.win);
+#  ifndef FM_MOBILE
+  if (V.fullscreen_set) { SDL_SetWindowFullscreen(app.win, 0); V.fullscreen_set = false; }
+#  endif
+  PIP.maxed = (fl & SDL_WINDOW_MAXIMIZED) != 0;
+  if (PIP.maxed) SDL_RestoreWindow(app.win);
+  SDL_GetWindowPosition(app.win, &PIP.x, &PIP.y);
+  SDL_GetWindowSize(app.win, &PIP.w, &PIP.h);
+  /* 400 points wide, the video's shape (kept between 21:9 and 9:16) */
+  double ar = V.tw > 0 && V.th > 0 ? (double)V.tw * (V.info.sar > 0.1 ? V.info.sar : 1.0) / V.th : 16.0 / 9.0;
+  ar = FM_CLAMP(ar, 9.0 / 16.0, 21.0 / 9.0);
+  int w = ar >= 1 ? 400 : (int)(300 * ar), h = (int)(w / ar);
+  SDL_Rect ub;
+  int disp = SDL_GetWindowDisplayIndex(app.win);
+  if (SDL_GetDisplayUsableBounds(disp < 0 ? 0 : disp, &ub) != 0) { ub.x = ub.y = 0; ub.w = 1280; ub.h = 720; }
+  PIP.on = true;
+  title_pip(true);
+  SDL_SetWindowMinimumSize(app.win, 160, 90);
+  SDL_SetWindowSize(app.win, w, h);
+  SDL_SetWindowPosition(app.win, ub.x + ub.w - w - 16, ub.y + ub.h - h - 16);
+  SDL_SetWindowAlwaysOnTop(app.win, SDL_TRUE);
+  ui_redraw();
+}
+
+static void pip_exit(void) {
+  if (!PIP.on || !app.win) return;
+  PIP.on = false;
+  SDL_SetWindowAlwaysOnTop(app.win, SDL_FALSE);
+  title_pip(false);
+  SDL_SetWindowMinimumSize(app.win, 360, 400);           /* fmain.c's */
+  SDL_SetWindowSize(app.win, PIP.w, PIP.h);
+  SDL_SetWindowPosition(app.win, PIP.x, PIP.y);
+  if (PIP.maxed) SDL_MaximizeWindow(app.win);
+  view_chrome_poke(&V.chrome);
+  ui_redraw();
+}
+
+/* The small window: the picture, and on hover play/pause, back, close and a
+** progress line. Double click goes back too. */
+static void pip_frame(FmRect area, bool ready) {
+  gfx_rect(area, FM_HEX(0x000000));
+  if (V.tex && V.tw > 0 && V.th > 0) {
+    double sar = V.info.sar > 0.1 && V.info.sar < 10 ? V.info.sar : 1.0;
+    FmRect pic, src;
+    int keep = g_aspect;
+    g_aspect = AR_FIT;
+    place_picture(area, sar, &pic, &src);
+    g_aspect = keep;
+    gfx_tex(V.tex, &src, pic, FM_HEX(0xFFFFFF));
+  } else {
+    ui_spinner(rect_center(area, DP(32), DP(32)), VIEW_FG2);
+  }
+  bool hover = rect_has(area, ui.mx, ui.my) && (SDL_GetWindowFlags(app.win) & SDL_WINDOW_MOUSE_FOCUS);
+  bool playing = ready && !V.paused && !V.ended;
+  screensaver(playing);
+  if (playing) ui_animate();           /* frames keep coming, as in the full player */
+  float s = FM_MIN(DP(36), area.h * 0.25f);
+  FmRect closeb = { area.x + area.w - s - DP(6), area.y + DP(6), s, s };
+  FmRect backb = { closeb.x - s - DP(4), closeb.y, s, s };
+  FmRect playb = rect_center(area, s * 1.3f, s * 1.3f);
+  title_nodrag(closeb);
+  title_nodrag(backb);
+  title_nodrag(playb);
+  if (hover || !playing) {
+    gfx_rect(area, col_alpha(VIEW_SCRIM, 0.35f));
+    gfx_circle(playb.x + playb.w * 0.5f, playb.y + playb.h * 0.5f, playb.w * 0.5f, col_alpha(VIEW_SCRIM, 0.8f));
+    if (ui_icon_btn(ui_id("pip.play"), playb, playing ? IC_PAUSE : IC_PLAY, VIEW_FG, playing ? "Pause" : "Play") && ready)
+      set_paused(!V.paused);
+    if (ui_icon_btn(ui_id("pip.back"), backb, IC_PIP, VIEW_FG, "Back to the full player (P)")) { pip_exit(); return; }
+    if (ui_icon_btn(ui_id("pip.close"), closeb, IC_CLOSE, VIEW_FG, "Close")) {
+      pip_exit();
+      app_close_viewer();
+      return;
+    }
+    double dur = V.info.duration;
+    if (dur > 0) {
+      FmRect bar = { area.x, area.y + area.h - DP(3), area.w, DP(3) };
+      gfx_rect(bar, col_alpha(VIEW_FG, 0.25f));
+      gfx_rect(FM_RECT(bar.x, bar.y, bar.w * (float)FM_CLAMP(V.clock / dur, 0.0, 1.0), bar.h), T.accent);
+    }
+    view_wake_in(500);
+  }
+  if (ui.pressed && ui.clicks >= 2 && rect_has(area, ui.mx, ui.my)) { pip_exit(); return; }
+  if (ui_key(SDLK_p, 0) || ui_key(SDLK_ESCAPE, 0)) { pip_exit(); return; }
+  if (ui_key(SDLK_SPACE, 0) && ready) set_paused(!V.paused);
+}
+#else
+static void pip_enter(void) {}
+static void pip_exit(void) {}
+#endif
+
+bool video_pip_active(void) {
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+  return PIP.on;
+#else
+  return false;
+#endif
+}
+
+static bool pip_on(void) {
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+  return PIP.on;
+#else
+  return false;
+#endif
+}
+
+/* ---- background play ------------------------------------------------------------ */
+
+/* The online quality that is sound only, -1 when the source has none. */
+static int audio_quality(void) {
+  if (!g_on) return -1;
+  for (int i = 0; i < g_on->st.nq; i++)
+    if (g_on->st.q[i].audio_only && g_on->st.q[i].playable && g_on->st.q[i].url[0]) return i;
+  return -1;
+}
+
+/* Hides the player and keeps the sound: online videos switch to their
+** sound-only stream (less data, no picture decoding), local files reopen
+** sound-only at the same moment. */
+static void to_background(void) {
+  if (!V.open || V.background || !V.info.has_audio) return;
+  pip_exit();
+  V.bg_q = -1;
+  V.bg_flags = V.open_flags;
+  int aq = audio_quality();
+  if (aq >= 0 && g_on->st.cur != aq) {
+    V.bg_q = g_on->st.cur;
+    quality_pick(aq);
+  } else if (aq < 0 && V.info.has_video && !(V.open_flags & VID_OPEN_AUDIO_ONLY)) {
+    double at = play_pos();
+    bool pair = V.audio[0] != 0;
+    char path[sizeof V.path];
+    fm_strlcpy(path, pair ? V.audio : V.path, sizeof path);   /* a pair: its sound file alone */
+    if (pair) { fm_strlcpy(V.bg_video, V.path, sizeof V.bg_video); fm_strlcpy(V.bg_audio, V.audio, sizeof V.bg_audio); }
+    restart_worker(path, "", VID_OPEN_AUDIO_ONLY, at);
+  }
+  V.background = true;
+  if (V.paused && !V.ended) set_paused(false);
+  screensaver(false);
+#ifndef FM_MOBILE
+  if (V.fullscreen_set && app.win) { SDL_SetWindowFullscreen(app.win, 0); V.fullscreen_set = false; }
+#endif
+  app.viewer = NULL;                   /* the player goes, its worker and sound stay */
+  ui_toast("Playing in the background");
+  ui_redraw();
+}
+
+/* The mini bar was tapped: the picture comes back where the sound is. */
+static void from_background(void) {
+  if (!V.open || !V.background) return;
+  V.background = false;
+  if (V.bg_q >= 0 && g_on) {
+    quality_pick(V.bg_q);
+  } else if (V.bg_flags != V.open_flags) {
+    double at = play_pos();
+    if (V.bg_video[0]) restart_worker(V.bg_video, V.bg_audio, V.bg_flags, at);
+    else restart_worker(V.path, "", V.bg_flags, at);
+  }
+  V.bg_video[0] = V.bg_audio[0] = 0;
+  view_chrome_poke(&V.chrome);
+  app.viewer = &g_view_video;
+  ui_redraw();
+}
+
+bool video_mini_active(void) { return V.open && V.background; }
+
+/* --demo-video FILE [--demo-video-bg AT[,BACK]]: opens FILE; at AT seconds
+** it goes to the background, at BACK it comes back (logged, for checks). */
+static double g_demo_bg = -1, g_demo_fg = -1, g_demo_pip = -1;
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+static double g_demo_pip_out = -1;
+#endif
+
+static void demo_video(void) {
+  static bool done;
+  if (done) return;
+  done = true;
+  const char *file = NULL;
+  for (int i = 1; i + 1 < app.argc; i++) {
+    if (!strcmp(app.argv[i], "--demo-video")) file = app.argv[i + 1];
+    if (!strcmp(app.argv[i], "--demo-video-pip")) {
+      g_demo_pip = atof(app.argv[i + 1]);
+      const char *c = strchr(app.argv[i + 1], ',');
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+      if (c) g_demo_pip_out = atof(c + 1);
+#else
+      FM_UNUSED(c);
+#endif
+    }
+    if (!strcmp(app.argv[i], "--demo-video-bg")) {
+      g_demo_bg = atof(app.argv[i + 1]);
+      const char *c = strchr(app.argv[i + 1], ',');
+      if (c) g_demo_fg = atof(c + 1);
+    }
+  }
+  if (!file) return;
+  open_impl(file, NULL, NULL, false);
+  app.viewer = &g_view_video;
+}
+
+static void demo_steps(void) {
+  static u64 last;
+  if (g_demo_pip >= 0 && V.open && V.clock >= g_demo_pip) {
+    fm_log("demo: picture in picture at %.1f s", V.clock);
+    g_demo_pip = -1;
+    pip_enter();
+  }
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+  if (g_demo_pip_out >= 0 && pip_on() && V.clock >= g_demo_pip_out) {
+    g_demo_pip_out = -1;
+    pip_exit();
+    int x, y, w, h;
+    SDL_GetWindowPosition(app.win, &x, &y);
+    SDL_GetWindowSize(app.win, &w, &h);
+    fm_log("demo: back from picture in picture at %.1f s: window %dx%d at %d,%d (saved %d,%d), on top %d", V.clock, w,
+           h, x, y, PIP.x, PIP.y, (int)((SDL_GetWindowFlags(app.win) & SDL_WINDOW_ALWAYS_ON_TOP) != 0));
+  }
+#endif
+  if (g_demo_bg < 0 || !V.open) return;
+  if (!V.background && g_demo_bg >= 0 && V.clock >= g_demo_bg) {
+    fm_log("demo: to the background at %.1f s", V.clock);
+    g_demo_bg = 1e9;
+    to_background();
+  } else if (V.background && g_demo_fg >= 0 && V.clock >= g_demo_fg) {
+    fm_log("demo: back to the picture at %.1f s", V.clock);
+    g_demo_fg = -1;
+    from_background();
+  }
+  if (SDL_GetTicks64() - last >= 1000) {
+    last = SDL_GetTicks64();
+    fm_log("demo: %s, clock %.1f s, %s, frame %d, video %d, flags %d", V.background ? "background" : "player", V.clock,
+           V.paused ? "paused" : "playing", (int)V.have_frame, (int)V.info.has_video, V.open_flags);
+    if (app.win) {
+      int x, y, w, h;
+      SDL_GetWindowPosition(app.win, &x, &y);
+      SDL_GetWindowSize(app.win, &w, &h);
+      fm_log("demo: pip window %dx%d at %d,%d, on top %d", w, h, x, y,
+             (int)((SDL_GetWindowFlags(app.win) & SDL_WINDOW_ALWAYS_ON_TOP) != 0));
+    }
+  }
+}
+
+void video_bg_pump(void) {
+  demo_video();
+  demo_steps();
+  if (!V.open || !V.background) return;
+  int state;
+  bool ready;
+  tick(&state, &ready);
+  if (ready && !V.paused && !V.ended) view_wake_in(500);   /* the bar's time and progress */
+}
+
+void video_bg_stop(void) {
+  if (V.open && V.background) vid_view_close();
+}
+
+void video_mini_draw(FmRect r) {
+  if (!video_mini_active()) return;
+  int state;
+  SDL_LockMutex(V.mx);
+  state = V.state;
+  SDL_UnlockMutex(V.mx);
+  bool ready = state == VS_READY && V.started;
+  bool playing = ready && !V.paused && !V.ended;
+  gfx_rect(r, T.surface2);
+  ui_divider(r.x, r.x + r.w, r.y);
+  double dur = V.info.duration;
+  if (dur > 0) gfx_rect(FM_RECT(r.x, r.y, r.w * (float)FM_CLAMP(V.clock / dur, 0.0, 1.0), DP(2)), T.accent);
+  FmRect c = rect_inset2(r, DP(8), DP(6));
+  float h = c.h;
+  bool close = ui_icon_btn(ui_id("vmini.close"), rect_cut_right(&c, FM_MAX(h, ui.m.hit)), IC_CLOSE, T.text2, "Stop");
+  FmRect pb = rect_cut_right(&c, FM_MAX(h, ui.m.hit));
+  float ps = FM_MIN(pb.h, DP(40));
+  gfx_circle(pb.x + pb.w * 0.5f, pb.y + pb.h * 0.5f, ps * 0.5f, T.accent);
+  bool pp = ui_icon_btn(ui_id("vmini.play"), pb, playing ? IC_PAUSE : IC_PLAY, T.on_accent, playing ? "Pause" : "Play");
+  FmRect ic = rect_cut_left(&c, h);
+  gfx_rrect(rect_inset(ic, DP(2)), DP(8), T.surface3);
+  icon_draw(IC_VIDEO, rect_center(ic, DP(22), DP(22)), T.accent);
+  rect_cut_left(&c, DP(10));
+  int f = ui_hit(ui_id("vmini.body"), c);
+  float lh = font_line_h(ui.m.font), ls = font_line_h(ui.m.font_small);
+  float y = c.y + (c.h - lh - ls) * 0.5f;
+  font_draw_ellipsis(FONT_BOLD, ui.m.font, c.x, y, V.title, c.w, T.text);
+  char a[24], d[24], line[96];
+  view_fmt_time(V.clock, a, sizeof a);
+  if (dur > 0) {
+    view_fmt_time(dur, d, sizeof d);
+    fm_snprintf(line, sizeof line, "%s / %s  \xC2\xB7  sound only, tap for the picture", a, d);
+  } else {
+    fm_snprintf(line, sizeof line, "%s  \xC2\xB7  sound only, tap for the picture", a);
+  }
+  if (!ready && state != VS_ERROR) fm_strlcpy(line, "Switching to sound only\xE2\x80\xA6", sizeof line);
+  if (state == VS_ERROR) fm_strlcpy(line, "Stopped: the stream failed. Tap to see why", sizeof line);
+  font_draw_ellipsis(FONT_REGULAR, ui.m.font_small, c.x, y + lh, line, c.w, T.text2);
+  if (close) { vid_view_close(); ui_redraw(); return; }
+  if (pp && ready) set_paused(!V.paused);
+  if (f & UI_CLICK) from_background();
+}
+
+static void vid_view_frame(FmRect area) {
+  gfx_rect(area, VIEW_BG);
+  int state;
+  bool ready;
+  tick(&state, &ready);
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+  if (PIP.on) { pip_frame(area, ready); return; }
+#endif
   bool playing = ready && !V.paused && !V.ended;
   screensaver(playing);
   float chrome = view_chrome(&V.chrome, ui_id("vid.chrome"), playing && !V.seek_drag && !V.viz_panel);
@@ -1305,6 +1638,8 @@ static void vid_view_frame(FmRect area) {
   /* keys */
   if (ready) {
     if (ui_key(SDLK_a, 0)) set_aspect(g_aspect + 1);
+    if (ui_key(SDLK_b, 0) && V.info.has_audio && V.info.has_video) { to_background(); return; }
+    if (ui_key(SDLK_p, 0) && V.info.has_video && !pip_on()) { pip_enter(); return; }
     if (ui_key(SDLK_SPACE, 0) || ui_key(SDLK_k, 0) || ui_key(SDLK_AUDIOPLAY, 0)) set_paused(!V.paused);
     if (ui_key(SDLK_RIGHT, 0)) { seek_to(V.clock + 10); view_chrome_poke(&V.chrome); }
     if (ui_key(SDLK_LEFT, 0)) { seek_to(V.clock - 10); view_chrome_poke(&V.chrome); }
@@ -1372,11 +1707,16 @@ static void vid_view_frame(FmRect area) {
   sub[0] = 0;
   if (ready && V.tw > 0) fm_snprintf(sub, sizeof sub, "%d \xC3\x97 %d  \xC2\xB7  %s", V.tw, V.th, V.info.backend);
   FmRect act;
-  if (view_topbar(area, VIEW_BAR_MEDIA, chrome, V.title, sub, 3, &act)) { app_close_viewer(); return; }
+  if (view_topbar(area, VIEW_BAR_MEDIA, chrome, V.title, sub, 6, &act)) { app_close_viewer(); return; }
   u32 mid = ui_id("vid.menu");
+  bool can_bg = ready && V.info.has_audio && V.info.has_video;
   if (view_bar_btn(&act, ui_id("vid.more"), IC_MORE, "More", VIEW_BAR_MEDIA, chrome, false)) {
     FmMenuItem items[] = {
       { VM_INFO, IC_INFO, "Video info", NULL, ready ? 0 : UI_MI_DISABLED },
+      { VM_BG, IC_MUSIC, "Play in background (sound only)", "B", can_bg ? 0 : UI_MI_DISABLED },
+#ifndef FM_MOBILE
+      { VM_PIP, IC_PIP, "Picture in picture (small window)", "P", ready && V.info.has_video ? 0 : UI_MI_DISABLED },
+#endif
       { VM_QUALITY, IC_SETTINGS, "Quality", NULL, 0 },
       { VM_SHARE, IC_SHARE, "Share", NULL, V.stream ? UI_MI_DISABLED : 0 },
       { VM_OPEN, IC_OPEN_WITH, "Open with system player", NULL, 0 },
@@ -1402,7 +1742,17 @@ static void vid_view_frame(FmRect area) {
     }
     ui_menu_open(mid, act.x + act.w, area.y + ui.m.bar_h, items, nitems);
   }
+  if (can_bg && view_bar_btn(&act, ui_id("vid.bgbtn"), IC_MUSIC, "Play in background, sound only (B)", VIEW_BAR_MEDIA,
+                             chrome, false)) {
+    to_background();
+    return;
+  }
 #ifndef FM_MOBILE
+  if (ready && V.info.has_video &&
+      view_bar_btn(&act, ui_id("vid.pipbtn"), IC_PIP, "Picture in picture (P)", VIEW_BAR_MEDIA, chrome, false)) {
+    pip_enter();
+    return;
+  }
   if (view_bar_btn(&act, ui_id("vid.fs"), IC_FULLSCREEN, "Fullscreen (F)", VIEW_BAR_MEDIA, chrome, V.fullscreen_set))
     toggle_fullscreen();
 #endif
@@ -1430,6 +1780,8 @@ static void vid_view_frame(FmRect area) {
     case VM_VIZ: V.viz_panel = true; viz_panel_tab(0); break;
     case VM_EQ: V.viz_panel = true; viz_panel_tab(1); break;
     case VM_QUALITY: quality_menu(act.x + act.w, area.y + ui.m.bar_h); break;
+    case VM_BG: to_background(); return;
+    case VM_PIP: pip_enter(); return;
     default: break;
   }
   int qres = ui_menu_result(ui_id("vid.qmenu"));

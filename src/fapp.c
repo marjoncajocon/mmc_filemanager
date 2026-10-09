@@ -2795,7 +2795,13 @@ static void restore_window(void) {
       if (SDL_GetDisplayUsableBounds(i, &b) != 0) continue;
       if (conf.win_x >= b.x - 50 && conf.win_x < b.x + b.w - 100 && conf.win_y >= b.y - 10 &&
           conf.win_y < b.y + b.h - 100) {
-        SDL_SetWindowPosition(app.win, conf.win_x, conf.win_y);
+        /* the whole window on that display, not just its corner (a size saved
+        ** with a corner near the edge left most of it off screen) */
+        int w, h;
+        SDL_GetWindowSize(app.win, &w, &h);
+        int x = FM_MAX(b.x, FM_MIN(conf.win_x, b.x + b.w - w));
+        int y = FM_MAX(b.y, FM_MIN(conf.win_y, b.y + b.h - h));
+        SDL_SetWindowPosition(app.win, x, y);
         break;
       }
     }
@@ -2806,7 +2812,7 @@ static void restore_window(void) {
 
 static void track_window(void) {
 #ifndef FM_MOBILE
-  if (g_shot) return;
+  if (g_shot || video_pip_active()) return;   /* the small video window is not the app's size */
   Uint32 fl = SDL_GetWindowFlags(app.win);
   conf.win_max = (fl & SDL_WINDOW_MAXIMIZED) != 0;
   if (fl & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED | SDL_WINDOW_FULLSCREEN)) return;
@@ -3023,6 +3029,7 @@ void app_init(void) {
 
 void app_shutdown(void) {
   app_close_viewer();
+  video_bg_stop();                     /* a video playing in the background */
   ops_shutdown();
   cloud_tasks_shutdown();              /* cloud: stop listings and sign-ins */
   if (!g_shot) {
@@ -3098,6 +3105,7 @@ void app_event(const SDL_Event *e) {
 /* ---- frame -------------------------------------------------------------- */
 
 void app_frame(void) {
+  video_bg_pump();                     /* a video playing in the background */
   thumb_pump();
   cloud_pump();                        /* cloud: finished listings and sign-ins, saving */
   lib_pump();                          /* flib: scan results, saving */
@@ -3151,7 +3159,7 @@ void app_frame(void) {
   float jh_target = jobs_target_h();
   float jh = ui_anim(ui_id("jobs.h"), jh_target, 14.0f);
   if (jh < 1.0f && jh_target == 0) jh = 0;
-  layout_compute(&g_L, g_single_tab, g_sidebar_open, jh, audio_mini_active());
+  layout_compute(&g_L, g_single_tab, g_sidebar_open, jh, audio_mini_active() || video_mini_active());
   if (g_L.mode == LAYOUT_SINGLE && g_active != g_single_tab) g_single_tab = g_active;
 
   theme_draw_bg(FM_RECT(0, 0, ui.w, ui.h));
@@ -3162,7 +3170,10 @@ void app_frame(void) {
     if (g_L.show[i]) panel_frame(&g_p[i], g_L.panel[i], i == g_active);
   draw_action_bar(g_L.action, g_L.action_vertical);
   if (jh > 0.5f) draw_jobs(g_L.jobs);
-  if (g_L.audio.h > 0) audio_mini_draw(rect_inset2(g_L.audio, DP(8), DP(4)));
+  if (g_L.audio.h > 0) {
+    if (video_mini_active()) video_mini_draw(rect_inset2(g_L.audio, DP(8), DP(4)));
+    else audio_mini_draw(rect_inset2(g_L.audio, DP(8), DP(4)));
+  }
   ui_divider(0, ui.w, g_L.status.y);
   draw_status(g_L.status);
   if (D.kind == DLG_NONE && !ui_menu_is_open() && !cloud_ui_is_open()) global_keys();

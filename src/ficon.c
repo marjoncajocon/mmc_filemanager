@@ -563,6 +563,10 @@ void icon_draw(FmIcon ic, FmRect r, FmColor c) {
       ARC(17.5f, 14, 4.5f, -80, 90);
       L(7, 18.5f, 17.5f, 18.5f);
       break;
+    case IC_PIP:        /* picture in picture: a small filled picture in a big one */
+      RR(2.5f, 4.5f, 19, 15, 2.5f);
+      POLY(true, 12, 11.5f, 18.5f, 11.5f, 18.5f, 17, 12, 17);
+      break;
     case IC_UPLOAD:     /* the download mark, arrow pointing up */
       L(12, 15, 12, 3); POLY(false, 7.5f, 7.5f, 12, 3, 16.5f, 7.5f);
       POLY(false, 4, 16, 4, 20, 20, 20, 20, 16);

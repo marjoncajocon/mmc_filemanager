@@ -18,6 +18,10 @@ bool title_custom(void);
 /* Each frame: the bar's rect, then every widget on it that must not drag. */
 void title_bar(FmRect r);
 void title_nodrag(FmRect r);
+/* Picture in picture: the window is a small video window, borderless (even
+** with the system title bar setting), dragged from anywhere but the nodrag
+** rects, resized from its edges. Off restores the normal frame. */
+void title_pip(bool on);
 /* Draws the window buttons, cutting their space from `in` (right on
 ** Windows/Linux, left on macOS). Does nothing with the system frame. */
 void title_buttons(FmRect *in);
