@@ -89,6 +89,10 @@ typedef struct Hls {
   ** first tag's time is kept for ns_hls_audio_time. */
   i64 strip;                   /* raw bytes to cut at the running segment's start, -1 = not looked yet */
   double audio_t;              /* the first tag's time (s), 0 = none */
+  /* live MPEG-TS: the first PES time, the broadcast clock of byte 0; Android's
+  ** TS reader counts from 0 instead (see ns_hls_live_time) */
+  double ts_t;
+  bool ts_looked;
   char *key_uri;               /* the AES-128 key in `key` (fetched once per URI) */
   u8 key[16];
 } Hls;
@@ -350,6 +354,27 @@ static i64 id3_cut(Hls *h, const u8 *p, size_t n) {
   return len;
 }
 
+/* MPEG-TS: the PTS of the first PES that has one, in seconds; 0 = none in p. */
+static double ts_first_pts(const u8 *p, size_t n) {
+  for (size_t i = 0; i + 188 <= n; i += 188) {
+    const u8 *k = p + i;
+    if (k[0] != 0x47) return 0;
+    if (!(k[1] & 0x40)) continue;                      /* not a payload start */
+    int afc = (k[3] >> 4) & 3;
+    size_t off = 4;
+    if (afc == 2) continue;                            /* no payload */
+    if (afc == 3) off += 1 + (size_t)k[4];
+    if (off + 14 > 188) continue;
+    const u8 *e = k + off;
+    if (e[0] || e[1] || e[2] != 1 || e[3] < 0xC0 || e[3] > 0xEF) continue;   /* PES: audio or video */
+    if (!(e[7] & 0x80)) continue;                      /* no PTS */
+    u64 pts = ((u64)(e[9] >> 1) & 7) << 30 | (u64)e[10] << 22 | (u64)(e[11] >> 1) << 15 | (u64)e[12] << 7 |
+              (u64)(e[13] >> 1);
+    return (double)pts / 90000.0;
+  }
+  return 0;
+}
+
 /* Plain segment bytes of the job holding the turn into the stream (mx held). */
 static bool hls_put(void *u, const u8 *p, size_t n) {
   HlsJob *j = (HlsJob *)u;
@@ -369,6 +394,10 @@ static bool hls_put(void *u, const u8 *p, size_t n) {
     SDL_CondBroadcast(s->cv);
   }
   if (h->strip < 0) h->strip = h->got == 0 && h->live && !j->init ? id3_cut(h, p, n) : 0;
+  if (h->live && !h->ts_looked && h->got == 0 && n >= 188 && p[0] == 0x47) {
+    h->ts_looked = true;
+    h->ts_t = ts_first_pts(p, n);
+  }
   i64 raw = h->got;                                    /* where p starts in the segment */
   j->seen += (i64)n;
   h->got += (i64)n;
@@ -1040,6 +1069,14 @@ double ns_hls_audio_time(FmNetStream *s) {
   if (!s->hls) return 0;
   SDL_LockMutex(s->mx);
   double t = s->hls->audio_t;
+  SDL_UnlockMutex(s->mx);
+  return t;
+}
+
+double ns_hls_live_time(FmNetStream *s) {
+  if (!s->hls) return 0;
+  SDL_LockMutex(s->mx);
+  double t = s->hls->audio_t > 0 ? s->hls->audio_t : s->hls->ts_t;
   SDL_UnlockMutex(s->mx);
   return t;
 }

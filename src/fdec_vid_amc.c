@@ -597,9 +597,10 @@ static bool feed(Amc *s) {
       if (s->hls && !s->t_checked && us >= 0) {
         s->t_checked = true;
         if (s->hls_start > 5 && (double)us / 1e6 < s->hls_start - 5) s->t_off_us = (int64_t)(s->hls_start * 1e6);
-        /* live packed audio counts from 0; the picture beside it keeps the
-        ** broadcast's clock (YouTube live: hours): put the sound on it */
-        double at = ns_hls_audio_time(s->net->ns);
+        /* live: Android counts both the TS picture and the packed audio
+        ** beside it from 0, each from its own start; back on the broadcast's
+        ** clock (YouTube live: hours) they are in step again */
+        double at = ns_hls_live_time(s->net->ns);
         if (at > 5 && (double)us / 1e6 < at - 5) s->t_off_us = (int64_t)(at * 1e6) - us;
       }
       if (us >= 0) us += s->t_off_us;

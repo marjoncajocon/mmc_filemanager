@@ -48,6 +48,11 @@ bool   ns_is_hls(const FmNetStream *s);
 ** first one's time, the broadcast clock (s) of the first sample read, or 0.
 ** Known once the first bytes arrived. */
 double ns_hls_audio_time(FmNetStream *s);
+/* Live HLS: the broadcast clock (s) of the first media read, from that tag
+** or else from the first MPEG-TS PES time; 0 = unknown. A decoder that counts
+** from 0 (Android's TS and AAC readers) adds it, so a picture and a sound
+** stream of one broadcast stay on one clock. */
+double ns_hls_live_time(FmNetStream *s);
 /* The read-ahead buffer grows to 4 MB while the network is ahead; a reader
 ** that only needs a little (a second cursor into the same file) caps it. */
 void   ns_limit_ring(FmNetStream *s, size_t max);
