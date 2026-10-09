@@ -225,6 +225,12 @@ static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
       done += take;
       continue;
     }
+    /* a peek far ahead (the next fragment's header) that a connection has
+    ** already read ahead: served from its buffer, the cursor stays put */
+    size_t pk = 0;
+    for (int i = 0; i < NET_WINS && !pk; i++)
+      if (n->w[i].ns) pk = ns_peek_at(n->w[i].ns, p, (u8 *)buf + done, size - done);
+    if (pk) { done += pk; continue; }
     /* a window whose connection reads on to p */
     int k = -1;
     i64 lend = 0;

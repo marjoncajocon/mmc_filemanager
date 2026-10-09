@@ -1,8 +1,15 @@
 package io.github.mmc.filemanager;
 
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.os.Build;
+
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+
+import org.libsdl.app.SDLActivity;
 
 /* FmNet.java -- HTTP(S) for the native side (src/fnet.c), on HttpURLConnection,
 ** so TLS and the trusted certificates are the system's own.
@@ -10,9 +17,27 @@ import java.net.URL;
 ** One connection per request; fnet.c pulls the body with read() from its
 ** worker thread. Redirects are followed by hand (the built-in follower never
 ** crosses http <-> https). Transparent gzip is kept for API replies but turned
-** off for Range requests, whose byte offsets must stay exact. */
+** off for Range requests, whose byte offsets must stay exact.
+**
+** Every request goes over the current default network (Android 6+). Phones
+** with "network acceleration" (seen on Honor) otherwise send some sockets
+** over mobile data while on Wi-Fi: another public address, and YouTube's
+** stream links, bound to the address that asked for them, answer 403. */
 public final class FmNet {
     private FmNet() {}
+
+    private static HttpURLConnection connect(URL u) throws java.io.IOException {
+        if (Build.VERSION.SDK_INT >= 23) {
+            try {
+                Context ctx = SDLActivity.getContext();
+                ConnectivityManager cm = ctx == null ? null
+                        : (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+                Network n = cm == null ? null : cm.getActiveNetwork();
+                if (n != null) return (HttpURLConnection) n.openConnection(u);
+            } catch (SecurityException e) { /* no permission: the system's choice */ }
+        }
+        return (HttpURLConnection) u.openConnection();
+    }
 
     public static final class Conn {
         HttpURLConnection h;
@@ -28,7 +53,7 @@ public final class FmNet {
         Conn c = new Conn();
         try {
             for (int hop = 0; hop < 8; hop++) {
-                HttpURLConnection h = (HttpURLConnection) new URL(url).openConnection();
+                HttpURLConnection h = connect(new URL(url));
                 h.setInstanceFollowRedirects(false);
                 h.setConnectTimeout(10000);
                 h.setReadTimeout(30000);

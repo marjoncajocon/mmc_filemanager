@@ -969,6 +969,21 @@ bool ns_seekable(const FmNetStream *s) { return s->ranges && s->size > 0; }
 const char *ns_content_type(const FmNetStream *s) { return s->ctype; }
 bool ns_is_hls(const FmNetStream *s) { return s->hls != NULL; }
 
+size_t ns_peek_at(FmNetStream *s, i64 pos, void *out, size_t n) {
+  size_t got = 0;
+  SDL_LockMutex(s->mx);
+  if (s->pending < 0 && pos >= s->pos && pos - s->pos < (i64)s->fill) {
+    size_t off = (size_t)(pos - s->pos);
+    got = FM_MIN(n, s->fill - off);
+    size_t at = (s->rd + off) % s->cap;
+    size_t first = FM_MIN(got, s->cap - at);
+    memcpy(out, s->ring + at, first);
+    if (got > first) memcpy((u8 *)out + first, s->ring, got - first);
+  }
+  SDL_UnlockMutex(s->mx);
+  return got;
+}
+
 void ns_limit_ring(FmNetStream *s, size_t max) {
   SDL_LockMutex(s->mx);
   s->cap_max = FM_MAX(max, (size_t)RING);

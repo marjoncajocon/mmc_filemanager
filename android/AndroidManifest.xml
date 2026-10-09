@@ -19,6 +19,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Online videos, photos and audio (src/fnet.c through FmNet.java). -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- To send every request over the current default network (FmNet.java). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <uses-feature android:glEsVersion="0x00020000" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
