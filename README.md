@@ -138,6 +138,19 @@ Openverse, Wikimedia Commons, NASA Images and the Art Institute of Chicago need 
 
 Everything streams, with nothing downloaded before playback. Downloads are optional.
 
+### Online reading (Wikipedia)
+
+- "Online reading" (home tile 7, the sidebar's Places, or the places menu) holds the reader sources; the first is Wikipedia, through its public APIs, no key:
+  - **Today**: the featured article, most read, picture of the day, on this day.
+  - **Search** with thumbnails and short descriptions; endless results.
+  - **Articles** as clean text in sections: lead picture, contents (jump to a section), bigger/smaller text (Ctrl +/-), Page Up/Down.
+  - **Pictures, videos and sounds** of an article: pictures open in the image viewer, videos in the video player (VP9/Opus WebM, up to 480p), sounds in the music player (MP3). Videos and sounds are downloaded whole first, with progress (Wikimedia refuses the many range requests of streaming).
+  - **The same article in other languages**, related articles, every article it links to, random articles.
+  - **Saved articles** (the star; they also show in the home screen's Favorites) and **history**.
+  - **Language**: English, Tagalog, Cebuano, Simple English, Ilokano, Waray, Kapampangan, Bikol and more (⋮ > Language).
+- Wikimedia allows an unidentified app only 10 requests a minute (thumbnails included); with a contact (an email or a web page, ⋮ > Wikimedia contact, sent only to Wikimedia in an `Api-User-Agent` header) it allows 200.
+- Not shown: infoboxes, tables and formulas (Open in browser has them); links inside the text (the article's links are listed under Related).
+
 ### Cloud storage
 
 Cloud accounts appear as places, and their folders open in the panels like local ones. Uploads, downloads and cloud-to-cloud copies run as normal jobs, and large files stream in chunks.

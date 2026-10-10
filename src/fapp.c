@@ -25,6 +25,7 @@
 #include "flib.h"
 #include "fonline.h"
 #include "fhome.h"
+#include "fwiki.h"
 #include "fphoto.h"                    /* photos */
 #include "faudio_online.h"             /* audio */
 #include "fcloud_app.h"                /* cloud */
@@ -287,6 +288,7 @@ static void build_places(void) {
   place_add(IC_ALBUM, "Online photos", "photos:", 1);        /* photos: the online photos view */
   place_add(IC_RADIO, "Online audio", "audio:", 1);          /* audio: the online audio view */
   place_add(IC_CLOUD, "Cloud storage", "cloud:", 1);         /* cloud: accounts sheet */
+  place_add(IC_TEXT, "Online reading", "wiki:", 1);          /* wiki: Wikipedia (more sites later) */
   for (int i = 0; i < FM_COUNT(kPl); i++)
     if (plat_place(kPl[i].p, path, sizeof path) && plat_is_dir(path))
       place_add(kPl[i].ic, kPl[i].label, path, 1);
@@ -318,7 +320,17 @@ static void open_library(int section) {
 }
 
 /* online: the online videos view, over the panels like the library */
+/* wiki: Wikipedia, over the panels like the online views */
+static void open_wiki(void) {
+  if (lib_ui_is_open()) lib_ui_close();
+  if (online_is_open()) online_close();
+  if (photo_is_open()) photo_close();
+  if (aonline_is_open()) aonline_close();
+  wiki_open();
+}
+
 static void open_online(void) {
+  if (wiki_is_open()) wiki_close();                  /* wiki */
   if (lib_ui_is_open()) lib_ui_close();
   if (photo_is_open()) photo_close();   /* photos */
   if (aonline_is_open()) aonline_close();   /* audio */
@@ -345,6 +357,7 @@ static void home_pick(int act) {
       panel_go_path(P(), d);
       break;
     }
+    case HOME_WIKI: open_wiki(); break;
     case HOME_SETTINGS: open_settings(); break;
     case HOME_THEME:
       conf.dark = !T.dark;
@@ -362,6 +375,7 @@ static void online_reveal_path(const char *path) {   /* online: "Show in folder"
 
 /* photos: the online photos view, over the panels like the online videos */
 static void open_photos(void) {
+  if (wiki_is_open()) wiki_close();                  /* wiki */
   if (lib_ui_is_open()) lib_ui_close();
   if (online_is_open()) online_close();
   if (aonline_is_open()) aonline_close();   /* audio */
@@ -375,6 +389,7 @@ static void photo_reveal_path(const char *path) {    /* photos: "Show in folder"
 
 /* audio: the online audio view, over the panels like the other online views */
 static void open_aonline(void) {
+  if (wiki_is_open()) wiki_close();                  /* wiki */
   if (lib_ui_is_open()) lib_ui_close();
   if (online_is_open()) online_close();
   if (photo_is_open()) photo_close();
@@ -400,6 +415,7 @@ static void go_place(int i, int panel) {
   if (!strcmp(g_places[i].path, "photos:")) { open_photos(); return; }   /* photos */
   if (!strcmp(g_places[i].path, "audio:")) { open_aonline(); return; }    /* audio */
   if (!strcmp(g_places[i].path, "cloud:")) { cloud_ui_home(); return; }   /* cloud */
+  if (!strcmp(g_places[i].path, "wiki:")) { open_wiki(); return; }        /* wiki */
   if (!strncmp(g_places[i].path, "cloud:", 6)) { cloud_ui_go(atoi(g_places[i].path + 6), panel); return; }
   if (!plat_is_dir(g_places[i].path)) {
     ui_toast("%s is not available", g_places[i].label);
@@ -916,7 +932,7 @@ enum {
   PM_SORT_NAME = 40, PM_SORT_SIZE, PM_SORT_DATE, PM_SORT_TYPE, PM_DESC, PM_DIRS_FIRST, PM_LIST,
   PM_GRID, PM_HIDDEN, PM_NEWDIR, PM_NEWFILE, PM_PASTE, PM_SELECT_ALL, PM_REFRESH, PM_PROPS,
   PM_SEARCH, PM_MIRROR, PM_PATH, PM_SELECT_MODE, PM_LIBRARY, PM_ONLINE, PM_PHOTOS /* photos */, PM_AUDIO /* audio */,
-  PM_CLOUD /* cloud */,
+  PM_CLOUD /* cloud */, PM_WIKI /* wiki */,
   JM_PAUSE = 80, JM_CANCEL
 };
 
@@ -1034,6 +1050,7 @@ void app_panel_menu(FmPanel *p, float x, float y) {
   item(m, &n, PM_PHOTOS, IC_ALBUM, "Online photos", NULL, 0);        /* photos */
   item(m, &n, PM_AUDIO, IC_RADIO, "Online audio", NULL, 0);          /* audio */
   item(m, &n, PM_CLOUD, IC_CLOUD, "Cloud storage", NULL, 0);         /* cloud */
+  item(m, &n, PM_WIKI, IC_TEXT, "Online reading", NULL, 0);          /* wiki */
   sep(m, &n);
   item(m, &n, PM_MIRROR, IC_SWAP, "Same folder in other panel", NULL, 0);
   item(m, &n, PM_PATH, IC_RENAME, "Go to path", "Ctrl+L", 0);
@@ -1202,6 +1219,7 @@ static void pmenu_action(int id) {
     case PM_PHOTOS: open_photos(); break;       /* photos */
     case PM_AUDIO: open_aonline(); break;       /* audio */
     case PM_CLOUD: cloud_ui_home(); break;      /* cloud */
+    case PM_WIKI: open_wiki(); break;           /* wiki */
     case PM_MIRROR: {
       FmLoc l = p->list.loc;
       panel_go(&g_p[1 - p->idx], &l, true);
@@ -2857,7 +2875,7 @@ static const char *arg_positional(void) {
                                       "--demo-online", "--demo-online-state",
                                       "--demo-photos", "--demo-photos-state" /* photos */,
                                       "--demo-audio-online", "--demo-audio-online-state" /* audio */,
-                                      "--demo-cloud" /* cloud */ };
+                                      "--demo-cloud" /* cloud */, "--demo-wiki", "--demo-wiki-page" /* wiki */ };
   for (int i = 1; i < app.argc; i++) {
     const char *a = app.argv[i];
     bool val = false;
@@ -3119,6 +3137,13 @@ void app_init(void) {
     aonline_demo(dau, q, arg_value("--demo-audio-online-state"));
   }
   /* cloud: --demo-cloud [panel|folder|loading|signedout|delete|home|add|form-KEY|link] */
+  /* wiki: --demo-wiki TITLE [--demo-wiki-page media|toc|langs|related|home] */
+  const char *dwk = arg_value("--demo-wiki");
+  if (dwk) {
+    open_wiki();
+    if (strcmp(dwk, "home")) wiki_open_article("", dwk);
+    wiki_demo_page(arg_value("--demo-wiki-page"));
+  }
   if (arg_flag("--demo-cloud")) {
     const char *st = arg_value("--demo-cloud");
     cloud_ui_demo(st && st[0] != '-' ? st : NULL);
@@ -3152,6 +3177,7 @@ void app_shutdown(void) {
   lib_shutdown();                      /* flib */
   pl_shutdown();                       /* playlists */
   aonline_shutdown();                  /* audio */
+  wiki_shutdown();                     /* wiki */
   photo_shutdown();                    /* photos */
   online_shutdown();                   /* online */
   cloud_shutdown();                    /* cloud */
@@ -3224,6 +3250,7 @@ void app_frame(void) {
   online_pump();                       /* online: searches, downloads, thumbnails */
   photo_pump();                        /* photos: searches, full pictures, downloads, albums */
   aonline_pump();                      /* audio: searches, episodes, downloads, the library */
+  wiki_pump();                         /* wiki: articles, searches, media */
   FmJob *fj;
   while ((fj = ops_take_finished()) != NULL) job_finished(fj);
   conf_flush(false);
@@ -3263,6 +3290,13 @@ void app_frame(void) {
   /* audio: the online audio view, also under the viewers */
   if (aonline_is_open()) {
     aonline_frame(FM_RECT(0, 0, ui.w, ui.h));
+    draw_dialogs();
+    title_outline();
+    return;
+  }
+  /* wiki: Wikipedia, also under the viewers */
+  if (wiki_is_open()) {
+    wiki_frame(FM_RECT(0, 0, ui.w, ui.h));
     draw_dialogs();
     title_outline();
     return;

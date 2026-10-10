@@ -10,7 +10,7 @@
 #include "fcore.h"
 #include "fui.h"
 
-enum { HOME_NONE, HOME_FILES, HOME_VIDEOS, HOME_AUDIO, HOME_PHOTOS, HOME_LIBRARY, HOME_CLOUD, HOME_SETTINGS, HOME_THEME,
+enum { HOME_NONE, HOME_FILES, HOME_VIDEOS, HOME_AUDIO, HOME_PHOTOS, HOME_LIBRARY, HOME_CLOUD, HOME_SETTINGS, HOME_THEME, HOME_WIKI,
        HOME_FOLDER };                         /* a favourite folder: home_picked_folder() */
 
 bool home_is_open(void);

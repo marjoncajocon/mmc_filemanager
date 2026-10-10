@@ -32,6 +32,7 @@
 #include "fonline_int.h"
 #include "fphoto.h"
 #include "faudio_online.h"
+#include "fwiki.h"
 #include <time.h>
 
 typedef struct Tile {
@@ -48,6 +49,7 @@ static const Tile kTiles[] = {
   { HOME_PHOTOS, IC_ALBUM, "Online photos", "Free photos to view and download", 0xF2B53C, 0xD9822A },
   { HOME_LIBRARY, IC_LIBRARY, "Media library", "Your songs, videos and playlists", 0x2EC4A0, 0x16967A },
   { HOME_CLOUD, IC_CLOUD, "Cloud storage", "Google Drive, MEGA, Dropbox, WebDAV", 0x5AB4F0, 0x2F86C9 },
+  { HOME_WIKI, IC_TEXT, "Online reading", "Wikipedia: articles, pictures, videos (more sites to come)", 0x7A8394, 0x4B5263 },
 };
 
 static bool g_open;
@@ -55,7 +57,7 @@ static FmScroll g_scroll;
 
 /* ---- favorites: the log and the strip --------------------------------------------- */
 
-enum { FK_FILE = 'f', FK_DIR = 'd', FK_AUDIO = 'a', FK_PHOTO = 'p' };
+enum { FK_FILE = 'f', FK_DIR = 'd', FK_AUDIO = 'a', FK_PHOTO = 'p', FK_WIKI = 'w' };
 #define HF_LOG   400                   /* log entries kept */
 #define HF_SCAN  40                    /* newest favourites read per list */
 #define HF_SHOW  12                    /* cards on the home screen */
@@ -163,6 +165,14 @@ static bool still_fav(const HfLog *e) {
     case FK_FILE: return lib_is_fav(e->key);
     case FK_DIR: return conf_is_bookmark(e->key);
     case FK_AUDIO: return aonline_fav_has(e->key);
+    case FK_WIKI: {
+      char lang[16];
+      const char *bar = strchr(e->key, '|');
+      if (!bar || (size_t)(bar - e->key) >= sizeof lang) return false;
+      memcpy(lang, e->key, (size_t)(bar - e->key));
+      lang[bar - e->key] = 0;
+      return wiki_saved_has(lang, bar + 1);
+    }
     case FK_PHOTO: {
       char src[64];
       const char *bar = strchr(e->key, '|');
@@ -221,6 +231,19 @@ static void collect(void) {
     else fm_strlcpy(f->sub, k, sizeof f->sub);
     fm_strlcpy(f->thumb, ai.art, sizeof f->thumb);
     f->icon = ai.kind == AITEM_STATION ? IC_RADIO : ai.kind == AITEM_PODCAST ? IC_PODCAST : IC_MUSIC;
+  }
+  /* saved Wikipedia articles */
+  for (int i = 0; i < wiki_saved_count() && i < HF_SCAN; i++) {
+    char wl[16], wt[256], wd[256], wth[512];
+    if (!wiki_saved_get(i, wl, sizeof wl, wt, sizeof wt, wd, sizeof wd, wth, sizeof wth)) continue;
+    fm_snprintf(key, sizeof key, "%s|%s", wl, wt);
+    HFav *f = cand_add(FK_WIKI, key);
+    if (!f) break;
+    fm_strlcpy(f->title, wt, sizeof f->title);
+    if (wd[0]) fm_snprintf(f->sub, sizeof f->sub, "Wikipedia \xC2\xB7 %s", wd);
+    else fm_strlcpy(f->sub, "Wikipedia", sizeof f->sub);
+    fm_strlcpy(f->thumb, wth, sizeof f->thumb);
+    f->icon = IC_TEXT;
   }
   /* online photos */
   FmPsrcItem pi;
@@ -295,6 +318,15 @@ static int fav_open(const HFav *f) {
     case FK_AUDIO:
       aonline_fav_open(c.key);
       return HOME_NONE;
+    case FK_WIKI: {
+      char lang[16];
+      const char *bar = strchr(c.key, '|');
+      if (!bar || (size_t)(bar - c.key) >= sizeof lang) return HOME_NONE;
+      memcpy(lang, c.key, (size_t)(bar - c.key));
+      lang[bar - c.key] = 0;
+      wiki_open_article(lang, bar + 1);
+      return HOME_NONE;
+    }
     case FK_PHOTO: {
       char src[64];
       const char *bar = strchr(c.key, '|');
@@ -489,7 +521,7 @@ int home_frame(FmRect area) {
   fy += fhead;
   if (!H.nfav) {
     font_draw_wrap(FONT_REGULAR, ui.m.font_small, grid.x, fy + DP(6), grid.w,
-                   "Star a folder, or heart a song, a video, a station or a photo: it shows up here.", T.text2, true);
+                   "Star a folder or a Wikipedia article, or heart a song, a video, a station or a photo: it shows up here.", T.text2, true);
   }
   float fw = (grid.w - fgap * (fcols - 1)) / fcols;
   u32 fbase = ui_id("home.fav");
@@ -506,7 +538,7 @@ int home_frame(FmRect area) {
   ui_scrollbar(&g_scroll, view, content);
   int t = draw_top(top);
   if (t != HOME_NONE) act = t;
-  /* keys: 1..6 open the tiles */
+  /* keys: 1..7 open the tiles */
   if (ui_input_ok() && !ui.focus && !ui_menu_is_open())
     for (int i = 0; i < n; i++)
       if (ui_key((SDL_Keycode)(SDLK_1 + i), 0)) act = kTiles[i].act;

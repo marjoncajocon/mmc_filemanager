@@ -117,6 +117,7 @@ static const TestArea kAreas[] = {
   { "oauth", test_oauth },
   { "dav", test_dav },
   { "mega", test_mega },
+  { "wiki", test_wiki },
 };
 
 int test_run_all(void) {

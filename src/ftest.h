@@ -32,6 +32,7 @@ int test_hls(const char *tmp);        /* ftest_hls.c: HLS playlists, AES-128, Da
 int test_generic(const char *tmp);    /* ftest_generic.c: native "Any site" page resolver (MMCFM_GENERIC_TEST=url) */
 int test_online_ui(const char *tmp);  /* ftest_online.c: online videos view: formatting, recent searches */
 int test_psrc(const char *tmp);       /* ftest_psrc.c: online photo sources (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
+int test_wiki(const char *tmp);       /* ftest_wiki.c: Wikipedia (MMCFM_WIKI_TEST=<article> for the network) */
 int test_photo_ui(const char *tmp);   /* ftest_photo.c: online photos view: rows, albums file, recent searches */
 int test_asrc(const char *tmp);       /* ftest_asrc.c: online audio sources, XML reader (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
 int test_aonline_ui(const char *tmp); /* ftest_aonline.c: online audio view: item lines, library file (MMCFM_AONLINE_PLAY) */
