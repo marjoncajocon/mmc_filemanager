@@ -516,7 +516,9 @@ static void *amc_open(const char *path, int flags, FmVidInfo *in) {
   in->sar = sar_w > 0 && sar_h > 0 ? (double)sar_w / sar_h : 1.0;
   if (in->sar < 0.1 || in->sar > 10) in->sar = 1.0;
   in->duration = dur > 0 ? (double)dur / 1e6 : 0;
-  if (s->hls && in->duration <= 0) in->duration = ns_hls_duration(s->net->ns);
+  /* HLS: the playlist knows the length; Android's TS reader only saw the
+  ** first segment (a 1 h 47 min Dailymotion video said 3 s: no timeline) */
+  if (s->hls && ns_hls_duration(s->net->ns) > 0) in->duration = ns_hls_duration(s->net->ns);
   fm_strlcpy(in->backend, "MediaCodec", sizeof in->backend);
   s->a_rate = in->rate;
   s->a_ch = ach;

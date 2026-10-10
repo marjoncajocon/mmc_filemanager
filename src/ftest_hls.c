@@ -552,9 +552,9 @@ static void th_dm_online(void) {
       }
     }
     printf("  dm %s: %s %s/%s %dx%d  open %d ms, first frame %d ms after resolve (%d ms from the click), "
-           "v%d a%d to %.1fs\n",
+           "v%d a%d to %.1fs, length %.1f s (the player's timeline)\n",
            id, in.backend, in.vcodec, in.acodec, in.w, in.h, (int)(t2 - t1), tf ? (int)(tf - t1) : -1,
-           tf ? (int)(tf - t0) : -1, nv, na, last);
+           tf ? (int)(tf - t0) : -1, nv, na, last, in.duration);
     TEST_CHECK(nv > 0 && na > 0);
     double target = st->duration > 60 ? st->duration * 0.5 : 0;
     TEST_CHECK(in.duration > 0);                               /* MF: from the playlist (ns_hls_duration) */
