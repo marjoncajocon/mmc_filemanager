@@ -49,7 +49,7 @@ static const Tile kTiles[] = {
   { HOME_PHOTOS, IC_ALBUM, "Online photos", "Free photos to view and download", 0xF2B53C, 0xD9822A },
   { HOME_LIBRARY, IC_LIBRARY, "Media library", "Your songs, videos and playlists", 0x2EC4A0, 0x16967A },
   { HOME_CLOUD, IC_CLOUD, "Cloud storage", "Google Drive, MEGA, Dropbox, WebDAV", 0x5AB4F0, 0x2F86C9 },
-  { HOME_WIKI, IC_TEXT, "Online reading", "Wikipedia: articles, pictures, videos (more sites to come)", 0x7A8394, 0x4B5263 },
+  { HOME_WIKI, IC_TEXT, "Online reading", "Wikipedia, books, DEV, Stack Overflow", 0x7A8394, 0x4B5263 },
 };
 
 static bool g_open;

@@ -198,7 +198,7 @@ static struct {
 static Uint32 SDLCALL tick_cb(Uint32 interval, void *t) {
   FM_UNUSED(interval);
   SDL_AtomicSet((SDL_atomic_t *)t, 0);
-  app_wake();
+  app_wake_tick();
   return 0;
 }
 

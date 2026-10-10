@@ -56,6 +56,7 @@ typedef struct FmConf {
   bool thumbnails;
   bool start_home;             /* open on the home screen (big tiles) */
   bool online_thumbs;          /* download thumbnails of online items (off: saves data) */
+  int ui_font;                 /* FONT_UI_HACK (default) or FONT_UI_POPPINS */
   int sort[2];                /* per panel */
   bool sort_desc[2];
   int view[2];                /* VIEW_* per panel */

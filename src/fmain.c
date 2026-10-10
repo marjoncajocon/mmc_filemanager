@@ -104,6 +104,41 @@ static bool wait_event(SDL_Event *e, int ms) {
   return SDL_WaitEventTimeout(e, ms) != 0;
 }
 
+/* MMCFM_IDLE_LOG=1: every 5 s, the frames drawn and the loop's wakeups, and
+** who asked for them (ui_animate / ui_redraw / app_wake callers, counted),
+** to find what keeps an idle screen drawing (battery). */
+static void idle_log(bool drawing) {
+  static int on = -1, frames, wakes, nwhy;
+  static u64 t0;
+  static struct { char s[120]; int n; } why[6];
+  if (on < 0) on = getenv("MMCFM_IDLE_LOG") != NULL;
+  if (!on) return;
+  u64 now = SDL_GetTicks64();
+  if (!t0) t0 = now;
+  wakes++;
+  if (drawing) {
+    char w[120];
+    frames++;
+    if (ui.anim && g_ui_anim_file) fm_snprintf(w, sizeof w, "animate %s:%d", g_ui_anim_file, g_ui_anim_line);
+    else if (ui.redraw > 0 && g_ui_redraw_file) fm_snprintf(w, sizeof w, "redraw %s:%d", g_ui_redraw_file, g_ui_redraw_line);
+    else fm_strlcpy(w, ui.down || ui.nfingers ? "pointer down" : "input", sizeof w);
+    int i = 0;
+    while (i < nwhy && strcmp(why[i].s, w)) i++;
+    if (i == nwhy && nwhy < (int)FM_COUNT(why)) fm_strlcpy(why[nwhy++].s, w, sizeof why[0].s);
+    if (i < nwhy) why[i].n++;
+  }
+  if (now - t0 >= 5000) {
+    char list[800] = "";
+    size_t n = 0;
+    for (int i = 0; i < nwhy && n < sizeof list; i++)
+      n += (size_t)fm_snprintf(list + n, sizeof list - n, "%s%s x%d", i ? ", " : "", why[i].s, why[i].n);
+    fm_log("idle-log: %d frames, %d wakeups in %.1f s%s%s", frames, wakes, (now - t0) / 1000.0, nwhy ? "; " : "", list);
+    frames = wakes = nwhy = 0;
+    memset(why, 0, sizeof why);
+    t0 = now;
+  }
+}
+
 static void frame(void) {
   SDL_Event e;
   int wait = ui_wait_ms();
@@ -170,6 +205,7 @@ static void frame(void) {
     media_bg_pump();
     return;
   }
+  idle_log(ui_needs_frame());
   if (!ui_needs_frame()) return;
   int w, h;
   SDL_GetRendererOutputSize(app.ren, &w, &h);
@@ -354,9 +390,12 @@ int main(int argc, char **argv) {
   return rc;
 }
 
-void app_wake(void) {
+void app_wake_at(const char *file, int line, int frames) {
   SDL_Event e;
   memset(&e, 0, sizeof e);
   e.type = app.ev_wake;
+  e.user.code = line;
+  e.user.data1 = (void *)file;
+  e.user.data2 = (void *)(intptr_t)frames;
   SDL_PushEvent(&e);
 }

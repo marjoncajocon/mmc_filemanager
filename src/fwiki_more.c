@@ -12,6 +12,13 @@
 **     ancestors, photos with attribution). locale= gives common names in a language.
 **   - Fruityvice (fruityvice.com/api/fruit/all, /fruit/<name>): 49 fruits, nutrition
 **     per 100 g and classification.
+**   - DEV Community (dev.to/api/articles?tag=&top=&page=, /articles/<id or user/slug>):
+**     articles as HTML (body_html). There is no search in the API (the site's own
+**     search answers programs with nothing), so a search is a topic tag.
+**   - Stack Exchange API 2.3 (api.stackexchange.com): /questions?tagged=&sort=votes,
+**     /search/advanced?q=, /questions/<id> with a filter that brings the answers in
+**     the same request. 300 requests a day per network without a key; it can ask
+**     callers to wait ("backoff"), which so_fetch honours.
 **
 ** Design decisions:
 **   - Every source fills the same structs as the wikis (WkList, WkArticle,
@@ -26,6 +33,7 @@
 #include "fwiki_int.h"
 #include "fjson.h"
 #include "fnet.h"
+#include "fsdl.h"
 
 #define RD_MAX_REPLY (8u << 20)
 
@@ -747,6 +755,355 @@ FmErr rd_dict(const char *word, WkArticle *out, WkMediaList *sounds, volatile in
     return FM_ERR_NOT_FOUND;
   }
   e = rd_dict_parse((const char *)r.data, r.len, out, sounds);
+  net_resp_free(&r);
+  return e;
+}
+
+/* ---- DEV Community (dev.to) ------------------------------------------------------------ */
+
+/* A reply's body as it came; err says why there is none. */
+static FmErr get_body(const char *url, const char *site, FmNetResp *r, char *err, size_t cap, volatile int *cancel) {
+  memset(r, 0, sizeof *r);
+  FmErr e = net_get(url, NULL, RD_MAX_REPLY, r, cancel);
+  if (e == FM_ERR_CANCEL) { fm_strlcpy(err, "Cancelled", cap); net_resp_free(r); return e; }
+  if (e != FM_OK) {
+    fm_snprintf(err, cap, "Network error: %s", r->error[0] ? r->error : fm_err_str(e));
+    net_resp_free(r);
+    return e;
+  }
+  if (r->status == 404) { fm_snprintf(err, cap, "%s has nothing there", site); net_resp_free(r); return FM_ERR_NOT_FOUND; }
+  if (r->status == 429) { fm_snprintf(err, cap, "%s is busy: try again in a minute", site); net_resp_free(r); return FM_ERR_IO; }
+  if (r->status != 200 || !r->data) {
+    fm_snprintf(err, cap, "%s answered %d", site, r->status);
+    net_resp_free(r);
+    return FM_ERR_IO;
+  }
+  return FM_OK;
+}
+
+static void tputs(Txt *t, const char *s) { tput(t, s, strlen(s)); }
+
+/* Text into HTML (names and tags around a page's own HTML). */
+static void hput(Txt *t, const char *s) {
+  for (; *s; s++) {
+    switch (*s) {
+      case '<': tputs(t, "&lt;"); break;
+      case '>': tputs(t, "&gt;"); break;
+      case '&': tputs(t, "&amp;"); break;
+      case '"': tputs(t, "&quot;"); break;
+      default: tput(t, s, 1); break;
+    }
+  }
+}
+
+/* A topic as dev.to tags it: letters and digits ("C++" -> "cpp", "C#" -> "csharp"). */
+void rd_devto_tag(const char *q, char *out, size_t cap) {
+  size_t o = 0;
+  for (const char *s = q; *s && o + 6 < cap; s++) {
+    char c = *s;
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out[o++] = c;
+    else if (c == '+') out[o++] = 'p';
+    else if (c == '#') { memcpy(out + o, "sharp", 5); o += 5; }
+  }
+  out[o] = 0;
+}
+
+/* dev.to's picture server picks WebP for "format=auto", which this app does
+** not decode: JPEG instead (same length, so in place; also "%2C"-escaped). */
+static void devto_jpeg(char *s) {
+  for (char *f = s; (f = strstr(f, "format=auto")) != NULL; f += 11) memcpy(f + 7, "jpeg", 4);
+}
+
+static void devto_page(WkPage *p, const FmJsonNode *a) {
+  fm_snprintf(p->id, sizeof p->id, "%.0f", json_num(json_get(a, "id"), 0));
+  fm_strlcpy(p->title, json_str(json_get(a, "title"), ""), sizeof p->title);
+  fm_snprintf(p->desc, sizeof p->desc, "%s \xC2\xB7 %s \xC2\xB7 %.0f min read \xC2\xB7 \xE2\x99\xA5 %.0f",
+              json_str(json_path(a, "user.name"), ""), json_str(json_get(a, "readable_publish_date"), ""),
+              json_num(json_get(a, "reading_time_minutes"), 1), json_num(json_get(a, "public_reactions_count"), 0));
+  const char *th = json_str(json_get(a, "cover_image"), "");
+  if (!th[0]) th = json_str(json_path(a, "user.profile_image_90"), "");
+  fm_strlcpy(p->thumb, th, sizeof p->thumb);
+  devto_jpeg(p->thumb);
+}
+
+FmErr rd_devto_list(const char *tag, int page, WkList *out, volatile int *cancel) {
+  memset(out, 0, sizeof out[0]);
+  out->next = -1;
+  if (page < 1) page = 1;
+  char tg[64], url[400];
+  rd_devto_tag(tag ? tag : "", tg, sizeof tg);
+  /* a topic: the year's most liked; none: the week's */
+  fm_snprintf(url, sizeof url, "https://dev.to/api/articles?per_page=30&page=%d&top=%d%s%s", page, tg[0] ? 365 : 7,
+              tg[0] ? "&tag=" : "", tg);
+  FmJson j;
+  FmErr e = get_json(url, "DEV", &j, out->error, sizeof out->error, cancel);
+  if (e != FM_OK) return e;
+  int n = 0;
+  for (const FmJsonNode *a = json_first(json_root(&j)); a; a = json_next(a), n++) devto_page(add(out), a);
+  json_free(&j);
+  if (n >= 30 && page < 30) out->next = page + 1;
+  if (!out->n && page <= 1)
+    fm_snprintf(out->error, sizeof out->error,
+                "No articles tagged \xE2\x80\x9C%s\xE2\x80\x9D. DEV finds articles by topic, one word: c, python, javascript, beginners...", tg);
+  return FM_OK;
+}
+
+FmErr rd_devto_parse(const char *json, size_t len, WkArticle *out) {
+  FmJson j;
+  if (json_parse(&j, json, len) != FM_OK) {
+    fm_strlcpy(out->error, "DEV sent a reply this app does not understand", sizeof out->error);
+    return FM_ERR_FORMAT;
+  }
+  const FmJsonNode *a = json_root(&j);
+  const char *body = json_str(json_get(a, "body_html"), "");
+  if (!body[0]) {
+    json_free(&j);
+    fm_strlcpy(out->error, "This article came empty", sizeof out->error);
+    return FM_ERR_FORMAT;
+  }
+  WkPage p;
+  memset(&p, 0, sizeof p);
+  devto_page(&p, a);
+  fm_strlcpy(out->id, p.id, sizeof out->id);
+  fm_strlcpy(out->title, p.title, sizeof out->title);
+  fm_strlcpy(out->desc, p.desc, sizeof out->desc);
+  fm_strlcpy(out->url, json_str(json_get(a, "url"), ""), sizeof out->url);
+  fm_strlcpy(out->lead, json_str(json_get(a, "cover_image"), ""), sizeof out->lead);
+  devto_jpeg(out->lead);
+  if (out->lead[0]) { out->lead_w = 1000; out->lead_h = 420; }   /* dev.to cuts covers to 1000x420 */
+  Txt h = { 0 };
+  tputs(&h, body);
+  tputs(&h, "<hr><p><small>From DEV Community (dev.to), by ");
+  hput(&h, json_str(json_path(a, "user.name"), ""));
+  const char *tags = json_str(json_get(a, "tags"), "");
+  if (tags[0]) {
+    tputs(&h, ". Tags: ");
+    hput(&h, tags);
+  }
+  tputs(&h, ".</small></p>");
+  json_free(&j);
+  devto_jpeg(h.s);
+  out->doc = (FmDoc *)fm_calloc(1, sizeof *out->doc);
+  doc_parse(h.s, h.n, "https://dev.to/", DOC_WEB, out->doc);
+  fm_free(h.s);
+  out->text = fm_strdup("");
+  return FM_OK;
+}
+
+/* id: the number, or "user/slug" (a link to dev.to inside a page). */
+FmErr rd_devto_article(const char *id, WkArticle *out, volatile int *cancel) {
+  memset(out, 0, sizeof *out);
+  bool ok = id && id[0] && strlen(id) < 400;
+  for (const char *c = id; ok && *c; c++)
+    ok = (*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || strchr("-_/", *c);
+  if (!ok) { fm_strlcpy(out->error, "Not a DEV article", sizeof out->error); return FM_ERR_FORMAT; }
+  char url[500];
+  fm_snprintf(url, sizeof url, "https://dev.to/api/articles/%s", id);
+  FmNetResp r;
+  FmErr e = get_body(url, "DEV", &r, out->error, sizeof out->error, cancel);
+  if (e != FM_OK) return e;
+  e = rd_devto_parse((const char *)r.data, r.len, out);
+  net_resp_free(&r);
+  return e;
+}
+
+/* ---- Stack Overflow (Stack Exchange API 2.3) -------------------------------------------- */
+
+/* Asks for the question's body and its answers' (bodies, owners, scores,
+** accepted) in one request. Made once with /2.3/filters/create; filters
+** never expire. */
+#define SO_FILTER "!6WPIomnMNcVD9"
+#define SO_API "https://api.stackexchange.com/2.3/"
+
+static volatile u32 g_so_wait;   /* SDL ticks before which Stack Exchange asked for no request ("backoff") */
+
+/* A reply, or why not: the API explains its errors in JSON (error_name,
+** error_message), the daily limit among them. */
+static FmErr so_fetch(const char *url, FmNetResp *r, char *err, size_t cap, volatile int *cancel) {
+  memset(r, 0, sizeof *r);
+  for (;;) {
+    i32 left = (i32)(g_so_wait - SDL_GetTicks());
+    if (left <= 0) break;
+    if (left > 20000) { fm_snprintf(err, cap, "Stack Overflow asks to wait %d s", (int)(left / 1000)); return FM_ERR_IO; }
+    if (cancel && *cancel) { fm_strlcpy(err, "Cancelled", cap); return FM_ERR_CANCEL; }
+    SDL_Delay(100);
+  }
+  FmErr e = net_get(url, NULL, RD_MAX_REPLY, r, cancel);
+  if (e == FM_ERR_CANCEL) { fm_strlcpy(err, "Cancelled", cap); net_resp_free(r); return e; }
+  if (e != FM_OK || !r->data) {
+    if (e != FM_OK) fm_snprintf(err, cap, "Network error: %s", r->error[0] ? r->error : fm_err_str(e));
+    else fm_snprintf(err, cap, "Stack Overflow answered %d", r->status);
+    net_resp_free(r);
+    return e != FM_OK ? e : FM_ERR_IO;
+  }
+  FmJson j;
+  if (json_parse(&j, (const char *)r->data, r->len) != FM_OK) {
+    if (r->status == 200) fm_strlcpy(err, "Stack Overflow sent a reply this app does not understand", cap);
+    else fm_snprintf(err, cap, "Stack Overflow answered %d", r->status);
+    net_resp_free(r);
+    return FM_ERR_IO;
+  }
+  const FmJsonNode *root = json_root(&j);
+  double back = json_num(json_get(root, "backoff"), 0);
+  if (back > 0) g_so_wait = SDL_GetTicks() + (u32)(FM_MIN(back, 3600) * 1000);
+  const char *ename = json_str(json_get(root, "error_name"), NULL);
+  if (ename || r->status != 200) {
+    const char *msg = json_str(json_get(root, "error_message"), "");
+    if (ename && !strcmp(ename, "throttle_violation"))
+      fm_snprintf(err, cap, "Stack Overflow's limit for this network is used up (300 requests a day without a key): %s", msg);
+    else if (ename) fm_snprintf(err, cap, "Stack Overflow: %s", msg[0] ? msg : ename);
+    else fm_snprintf(err, cap, "Stack Overflow answered %d", r->status);
+    json_free(&j);
+    net_resp_free(r);
+    return FM_ERR_IO;
+  }
+  json_free(&j);
+  return FM_OK;
+}
+
+/* The API's text is HTML-escaped ("don&#39;t"): back to plain text. */
+static void unescape(const char *s, char *out, size_t cap) {
+  Txt t = { 0 };
+  html_text(s, &t);
+  fm_strlcpy(out, t.s ? t.s : "", cap);
+  fm_free(t.s);
+}
+
+static void tags_of(const FmJsonNode *tags, int max, char *out, size_t cap) {
+  out[0] = 0;
+  size_t n = 0;
+  int k = 0;
+  for (const FmJsonNode *t = json_first(tags); t && k < max && n < cap; t = json_next(t), k++)
+    n += (size_t)fm_snprintf(out + n, cap - n, "%s%s", k ? ", " : "", json_str(t, ""));
+}
+
+static void so_page(WkPage *p, const FmJsonNode *q) {
+  fm_snprintf(p->id, sizeof p->id, "%.0f", json_num(json_get(q, "question_id"), 0));
+  unescape(json_str(json_get(q, "title"), ""), p->title, sizeof p->title);
+  char tg[120];
+  tags_of(json_get(q, "tags"), 4, tg, sizeof tg);
+  int na = (int)json_num(json_get(q, "answer_count"), 0);
+  fm_snprintf(p->desc, sizeof p->desc, "\xE2\x96\xB2 %.0f \xC2\xB7 %d answer%s%s \xC2\xB7 %s", json_num(json_get(q, "score"), 0), na,
+              na == 1 ? "" : "s", json_get(q, "accepted_answer_id") ? " \xE2\x9C\x93" : "", tg);
+}
+
+static FmErr so_list(const char *url, int page, WkList *out, volatile int *cancel) {
+  FmNetResp r;
+  FmErr e = so_fetch(url, &r, out->error, sizeof out->error, cancel);
+  if (e != FM_OK) return e;
+  FmJson j;
+  e = json_parse(&j, (const char *)r.data, r.len);   /* so_fetch parsed it once already */
+  net_resp_free(&r);
+  if (e != FM_OK) return e;
+  const FmJsonNode *root = json_root(&j);
+  for (const FmJsonNode *q = json_first(json_get(root, "items")); q; q = json_next(q)) so_page(add(out), q);
+  if (json_bool(json_get(root, "has_more"), false) && page < 25) out->next = page + 1;
+  json_free(&j);
+  if (!out->n && page <= 1) fm_strlcpy(out->error, "No questions found", sizeof out->error);
+  return FM_OK;
+}
+
+/* A tag's best voted questions ("" = all of Stack Overflow's). */
+FmErr rd_so_list(const char *tag, int page, WkList *out, volatile int *cancel) {
+  memset(out, 0, sizeof out[0]);
+  out->next = -1;
+  if (page < 1) page = 1;
+  char te[200] = "", url[600];
+  net_urlencode(tag ? tag : "", te, sizeof te);
+  fm_snprintf(url, sizeof url, SO_API "questions?order=desc&sort=votes&site=stackoverflow&pagesize=30&page=%d%s%s", page,
+              te[0] ? "&tagged=" : "", te);
+  return so_list(url, page, out, cancel);
+}
+
+/* Words in titles and bodies; only questions with an answer. */
+FmErr rd_so_search(const char *query, int page, WkList *out, volatile int *cancel) {
+  memset(out, 0, sizeof out[0]);
+  out->next = -1;
+  if (page < 1) page = 1;
+  if (!query || !query[0]) { fm_strlcpy(out->error, "Type a question to search for", sizeof out->error); return FM_ERR_NOT_FOUND; }
+  char qe[800], url[1200];
+  net_urlencode(query, qe, sizeof qe);
+  fm_snprintf(url, sizeof url,
+              SO_API "search/advanced?order=desc&sort=relevance&answers=1&site=stackoverflow&pagesize=30&page=%d&q=%s", page, qe);
+  return so_list(url, page, out, cancel);
+}
+
+static int answer_cmp(const void *a, const void *b) {
+  const FmJsonNode *x = *(const FmJsonNode *const *)a, *y = *(const FmJsonNode *const *)b;
+  bool ax = json_bool(json_get(x, "is_accepted"), false), ay = json_bool(json_get(y, "is_accepted"), false);
+  if (ax != ay) return ax ? -1 : 1;
+  double sx = json_num(json_get(x, "score"), 0), sy = json_num(json_get(y, "score"), 0);
+  return sx > sy ? -1 : sx < sy ? 1 : 0;
+}
+
+/* The question, then its answers: the accepted one first, then by votes. */
+FmErr rd_so_parse(const char *json, size_t len, WkArticle *out) {
+  FmJson j;
+  if (json_parse(&j, json, len) != FM_OK) {
+    fm_strlcpy(out->error, "Stack Overflow sent a reply this app does not understand", sizeof out->error);
+    return FM_ERR_FORMAT;
+  }
+  const FmJsonNode *q = json_first(json_get(json_root(&j), "items"));
+  if (!q) {
+    json_free(&j);
+    fm_strlcpy(out->error, "This question is gone (deleted, or not on Stack Overflow)", sizeof out->error);
+    return FM_ERR_NOT_FOUND;
+  }
+  WkPage p;
+  memset(&p, 0, sizeof p);
+  so_page(&p, q);
+  fm_strlcpy(out->id, p.id, sizeof out->id);
+  fm_strlcpy(out->title, p.title, sizeof out->title);
+  char who[120], tg[200];
+  unescape(json_str(json_path(q, "owner.display_name"), ""), who, sizeof who);
+  tags_of(json_get(q, "tags"), 8, tg, sizeof tg);
+  fm_snprintf(out->desc, sizeof out->desc, "Asked by %s \xC2\xB7 \xE2\x96\xB2 %.0f \xC2\xB7 %.0f views \xC2\xB7 %s",
+              who[0] ? who : "someone", json_num(json_get(q, "score"), 0), json_num(json_get(q, "view_count"), 0), tg);
+  fm_strlcpy(out->url, json_str(json_get(q, "link"), ""), sizeof out->url);
+  if (!out->url[0]) fm_snprintf(out->url, sizeof out->url, "https://stackoverflow.com/questions/%s", out->id);
+  /* the API's strings are HTML already: names and bodies go in as they are */
+  Txt h = { 0 };
+  tputs(&h, json_str(json_get(q, "body"), ""));
+  const FmJsonNode *ans = json_get(q, "answers");
+  int na = 0;
+  const FmJsonNode **v = (const FmJsonNode **)fm_alloc(sizeof *v * (size_t)FM_MAX(1, ans ? ans->count : 0));
+  for (const FmJsonNode *a = json_first(ans); a; a = json_next(a)) v[na++] = a;
+  qsort(v, (size_t)na, sizeof *v, answer_cmp);
+  char line[400];
+  fm_snprintf(line, sizeof line, "<h2>%d answer%s</h2>", na, na == 1 ? "" : "s");
+  tputs(&h, line);
+  if (!na) tputs(&h, "<p>No answers yet.</p>");
+  for (int i = 0; i < na; i++) {
+    const FmJsonNode *a = v[i];
+    bool acc = json_bool(json_get(a, "is_accepted"), false);
+    fm_snprintf(line, sizeof line, "<h3>%s \xC2\xB7 \xE2\x96\xB2 %.0f</h3><p><small>by %s</small></p>",
+                acc ? "\xE2\x9C\x93 Accepted answer" : "Answer", json_num(json_get(a, "score"), 0),
+                json_str(json_path(a, "owner.display_name"), "someone"));
+    tputs(&h, line);
+    tputs(&h, json_str(json_get(a, "body"), ""));
+  }
+  fm_free(v);
+  tputs(&h, "<hr><p><small>From Stack Overflow, by its users (CC BY-SA). Open in browser for comments and votes.</small></p>");
+  json_free(&j);
+  out->doc = (FmDoc *)fm_calloc(1, sizeof *out->doc);
+  doc_parse(h.s, h.n, "https://stackoverflow.com/", DOC_WEB, out->doc);
+  fm_free(h.s);
+  out->text = fm_strdup("");
+  return FM_OK;
+}
+
+FmErr rd_so_question(const char *id, WkArticle *out, volatile int *cancel) {
+  memset(out, 0, sizeof *out);
+  bool ok = id && id[0] && strlen(id) <= 12;
+  for (const char *c = id; ok && *c; c++) ok = *c >= '0' && *c <= '9';
+  if (!ok) { fm_strlcpy(out->error, "Not a Stack Overflow question", sizeof out->error); return FM_ERR_FORMAT; }
+  char url[300];
+  fm_snprintf(url, sizeof url, SO_API "questions/%s?site=stackoverflow&filter=" SO_FILTER, id);
+  FmNetResp r;
+  FmErr e = so_fetch(url, &r, out->error, sizeof out->error, cancel);
+  if (e != FM_OK) return e;
+  e = rd_so_parse((const char *)r.data, r.len, out);
   net_resp_free(&r);
   return e;
 }

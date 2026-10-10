@@ -132,6 +132,18 @@ FmErr rd_fruit(const char *name, WkArticle *out, volatile int *cancel);
 ** similar and opposite words; its recorded pronunciations as sounds. */
 FmErr rd_dict(const char *word, WkArticle *out, WkMediaList *sounds, volatile int *cancel);
 FmErr rd_dict_parse(const char *json, size_t len, WkArticle *out, WkMediaList *sounds);
+/* DEV Community (dev.to): a topic tag's most liked articles of the year ("" =
+** the week's), page 1..; an article (id: the number, or "user/slug") as HTML. */
+FmErr rd_devto_list(const char *tag, int page, WkList *out, volatile int *cancel);
+FmErr rd_devto_article(const char *id, WkArticle *out, volatile int *cancel);
+FmErr rd_devto_parse(const char *json, size_t len, WkArticle *out);
+void  rd_devto_tag(const char *query, char *out, size_t cap);   /* "C++" -> "cpp" */
+/* Stack Overflow: a tag's best voted questions ("" = all), a search, page
+** 1..; a question with its answers (the accepted one first) as HTML. */
+FmErr rd_so_list(const char *tag, int page, WkList *out, volatile int *cancel);
+FmErr rd_so_search(const char *query, int page, WkList *out, volatile int *cancel);
+FmErr rd_so_question(const char *id, WkArticle *out, volatile int *cancel);
+FmErr rd_so_parse(const char *json, size_t len, WkArticle *out);
 /* Shared by the parsers: a block list over text built by the caller. */
 void  wk_blocks_from_lines(WkArticle *a);
 

@@ -172,6 +172,7 @@ static void set_key(const char *k, const char *raw) {
   else if (!strcmp(k, "use_trash")) conf.use_trash = to_bool(v);
   else if (!strcmp(k, "thumbnails")) conf.thumbnails = to_bool(v);
   else if (!strcmp(k, "online_thumbs")) conf.online_thumbs = to_bool(v);
+  else if (!strcmp(k, "ui_font")) conf.ui_font = atoi(v) == 1 ? 1 : 0;
   else if (!strcmp(k, "start_home")) conf.start_home = to_bool(v);
   else if (!strcmp(k, "sort0")) conf.sort[0] = to_int(v, SORT_NAME, SORT_TYPE, SORT_NAME);
   else if (!strcmp(k, "sort1")) conf.sort[1] = to_int(v, SORT_NAME, SORT_TYPE, SORT_NAME);
@@ -317,6 +318,7 @@ void conf_save(void) {
   put_i(f, "use_trash", conf.use_trash);
   put_i(f, "thumbnails", conf.thumbnails);
   put_i(f, "online_thumbs", conf.online_thumbs);
+  put_i(f, "ui_font", conf.ui_font);
   put_i(f, "start_home", conf.start_home);
   put_i(f, "sort0", conf.sort[0]);
   put_i(f, "sort1", conf.sort[1]);

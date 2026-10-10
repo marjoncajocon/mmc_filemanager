@@ -2039,7 +2039,7 @@ static void dlg_settings(void) {
   float rh = DP(ui.touch_mode ? 50 : 42), sl = font_line_h(ui.m.font_small) + DP(14);
   float seg_h = DP(ui.touch_mode ? 40 : 34);
   float grid_h = theme_grid_h(c.w - DP(6));
-  float content = sl * 5 + grid_h + DP(10) + (seg_h + DP(10)) * 3 + DP(46) + rh * 3 + rh * 7 +
+  float content = sl * 6 + grid_h + DP(10) + (seg_h + DP(10)) * 4 + DP(46) + rh * 3 + rh * 7 +
                   DP(50) + DP(90) + font_line_h(ui.m.font_small) + DP(6) +   /* about: the credit */
                   (tray_available() ? rh * (conf.tray ? 3 : 1) : 0);   /* tray */
   float online_h = online_settings_h(c.w - DP(6));   /* online: its section */
@@ -2104,6 +2104,19 @@ static void dlg_settings(void) {
         theme_apply(conf.theme, conf.dark, conf.accent);
         conf_dirty();
       }
+    }
+    rect_cut_top(&r, DP(10));
+  }
+  {
+    /* the interface's font: Hack (monospace, the default) or Poppins */
+    small_label(&r, "FONT");
+    static const char *const kFont[] = { "Hack", "Poppins" };
+    int f = conf.ui_font == FONT_UI_POPPINS ? 1 : 0;
+    if (ui_segmented(ui_idn(base, 210), rect_cut_top(&r, seg_h), kFont, 2, &f)) {
+      conf.ui_font = f ? FONT_UI_POPPINS : FONT_UI_HACK;
+      font_set_ui(conf.ui_font);
+      ui_redraw();
+      conf_dirty();
     }
     rect_cut_top(&r, DP(10));
   }
@@ -2870,7 +2883,7 @@ static bool arg_flag(const char *name) {
 
 /* A plain path argument ("mmcfm ~/Downloads", "Open with"): opens in the left panel. */
 static const char *arg_positional(void) {
-  static const char *const kVal[] = { "--shot", "--size", "--frames", "--left", "--right",
+  static const char *const kVal[] = { "--shot", "--size", "--frames", "--left", "--right", "--ui-font",
                                       "--demo-dialog", "--layout", "--demo-library",
                                       "--demo-online", "--demo-online-state",
                                       "--demo-photos", "--demo-photos-state" /* photos */,
@@ -3009,6 +3022,10 @@ static void demo_dialog(const char *name) {
     open_extract();
   }
   else if (!strcmp(name, "settings")) open_settings();
+  else if (!strncmp(name, "settings:", 9)) {           /* settings:Y = scrolled Y dp down */
+    open_settings();
+    D.scroll.y = DP((float)atof(name + 9));
+  }
   else if (!strcmp(name, "exit")) open_exit();
   else if (!strcmp(name, "conflict") || !strcmp(name, "password")) {
     bool pw = !strcmp(name, "password");
@@ -3050,6 +3067,9 @@ void app_init(void) {
   else conf_load();
   if (arg_flag("--light")) conf.dark = false;
   if (arg_flag("--dark")) conf.dark = true;
+  const char *uf = arg_value("--ui-font");          /* --ui-font hack|poppins (screenshots) */
+  if (uf) conf.ui_font = !strcmp(uf, "poppins") ? FONT_UI_POPPINS : FONT_UI_HACK;
+  font_set_ui(conf.ui_font);
   const char *th = arg_value("--theme");
   if (th && theme_find(th) >= 0) {
     conf.theme = theme_find(th);
@@ -3197,7 +3217,9 @@ bool app_can_quit(void) {
 
 void app_event(const SDL_Event *e) {
   if (e->type == app.ev_wake) {
-    ui_redraw();
+    /* who woke us (MMCFM_IDLE_LOG), and for how many frames */
+    int frames = e->user.data2 ? (int)(intptr_t)e->user.data2 : 2;
+    ui_redraw_n_at(frames, e->user.data1 ? (const char *)e->user.data1 : __FILE__, e->user.code);
     return;
   }
   switch (e->type) {

@@ -16,6 +16,10 @@
 **     positions, which keeps small UI text sharp.
 **   - Fallback fonts are memory-mapped files, so a 20 MB CJK font costs
 **     only the pages actually touched.
+**   - The interface's faces (FONT_REGULAR, FONT_BOLD) are Hack or Poppins
+**     (font_set_ui): both stay loaded and the two UI faces are mapped onto
+**     one pair when a glyph is looked up, so a switch is instant; line
+**     height and ascent follow the chosen face.
 */
 #include "ffont.h"
 #include "fplat.h"
@@ -306,8 +310,27 @@ static Glyph *rasterize(Glyph *g, int face, int size, u32 cp) {
   return g;
 }
 
+static int g_ui_font = FONT_UI_HACK;
+static int g_font_gen;
+
+/* The interface faces onto the chosen pair (Poppins at 0-1, Hack at 2-3). */
+static int real_face(int face) {
+  return face < FONT_MONO && g_ui_font == FONT_UI_HACK ? face + FONT_MONO : face;
+}
+
+void font_set_ui(int which) {
+  which = which == FONT_UI_POPPINS ? FONT_UI_POPPINS : FONT_UI_HACK;
+  if (which == g_ui_font) return;
+  g_ui_font = which;
+  g_font_gen++;
+}
+
+int font_ui(void) { return g_ui_font; }
+int font_generation(void) { return g_font_gen; }
+
 static Glyph *get_glyph(int face, int size, u32 cp) {
   if (!g_tab) return NULL;
+  face = real_face(face);
   if (g_tab_used > TABLE * 3 / 4) drop_cache();
   u32 h = hash3(cp, (u32)size, (u32)face);
   for (;;) {
@@ -324,12 +347,12 @@ static int isize(float size) {
 }
 
 float font_ascent(float size) {
-  Font *f = &g_fonts[FONT_REGULAR];
+  Font *f = &g_fonts[real_face(FONT_REGULAR)];
   return f->ascent_u * stbtt_ScaleForMappingEmToPixels(&f->info, (float)isize(size));
 }
 
 float font_line_h(float size) {
-  Font *f = &g_fonts[FONT_REGULAR];
+  Font *f = &g_fonts[real_face(FONT_REGULAR)];
   float s = stbtt_ScaleForMappingEmToPixels(&f->info, (float)isize(size));
   return (f->ascent_u - f->descent_u) * s;
 }

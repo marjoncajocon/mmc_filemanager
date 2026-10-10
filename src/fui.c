@@ -393,8 +393,22 @@ int ui_wait_ms(void) {
   return w;
 }
 
-void ui_redraw(void) { if (ui.redraw < 2) ui.redraw = 2; }
-void ui_animate(void) { ui.anim = true; }
+const char *g_ui_redraw_file;
+int g_ui_redraw_line;
+void ui_redraw_n_at(int frames, const char *file, int line) {
+  if (ui.redraw < frames) ui.redraw = frames;
+  g_ui_redraw_file = file;
+  g_ui_redraw_line = line;
+}
+
+void ui_redraw_at(const char *file, int line) { ui_redraw_n_at(2, file, line); }
+const char *g_ui_anim_file;
+int g_ui_anim_line;
+void ui_animate_at(const char *file, int line) {
+  ui.anim = true;
+  g_ui_anim_file = file;
+  g_ui_anim_line = line;
+}
 
 u32 ui_id(const char *s) {
   u32 h = 2166136261u;

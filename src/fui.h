@@ -138,8 +138,16 @@ bool ui_needs_frame(void);
 /* Milliseconds the main loop may sleep before the next frame is due
 ** (caret blink, toast fade, tooltip delay); -1 = only on input. */
 int  ui_wait_ms(void);
-void ui_redraw(void);            /* draw at least one more frame */
-void ui_animate(void);           /* keep drawing (call every frame while moving) */
+void ui_redraw_at(const char *file, int line);    /* draw at least one more frame */
+#define ui_redraw() ui_redraw_at(__FILE__, __LINE__)
+/* frames: 2 lets state changed during the first frame settle (the default);
+** 1 is enough for a clock or a progress line that only moves. */
+void ui_redraw_n_at(int frames, const char *file, int line);
+void ui_animate_at(const char *file, int line);   /* keep drawing (call every frame while moving) */
+#define ui_animate() ui_animate_at(__FILE__, __LINE__)
+/* MMCFM_IDLE_LOG: where the last ui_animate / ui_redraw of the frame came from */
+extern const char *g_ui_anim_file, *g_ui_redraw_file;
+extern int g_ui_anim_line, g_ui_redraw_line;
 
 u32  ui_id(const char *s);
 u32  ui_idn(u32 base, u32 n);

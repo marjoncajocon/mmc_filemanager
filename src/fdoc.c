@@ -202,7 +202,7 @@ static void end_block(Par *p) {
   if (p->cur < 0) return;
   FmDoc *d = p->d;
   DocBlock *b = &d->b[p->cur];
-  if (b->kind != DB_PRE) trim_tail(d, b->run0);
+  trim_tail(d, b->run0);       /* code too: its last line break ("}\n</code></pre>") would be an empty line */
   b->nrun = d->nruns - b->run0;
   if (!b->nrun && b->kind != DB_IMG && b->kind != DB_HR && b->kind != DB_TABLE) {
     d->nruns = b->run0;
@@ -265,8 +265,13 @@ static void text(Par *p, const char *s, size_t n) {
     }
   }
   if (o && !(o == 1 && buf[0] == ' ' && p->cur < 0 && !in_cell(p))) {
+    /* a block opened here starts without a space, but the text just read
+    ** decides whether one comes next ("<p><code>--&gt;</code> is": keep it) */
+    bool had = in_cell(p) || p->cur >= 0, sp = p->space;
     ensure_target(p);
-    add_run(p, buf, o);
+    p->space = sp;
+    size_t s0 = !had && buf[0] == ' ' ? 1 : 0;
+    if (o > s0) add_run(p, buf + s0, o - s0);
   }
   fm_free(buf);
 }
@@ -365,6 +370,9 @@ static bool skip_this(Par *p, const char *tag, const Attrs *a) {
       if (has_class(a->cls, kCls[i])) return true;
     if (tag_is(tag, "sup") && has_class(a->cls, "reference")) return true;
     if (!strcmp(a->id, "toc") || !strcmp(a->id, "coordinates")) return true;
+  } else if (p->flavor == DOC_WEB) {
+    /* dev.to: the copy / full screen buttons under each code block */
+    if (has_class(a->cls, "highlight__panel")) return true;
   } else {
     if (has_class(a->cls, "pg-boilerplate") || !strcmp(a->id, "pg-header") || !strcmp(a->id, "pg-footer")) return true;
     /* the printed book's page numbers, set in the margin by CSS */
@@ -1079,7 +1087,8 @@ static float lay_table(FmDoc *d, DocTable *t, float maxw, float fs) {
 }
 
 float doc_layout(FmDoc *d, float w, float fs) {
-  if (d->lay_w == w && d->lay_fs == fs && d->frag) return d->total;
+  if (d->lay_w == w && d->lay_fs == fs && d->lay_gen == font_generation() && d->frag) return d->total;
+  d->lay_gen = font_generation();
   d->nfrag = 0;
   d->lay_w = w;
   d->lay_fs = fs;

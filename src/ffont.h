@@ -1,16 +1,24 @@
 /* ffont.h -- text with stb_truetype: glyph atlas, fallback fonts, measuring.
 **
 ** Sizes are in physical pixels. Text is UTF-8; code points missing from the
-** embedded Poppins faces are looked up in system fonts (CJK, Cyrillic,
-** symbols ...), which are memory-mapped only when first needed.
+** embedded faces (Hack, Poppins) are looked up in system fonts (CJK,
+** Cyrillic, symbols ...), which are memory-mapped only when first needed.
 */
 #ifndef FFONT_H
 #define FFONT_H
 
 #include "fgfx.h"
 
-/* Poppins for the interface; Hack (monospace) for code and plain text. */
+/* FONT_REGULAR / FONT_BOLD: the interface, in the face the user picked
+** (font_set_ui: Hack, the default, or Poppins); FONT_MONO / FONT_MONO_BOLD:
+** Hack always (code, plain text). */
 enum { FONT_REGULAR = 0, FONT_BOLD = 1, FONT_MONO = 2, FONT_MONO_BOLD = 3, FONT_FACES = 4 };
+enum { FONT_UI_HACK = 0, FONT_UI_POPPINS = 1 };
+
+void  font_set_ui(int which);             /* FONT_UI_*: takes effect on the next glyph */
+int   font_ui(void);
+/* Changes with the interface face: layouts measured before are stale. */
+int   font_generation(void);
 
 bool  font_init(void);
 void  font_shutdown(void);

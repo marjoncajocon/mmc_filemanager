@@ -72,16 +72,18 @@ typedef struct FmDoc {
   DocFrag *frag;
   int nfrag, cfrag;
   float lay_w, lay_fs, total;
+  int lay_gen;                 /* font_generation() it was laid out with */
   /* find in page: matches (text offsets, sorted) drawn highlighted, cur strongest */
   int *hl;
   int nhl, hl_len, hl_cur;
 } FmDoc;
 
-enum { DOC_WIKI, DOC_BOOK };
+enum { DOC_WIKI, DOC_BOOK, DOC_WEB };
 
 /* base: the page's own URL (relative links and pictures resolve against it).
 ** flavor: what to drop (DOC_WIKI: navboxes, references markers...; DOC_BOOK:
-** Project Gutenberg's licence sections). Never fails on bad HTML. */
+** Project Gutenberg's licence sections; DOC_WEB: an article's or a post's
+** body, as dev.to and Stack Overflow send it). Never fails on bad HTML. */
 void  doc_parse(const char *html, size_t len, const char *base, int flavor, FmDoc *d);
 void  doc_free(FmDoc *d);
 /* The visible text of a block or a cell (for contents lists). */

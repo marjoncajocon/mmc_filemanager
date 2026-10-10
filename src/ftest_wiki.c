@@ -207,7 +207,59 @@ static const char kDict[] =
   "\"example\":\"She said hello.\"}],\"synonyms\":[\"greeting\"],\"antonyms\":[]},"
   "{\"partOfSpeech\":\"interjection\",\"definitions\":[{\"definition\":\"A greeting.\"}],\"synonyms\":[],\"antonyms\":[\"bye\"]}]}]";
 
+static const char kDevArt[] =
+  "{\"id\":4731022,\"title\":\"Pointers Aren't Arrows\",\"url\":\"https://dev.to/u/pointers\",\"readable_publish_date\":\"Sep 25\","
+  "\"reading_time_minutes\":8,\"public_reactions_count\":50,\"tags\":\"c, cpp\",\"cover_image\":"
+  "\"https://media2.dev.to/dynamic/image/width=1000,height=420,fit=cover,gravity=auto,format=auto/https%3A%2F%2Fx.png\","
+  "\"user\":{\"name\":\"S <M>\"},\"body_html\":\"<p>Hi <code>int</code></p><div class=\\\"highlight js-code-highlight\\\">"
+  "<pre class=\\\"highlight c\\\"><code>int x;\\n</code></pre><div class=\\\"highlight__panel js-actions-panel\\\">"
+  "<p>Enter fullscreen mode</p></div></div><img src=\\\"https://media2.dev.to/dynamic/image/width=800%2Cformat=auto/https%3A%2F%2Fy.png\\\">\"}";
+static const char kSoQ[] =
+  "{\"items\":[{\"question_id\":1642028,\"title\":\"What is the &#39;--&gt;&#39; operator?\",\"score\":10267,\"view_count\":5,"
+  "\"tags\":[\"c\",\"c++\"],\"accepted_answer_id\":2,\"answer_count\":2,\"link\":\"https://stackoverflow.com/questions/1642028/x\","
+  "\"owner\":{\"display_name\":\"GMan&#39;s\"},\"body\":\"<p>Why?</p><pre><code>x --&gt; 0\\n</code></pre>\","
+  "\"answers\":[{\"is_accepted\":false,\"score\":99,\"owner\":{\"display_name\":\"B\"},\"body\":\"<p>second</p>\"},"
+  "{\"is_accepted\":true,\"score\":3,\"owner\":{\"display_name\":\"A\"},\"body\":\"<p>first</p>\"}]}],\"has_more\":false}";
+
+/* dev.to and Stack Overflow: pages from their JSON (no network). */
+static void web_offline(void) {
+  WkArticle a;
+  memset(&a, 0, sizeof a);
+  TEST_CHECK(rd_devto_parse(kDevArt, sizeof kDevArt - 1, &a) == FM_OK && a.doc);
+  TEST_CHECK(!strcmp(a.id, "4731022") && !strcmp(a.title, "Pointers Aren't Arrows") && strstr(a.desc, "8 min read"));
+  TEST_CHECK(strstr(a.lead, "format=jpeg") && !strstr(a.lead, "format=auto"));          /* no WebP */
+  if (a.doc) {
+    int pre = -1;
+    for (int i = 0; i < a.doc->nb; i++)
+      if (a.doc->b[i].kind == DB_PRE) pre = i;
+    char t[200];
+    if (pre >= 0) doc_block_text(a.doc, pre, t, sizeof t);
+    TEST_CHECK(pre >= 0 && !strcmp(t, "int x;"));                                          /* no trailing empty line */
+    TEST_CHECK(!strstr(a.doc->text, "fullscreen") && strstr(a.doc->text, "S <M>"));      /* panel out; the name escaped and back */
+    TEST_CHECK(a.doc->nimgs == 1 && strstr(a.doc->imgs[0].src, "format=jpeg"));
+  }
+  wk_article_free(&a);
+  memset(&a, 0, sizeof a);
+  TEST_CHECK(rd_so_parse(kSoQ, sizeof kSoQ - 1, &a) == FM_OK && a.doc);
+  TEST_CHECK(!strcmp(a.title, "What is the '-->' operator?") && !strcmp(a.id, "1642028") && strstr(a.desc, "Asked by GMan's") &&
+             strstr(a.url, "/questions/1642028"));
+  if (a.doc) {
+    const char *first = strstr(a.doc->text, "first"), *second = strstr(a.doc->text, "second");
+    TEST_CHECK(first && second && first < second);                                        /* the accepted answer first */
+    TEST_CHECK(strstr(a.doc->text, "x --> 0") && strstr(a.doc->text, "2 answers") && strstr(a.doc->text, "CC BY-SA"));
+  }
+  wk_article_free(&a);
+  char tg[32];
+  rd_devto_tag("C++", tg, sizeof tg);
+  TEST_CHECK(!strcmp(tg, "cpp"));
+  rd_devto_tag("C#", tg, sizeof tg);
+  TEST_CHECK(!strcmp(tg, "csharp"));
+  rd_devto_tag("Data Structures!", tg, sizeof tg);
+  TEST_CHECK(!strcmp(tg, "datastructures"));
+}
+
 static void rt_offline(void) {
+  web_offline();
   WkArticle a;
   memset(&a, 0, sizeof a);
   char *t = fm_strdup(kGuten);
@@ -254,11 +306,12 @@ static void rt_live(void) {
   wk_list_free(&l);
   t0 = plat_now_ms();
   e = rd_guten_book("20228", &a, NULL);
-  int ch = 0;
-  for (int i = 0; i < a.nb; i++) ch += a.b[i].kind != WB_PARA;
-  printf("  book 20228: %s in %d ms, \"%s\" by %s, %d blocks, %d headings %s\n", fm_err_str(e), (int)(plat_now_ms() - t0), a.title,
-         a.desc, a.nb, ch, a.error);
-  TEST_CHECK(e == FM_OK && a.nb > 500 && ch > 20);
+  /* the HTML edition (a.doc) when there is one, else the text */
+  int ch = 0, nb = a.doc ? a.doc->nb : a.nb;
+  for (int i = 0; i < nb; i++) ch += a.doc ? a.doc->b[i].kind == DB_H : a.b[i].kind != WB_PARA;
+  printf("  book 20228: %s in %d ms, \"%s\" by %s, %d blocks%s, %d headings %s\n", fm_err_str(e), (int)(plat_now_ms() - t0), a.title,
+         a.desc, nb, a.doc ? " (HTML)" : "", ch, a.error);
+  TEST_CHECK(e == FM_OK && nb > 500 && ch > 20);
   wk_article_free(&a);
   t0 = plat_now_ms();
   e = rd_inat_search("tl", "mango", &l, NULL);
@@ -297,6 +350,26 @@ static void rt_live(void) {
     TEST_CHECK(e == FM_OK && a.nb > 0);
     wk_article_free(&a);
   }
+  /* DEV: a tag's list and its first article */
+  e = rd_devto_list("c", 1, &l, NULL);
+  printf("  dev.to tag c: %s, %d articles, next %d %s\n", fm_err_str(e), l.n, l.next, l.error);
+  TEST_CHECK(e == FM_OK && l.n >= 10);
+  if (l.n) {
+    e = rd_devto_article(l.it[0].id, &a, NULL);
+    printf("  dev.to \"%s\": %s, %d blocks %s\n", a.title, fm_err_str(e), a.doc ? a.doc->nb : 0, a.error);
+    TEST_CHECK(e == FM_OK && a.doc && a.doc->nb > 3);
+    wk_article_free(&a);
+  }
+  wk_list_free(&l);
+  /* Stack Overflow (2 of the 300 requests a day): a tag's list, a question with answers */
+  e = rd_so_list("c", 1, &l, NULL);
+  printf("  stackoverflow tag c: %s, %d questions, next %d %s\n", fm_err_str(e), l.n, l.next, l.error);
+  TEST_CHECK(e == FM_OK && l.n >= 10 && l.next == 2);
+  wk_list_free(&l);
+  e = rd_so_question("1642028", &a, NULL);
+  printf("  stackoverflow 1642028 \"%s\": %s, %d blocks %s\n", a.title, fm_err_str(e), a.doc ? a.doc->nb : 0, a.error);
+  TEST_CHECK(e == FM_OK && a.doc && a.doc->nb > 20);
+  wk_article_free(&a);
 }
 
 static void dt_offline(void);
@@ -384,5 +457,13 @@ static void dt_offline(void) {
   static const char kBad[] = "<p><b>unclosed <table><td>x<tr><li>y</ul></table></i>&#xZZ;&bogus; <<<>>";
   doc_parse(kBad, sizeof kBad - 1, "", DOC_WIKI, &d);
   TEST_CHECK(d.nb >= 1);
+  doc_free(&d);
+  /* a paragraph that starts with code keeps the space after it (Stack Overflow) */
+  static const char kCodeFirst[] = "<p><small>by A</small></p><p><code>--&gt;</code> is not an operator.</p>";
+  doc_parse(kCodeFirst, sizeof kCodeFirst - 1, "", DOC_WEB, &d);
+  char t2[120] = "";
+  if (d.nb >= 2) doc_block_text(&d, 1, t2, sizeof t2);
+  TEST_CHECK(!strcmp(t2, "--> is not an operator."));
+  if (strcmp(t2, "--> is not an operator.")) printf("    got \"%s\"\n", t2);
   doc_free(&d);
 }

@@ -46,7 +46,7 @@
 
 /* ---- sources -------------------------------------------------------------------- */
 
-enum { SK_WIKI, SK_GUTEN, SK_INAT, SK_FRUIT, SK_DICT };
+enum { SK_WIKI, SK_GUTEN, SK_INAT, SK_FRUIT, SK_DICT, SK_DEVTO, SK_SO };
 
 typedef struct Src {
   const char *key, *name, *about;
@@ -67,6 +67,8 @@ static const Src kSrc[] = {
   { "wikibooks", "Wikibooks", "Free textbooks, cookbooks and how-tos", IC_LIBRARY, SK_WIKI, "%s.wikibooks.org", 1, 0, 1, 1, 0 },
   { "wikisource", "Wikisource", "Free texts: books, poems, speeches, laws", IC_DOC, SK_WIKI, "%s.wikisource.org", 1, 1, 1, 1, 0 },
   { "wikispecies", "Wikispecies", "The classification of living things", IC_TEXT, SK_WIKI, "species.wikimedia.org", 0, 0, 1, 1, 0 },
+  { "devto", "DEV articles", "DEV Community: programming tutorials and articles", IC_RSS, SK_DEVTO, NULL, 0, 0, 0, 0, 0 },
+  { "stackoverflow", "Stack Overflow", "Programming questions and their answers", IC_CODE, SK_SO, NULL, 0, 0, 0, 0, 0 },
 };
 #define NSRC ((int)FM_COUNT(kSrc))
 
@@ -83,12 +85,38 @@ static void host_of(int src, const char *lang, char *out, size_t cap) {
   else fm_strlcpy(out, s->host, cap);
 }
 
-/* iNaturalist groups: the home's chips (iconic taxa). */
-static const struct { const char *name, *taxon; } kGroups[] = {
+/* The home's chips: iNaturalist's groups (iconic taxa), DEV's and Stack
+** Overflow's topics (tags). */
+typedef struct Group { const char *name, *arg; } Group;
+static const Group kInatGroups[] = {
   { "Plants", "47126" }, { "Birds", "3" }, { "Mammals", "40151" }, { "Insects", "47158" }, { "Fish", "47178" },
   { "Reptiles", "26036" }, { "Amphibians", "20978" }, { "Fungi", "47170" }, { "Mollusks", "47115" },
   { "Spiders", "47118" },
 };
+static const Group kDevTags[] = {
+  { "This week", "" }, { "Tutorials", "tutorial" }, { "Beginners", "beginners" }, { "C", "c" }, { "C++", "cpp" },
+  { "Python", "python" }, { "JavaScript", "javascript" }, { "Java", "java" }, { "Rust", "rust" }, { "Go", "go" },
+  { "Web", "webdev" }, { "Algorithms", "algorithms" }, { "Data structures", "datastructures" },
+};
+static const Group kSoTags[] = {
+  { "Top", "" }, { "C", "c" }, { "C++", "c++" }, { "Python", "python" }, { "JavaScript", "javascript" },
+  { "Java", "java" }, { "C#", "c#" }, { "SQL", "sql" }, { "Git", "git" }, { "Algorithms", "algorithm" },
+  { "Data structures", "data-structures" }, { "Linked lists", "linked-list" },
+};
+
+static const Group *groups_of(int kind, int *n) {
+  switch (kind) {
+    case SK_INAT: *n = (int)FM_COUNT(kInatGroups); return kInatGroups;
+    case SK_DEVTO: *n = (int)FM_COUNT(kDevTags); return kDevTags;
+    case SK_SO: *n = (int)FM_COUNT(kSoTags); return kSoTags;
+    default: *n = 0; return NULL;
+  }
+}
+
+/* Sources whose home is a list of their own (books, species, fruits, articles, questions). */
+static bool has_browse(int kind) {
+  return kind == SK_GUTEN || kind == SK_INAT || kind == SK_FRUIT || kind == SK_DEVTO || kind == SK_SO;
+}
 
 /* ---- requests ------------------------------------------------------------------- */
 
@@ -154,6 +182,8 @@ static void search_task(WkTask *t) {
     case SK_GUTEN: t->err = rd_guten_search(t->lang, t->arg, t->num, &t->list, &t->cancel); break;
     case SK_INAT: t->err = rd_inat_search(t->lang, t->arg, &t->list, &t->cancel); break;
     case SK_FRUIT: t->err = rd_fruit_list(t->arg, &t->list, &t->cancel); break;
+    case SK_DEVTO: t->err = rd_devto_list(t->arg, t->num, &t->list, &t->cancel); break;   /* a topic tag */
+    case SK_SO: t->err = rd_so_search(t->arg, t->num, &t->list, &t->cancel); break;
     default: t->err = FM_ERR_UNSUPPORTED; break;
   }
   fm_strlcpy(t->error, t->list.error, sizeof t->error);
@@ -166,6 +196,8 @@ static void article_task(WkTask *t) {
     case SK_INAT: t->err = rd_inat_taxon(t->lang, t->id, &t->art, &t->media, &t->cancel); break;
     case SK_FRUIT: t->err = rd_fruit(t->id[0] ? t->id : t->arg, &t->art, &t->cancel); break;
     case SK_DICT: t->err = rd_dict(t->arg, &t->art, &t->media, &t->cancel); break;
+    case SK_DEVTO: t->err = rd_devto_article(t->id[0] ? t->id : t->arg, &t->art, &t->cancel); break;
+    case SK_SO: t->err = rd_so_question(t->id[0] ? t->id : t->arg, &t->art, &t->cancel); break;
     default: t->err = FM_ERR_UNSUPPORTED; break;
   }
   fm_strlcpy(t->error, t->art.error, sizeof t->error);
@@ -181,6 +213,8 @@ static int task_main(void *u) {
       if (kSrc[t->src].kind == SK_GUTEN) t->err = rd_guten_search(t->lang, "", t->num, &t->list, &t->cancel);
       else if (kSrc[t->src].kind == SK_INAT) t->err = rd_inat_group(t->lang, t->arg, t->num, &t->list, &t->cancel);
       else if (kSrc[t->src].kind == SK_FRUIT) t->err = rd_fruit_list("", &t->list, &t->cancel);
+      else if (kSrc[t->src].kind == SK_DEVTO) t->err = rd_devto_list(t->arg, t->num, &t->list, &t->cancel);
+      else if (kSrc[t->src].kind == SK_SO) t->err = rd_so_list(t->arg, t->num, &t->list, &t->cancel);
       fm_strlcpy(t->error, t->list.error, sizeof t->error);
       break;
     case WT_ARTICLE: article_task(t); break;
@@ -301,7 +335,7 @@ static struct {
   WkList browse;
   char browse_key[80];         /* what browse holds: "src|lang|group" */
   char browse_error[256];
-  int group;                   /* iNaturalist: the group on the home */
+  int group[NSRC];             /* the chip on each source's home (groups_of) */
   /* results */
   WkTask *t_search;
   WkList res;
@@ -317,6 +351,7 @@ static struct {
   char want_title[256];
   float *bh;                   /* block heights at lay_w / lay_zoom */
   float lay_w, lay_zoom, lay_total, lay_top;
+  int lay_gen;                 /* font_generation() of bh */
   float restore_y;             /* back to an article: where it was read */
   int demo_page;               /* --demo-wiki-page: shown once the article is in, -1 = none */
   /* where the article leads */
@@ -558,10 +593,12 @@ static void feed_start(void) {
 /* The source's home list (books, a group's species, fruits); more = the next page. */
 static void browse_start(bool more) {
   const Src *s = cur();
-  if (s->kind != SK_GUTEN && s->kind != SK_INAT && s->kind != SK_FRUIT) return;
+  if (!has_browse(s->kind)) return;
   char key[80];
-  const char *grp = kGroups[FM_CLAMP(S.group, 0, (int)FM_COUNT(kGroups) - 1)].taxon;
-  fm_snprintf(key, sizeof key, "%s|%s|%s", s->key, S.lang, s->kind == SK_INAT ? grp : "");
+  int ng;
+  const Group *gs = groups_of(s->kind, &ng);
+  const char *grp = gs ? gs[FM_CLAMP(S.group[S.src], 0, ng - 1)].arg : "";
+  fm_snprintf(key, sizeof key, "%s|%s|%s", s->key, S.lang, grp);
   if (!more) {
     if (!strcmp(key, S.browse_key) && (S.browse.n || S.t_browse || S.browse_error[0])) return;
     task_drop(&S.t_browse);
@@ -1096,6 +1133,8 @@ static void search_field(FmRect r) {
     case SK_GUTEN: fm_strlcpy(hint, "Search free books: a title or an author", sizeof hint); break;
     case SK_INAT: fm_strlcpy(hint, "Search plants and animals (mango, eagle, rose...)", sizeof hint); break;
     case SK_FRUIT: fm_strlcpy(hint, "Search fruits", sizeof hint); break;
+    case SK_DEVTO: fm_strlcpy(hint, "A topic, one word: c, python, rust, beginners...", sizeof hint); break;
+    case SK_SO: fm_strlcpy(hint, "Search questions (linked list in c, git undo commit...)", sizeof hint); break;
     default: fm_snprintf(hint, sizeof hint, "Search %s (%s)", s->name, s->langs ? lang_name(S.lang) : "English"); break;
   }
   int res = ui_textfield(id, rect_inset2(r, 0, DP(2)), S.field, sizeof S.field, hint, 0);
@@ -1212,16 +1251,26 @@ static void home_wikipedia(float x, float *py, float col) {
 static void home_browse(float x, float *py, float col, FmRect view) {
   float y = *py;
   const Src *s = cur();
-  if (s->kind == SK_INAT) {
-    const char *labels[FM_COUNT(kGroups)];
-    for (int i = 0; i < FM_COUNT(kGroups); i++) labels[i] = kGroups[i].name;
-    int hit = chips(ui_id("wk.grp"), x, &y, col, labels, (int)FM_COUNT(kGroups), S.group, NULL);
-    if (hit >= 0 && hit != S.group) S.group = hit;
+  int ng;
+  const Group *gs = groups_of(s->kind, &ng);
+  int g = FM_CLAMP(S.group[S.src], 0, FM_MAX(ng - 1, 0));
+  if (gs) {
+    const char *labels[16];
+    ng = FM_MIN(ng, (int)FM_COUNT(labels));
+    for (int i = 0; i < ng; i++) labels[i] = gs[i].name;
+    int hit = chips(ui_idn(ui_id("wk.grp"), (u32)S.src), x, &y, col, labels, ng, g, NULL);
+    if (hit >= 0 && hit != g) S.group[S.src] = g = hit;
     y += DP(18);
   }
   browse_start(false);
-  section_label(x, &y, s->kind == SK_GUTEN ? (strcmp(S.lang, "en") ? "Popular books in this language" : "Popular books")
-                       : s->kind == SK_INAT ? "Most observed" : "Every fruit");
+  const char *label = "Every fruit";
+  switch (s->kind) {
+    case SK_GUTEN: label = strcmp(S.lang, "en") ? "Popular books in this language" : "Popular books"; break;
+    case SK_INAT: label = "Most observed"; break;
+    case SK_DEVTO: label = g == 0 ? "Most liked this week" : "Most liked this year"; break;
+    case SK_SO: label = "Most voted questions"; break;
+  }
+  section_label(x, &y, label);
   if (!S.browse.n) {
     message(FM_RECT(x, y - DP(20), col, DP(140)),
             S.t_browse ? (s->kind == SK_GUTEN ? "Loading the books\xE2\x80\xA6 (Project Gutenberg can take 20 s)" : "Loading\xE2\x80\xA6")
@@ -1291,7 +1340,7 @@ static void page_home(FmRect r) {
   if (!S.contact[0] && s->kind == SK_WIKI) contact_card(x, &y, col, false);
   if (s->feed) {
     home_wikipedia(x, &y, col);
-  } else if (s->kind == SK_GUTEN || s->kind == SK_INAT || s->kind == SK_FRUIT) {
+  } else if (has_browse(s->kind)) {
     home_browse(x, &y, col, r);
   } else {
     home_intro(x, &y, col);
@@ -1381,6 +1430,43 @@ static bool wiki_title(const char *href, char *host, size_t hcap, char *out, siz
   return out[0] != 0;
 }
 
+/* A link to a Stack Overflow question or a dev.to article opens here, in
+** its source; true = it did. */
+static bool open_site_link(const char *url) {
+  const char *p = NULL;
+  if (!strncmp(url, "https://stackoverflow.com/", 26)) p = url + 26;
+  else if (!strncmp(url, "http://stackoverflow.com/", 25)) p = url + 25;
+  if (p) {
+    /* questions/<id>/<slug>, q/<id> */
+    if (!strncmp(p, "questions/", 10)) p += 10;
+    else if (!strncmp(p, "q/", 2)) p += 2;
+    else return false;
+    char id[16];
+    size_t n = 0;
+    while (p[n] >= '0' && p[n] <= '9' && n + 1 < sizeof id) { id[n] = p[n]; n++; }
+    id[n] = 0;
+    if (!n || (p[n] && p[n] != '/' && p[n] != '?' && p[n] != '#')) return false;
+    article_start(src_find("stackoverflow"), "en", id, NULL, true);
+    return true;
+  }
+  if (!strncmp(url, "https://dev.to/", 15)) {
+    /* <user>/<slug>: two parts, letters, digits, - and _ */
+    char path[300];
+    fm_strlcpy(path, url + 15, sizeof path);
+    path[strcspn(path, "?#")] = 0;
+    size_t n = strlen(path);
+    if (n && path[n - 1] == '/') path[--n] = 0;
+    const char *slash = strchr(path, '/');
+    if (!slash || slash == path || !slash[1] || strchr(slash + 1, '/')) return false;
+    if (!strncmp(path, "t/", 2) || !strncmp(path, "api/", 4) || !strncmp(path, "search", 6)) return false;
+    for (const char *c = path; *c; c++)
+      if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || strchr("-_/", *c))) return false;
+    article_start(src_find("devto"), "en", NULL, path, true);   /* the article names its number */
+    return true;
+  }
+  return false;
+}
+
 static void open_doc_link(const char *href) {
   const Src *s = &kSrc[S.art_src];
   FmDoc *d = S.art.doc;
@@ -1436,9 +1522,12 @@ static void open_doc_link(const char *href) {
     fm_snprintf(abs, sizeof abs, "https://%s%s", h2, href);
   } else if (s->kind == SK_GUTEN) {
     fm_snprintf(abs, sizeof abs, "https://www.gutenberg.org/cache/epub/%s/%s", S.art.id, href);
+  } else if (href[0] == '/' && (s->kind == SK_SO || s->kind == SK_DEVTO)) {
+    fm_snprintf(abs, sizeof abs, "https://%s%s", s->kind == SK_SO ? "stackoverflow.com" : "dev.to", href);
   } else {
     fm_strlcpy(abs, href, sizeof abs);
   }
+  if (open_site_link(abs)) return;
   open_web(abs);
 }
 
@@ -1480,7 +1569,8 @@ static float block_font(int kind) {
 }
 
 static void layout(float w) {
-  if (S.bh && S.lay_w == w && S.lay_zoom == S.zoom) return;
+  if (S.bh && S.lay_w == w && S.lay_zoom == S.zoom && S.lay_gen == font_generation()) return;
+  S.lay_gen = font_generation();
   fm_free(S.bh);
   S.bh = (float *)fm_alloc((size_t)(S.art.nb ? S.art.nb : 1) * sizeof *S.bh);
   S.lay_w = w;
@@ -1623,7 +1713,7 @@ static void page_article(FmRect r) {
   }
   float lead_h = 0, ar = 1.5f;
   /* a page from HTML shows its own pictures; a book its cover first */
-  if (S.art.lead[0] && (!doc || kSrc[S.art_src].kind == SK_GUTEN)) {
+  if (S.art.lead[0] && (!doc || kSrc[S.art_src].kind == SK_GUTEN || kSrc[S.art_src].kind == SK_DEVTO)) {
     ar = S.art.lead_w > 0 && S.art.lead_h > 0 ? (float)S.art.lead_w / (float)S.art.lead_h : kSrc[S.art_src].kind == SK_GUTEN ? 0.66f : 1.5f;
     lead_h = FM_MIN(col / ar, r.h * 0.5f);
   }

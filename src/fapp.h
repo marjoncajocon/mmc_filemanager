@@ -34,7 +34,11 @@ void app_shutdown(void);
 bool app_can_quit(void);
 
 /* Thread-safe: wakes the main loop for a redraw (job progress, thumbnails). */
-void app_wake(void);
+void app_wake_at(const char *file, int line, int frames);
+#define app_wake() app_wake_at(__FILE__, __LINE__, 2)   /* the caller rides along, for MMCFM_IDLE_LOG */
+/* For timers that only move a clock or a progress line: one frame, not two
+** (half the drawing while music plays). */
+#define app_wake_tick() app_wake_at(__FILE__, __LINE__, 1)
 
 /* Opens a file: internal viewer when there is one, else the system app.
 ** `siblings` (may be NULL) are the other files in the folder, for next/prev. */
