@@ -18,6 +18,7 @@ mmcfm itself is under the MIT licence (`LICENSE`). It includes the following cod
 | libvpx 1.17.0 (VP9 decoder) | `vendor/libvpx/` | BSD-3-Clause (`vendor/libvpx/LICENSE`) with the WebM Project's patent grant (`vendor/libvpx/PATENTS`) |
 | libopus 1.6.1 (decoder) | `vendor/opus/` | BSD-3-Clause (`vendor/opus/COPYING`) |
 | Poppins font | `assets/fonts/` | SIL Open Font License 1.1 (`assets/fonts/OFL.txt`) |
+| Hack font (code and plain text) | `assets/fonts/Hack-*.ttf` | MIT + Bitstream Vera licence (`assets/fonts/Hack-LICENSE.md`) |
 | RAR decoding in `src/frar.c` | derived from libarchive | BSD-2-Clause (notice kept in the file) |
 | RAR test fixtures | `tests/fixtures/` | from libarchive's test suite, BSD-2-Clause |
 | `tests/fixtures/vp9_opus.webm` | `tests/fixtures/` | made for mmcfm with FFmpeg's `testsrc2` and `sine` generators; MIT like mmcfm |
@@ -25,4 +26,4 @@ mmcfm itself is under the MIT licence (`LICENSE`). It includes the following cod
 ## Optional run-time components
 
 - **FFmpeg.** It is not shipped. When FFmpeg's libraries are present on the system or next to the program, mmcfm loads them at run time to play more video and audio formats. They keep their own (L)GPL licence.
-- **System fonts.** They are used as fallbacks for scripts Poppins does not cover. They are read from the operating system and are not redistributed.
+- **System fonts.** They are used as fallbacks for scripts Poppins and Hack do not cover. They are read from the operating system and are not redistributed.

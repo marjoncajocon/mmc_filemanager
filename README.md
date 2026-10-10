@@ -486,7 +486,7 @@ The cache holds disk thumbnails, the library tag cache (`library-index.txt`) and
 ```
 src/            flat module folder ("the Lua way"): f*.c modules, x*.c wrappers
 vendor/         third-party code, compiled as shipped (patches in vendor/PATCHES.md)
-assets/fonts/   Poppins, embedded into the binary at build time
+assets/fonts/   Poppins (interface) and Hack (code), embedded into the binary at build time
 android/        AndroidManifest.xml, res/, Java (FmActivity, FmFileProvider)
 web/            index.html shell for Emscripten
 tests/fixtures/ RAR archives from libarchive's tests, a small VP9+Opus WebM
@@ -537,6 +537,7 @@ See `CONTRIBUTING.md` for code style and portability rules.
 | libvpx 1.17.0 (VP9 decoder only) | BSD-3-Clause + WebM patent grant |
 | libopus 1.6.1 (decoder only) | BSD-3-Clause |
 | Poppins font | SIL OFL 1.1 |
+| Hack font | MIT + Bitstream Vera |
 | RAR decoder in `src/frar.c` | derived from libarchive, BSD-2-Clause |
 
 FFmpeg is not shipped unless you add it with `--with-ffmpeg`, and it keeps its own (L)GPL licence. See `LICENSES.md` and `vendor/PATCHES.md` for details.
