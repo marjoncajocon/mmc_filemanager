@@ -36,6 +36,8 @@
 
 #include "gen_font_regular.h"
 #include "gen_font_semibold.h"
+#include "gen_font_mono.h"
+#include "gen_font_mono_bold.h"
 
 #define ATLAS_MIN 256       /* 256 KB; the UI in Latin scripts at 100% fits */
 #define ATLAS_MAX 1024      /* 4 MB, reached only by big or many-script text */
@@ -146,6 +148,8 @@ bool font_init(void) {
   g_nfonts = 0;
   if (!font_load_mem(&g_fonts[g_nfonts++], font_regular_ttf, 0, 0)) return false;
   if (!font_load_mem(&g_fonts[g_nfonts++], font_semibold_ttf, 0, 0)) return false;
+  if (!font_load_mem(&g_fonts[g_nfonts++], font_mono_ttf, 0, 0)) return false;
+  if (!font_load_mem(&g_fonts[g_nfonts++], font_mono_bold_ttf, 0, 0)) return false;
   g_tab = (Glyph *)fm_calloc(TABLE, sizeof(Glyph));
   /* Slight contrast boost: thin strokes keep their weight on dark themes. */
   for (int i = 0; i < 256; i++) g_gamma[i] = (u8)(powf(i / 255.0f, 0.82f) * 255.0f + 0.5f);
@@ -249,7 +253,7 @@ static int pick_font(int face, u32 cp) {
   if (stbtt_FindGlyphIndex(&g_fonts[face].info, (int)cp)) return face;
   if (cp < 0x20) return face;
   if (!g_fallbacks_loaded) load_fallbacks();
-  for (int i = 2; i < g_nfonts; i++)
+  for (int i = FONT_FACES; i < g_nfonts; i++)          /* the system's fallbacks, after the embedded faces */
     if (stbtt_FindGlyphIndex(&g_fonts[i].info, (int)cp)) return i;
   return NO_FONT;
 }

@@ -315,6 +315,9 @@ embed() {   # $1 = file, $2 = C name, $3 = output header
 gen_assets() {
   embed assets/fonts/Poppins-Regular.ttf font_regular_ttf "$GEN/gen_font_regular.h"
   embed assets/fonts/Poppins-SemiBold.ttf font_semibold_ttf "$GEN/gen_font_semibold.h"
+  # Hack (MIT + Bitstream Vera licence, assets/fonts/Hack-LICENSE.md): code and plain text
+  embed assets/fonts/Hack-Regular.ttf font_mono_ttf "$GEN/gen_font_mono.h"
+  embed assets/fonts/Hack-Bold.ttf font_mono_bold_ttf "$GEN/gen_font_mono_bold.h"
   # SDL redirects for run-time loading (see src/fsdl.h).
   local redef="$GEN/gen_sdl_redef.h"
   if [ ! -f "$redef" ] || [ src/fsdl_list.h -nt "$redef" ]; then

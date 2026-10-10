@@ -11,8 +11,8 @@
 **     Project Gutenberg's licence sections (books), icon-sized pictures.
 **   - Tables: one level (a table inside a cell becomes the cell's text);
 **     column widths from the text they hold, wrapped to fit.
-**   - The fonts have no italic and no monospace face: italic is drawn in a
-**     tinted colour, code in fixed cells (as the text viewer does).
+**   - Code (pre, code, kbd...) is set in Hack, the monospace face. There is
+**     no italic face: italic is drawn in a tinted colour.
 */
 #include "fdoc.h"
 #include "ffont.h"
@@ -162,7 +162,7 @@ static int target_run0(Par *p) {
 
 static u8 style(Par *p) {
   return (u8)((p->bold ? DS_BOLD : 0) | (p->italic ? DS_ITALIC : 0) | (p->code ? DS_CODE : 0) |
-              (p->nlinks && p->links[p->nlinks - 1] >= 0 ? DS_LINK : 0) | (p->small ? DS_SMALL : 0));
+              (p->nlinks && p->links[p->nlinks - 1] >= 0 ? DS_LINK : 0) | (p->small ? DS_SMALL : 0) | (p->pre ? DS_PRE : 0));
 }
 
 static void add_run(Par *p, const char *s, size_t n) {
@@ -868,17 +868,16 @@ typedef struct Lay {
 
 static int run_face(const DocRun *r, bool bold) { return bold || (r->st & DS_BOLD) ? FONT_BOLD : FONT_REGULAR; }
 static float run_size(const DocRun *r, float fs) { return r->st & DS_SMALL ? fs * 0.8f : fs; }
-static bool run_mono(const DocRun *r, bool pre) { return pre || (r->st & DS_CODE); }
+static bool run_mono(const DocRun *r, bool pre) { return pre || (r->st & (DS_CODE | DS_PRE)); }
 
-static float mono_cell(float size) { return font_width(FONT_REGULAR, size * 0.92f, "0", 1); }
+static int mono_face(bool bold) { return bold ? FONT_MONO_BOLD : FONT_MONO; }
+static float mono_cell(float size) { return font_width(FONT_MONO, size * 0.92f, " ", 1); }
 
 static int cp_bytes(u8 c) { return c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4; }
 
 static float measure(const char *s, int n, int face, float size, bool mono) {
   if (!mono) return font_width(face, size, s, n);
-  int cps = 0;
-  for (int i = 0; i < n; i += cp_bytes((u8)s[i])) cps++;
-  return cps * mono_cell(size);
+  return font_width(mono_face(face == FONT_BOLD), size * 0.92f, s, n);
 }
 
 static void add_frag(FmDoc *d, float x, float y, float w, int run, int off, int len) {
@@ -903,24 +902,22 @@ static float lay_inline(FmDoc *d, int run0, int nrun, float maxw, float fs, bool
     int face = run_face(rn, bold);
     float size = run_size(rn, fs);
     bool mono = run_mono(rn, pre);
+    bool rp = pre || (rn->st & DS_PRE);
     const char *t = d->text;
     int i = rn->off, e = rn->off + rn->len;
     float space_w = mono ? mono_cell(size) : font_width(face, size, " ", 1);
     while (i < e) {
       char c = t[i];
       if (c == '\n') { x = 0; y += lh; pending_space = false; i++; continue; }
-      if (!pre && c == ' ') { pending_space = true; i++; continue; }
+      if (!rp && c == ' ') { pending_space = true; i++; continue; }
       /* a word (pre: up to the line end, spaces kept) */
       int j = i;
-      if (pre) {
+      if (rp) {
         while (j < e && t[j] != '\n') j++;
       } else {
         while (j < e && t[j] != ' ' && t[j] != '\n') j++;
       }
       int wl = j - i;
-      if (pre) {
-        /* tabs as four spaces are rare in what reaches here: drawn as one cell */
-      }
       float w = measure(t + i, wl, face, size, mono);
       float sp = pending_space && x > 0 ? space_w : 0;
       if (x + sp + w > maxw && x > 0) { x = 0; y += lh; sp = 0; }
@@ -993,12 +990,12 @@ static float cell_text_w(FmDoc *d, const DocCell *c, float fs, float *word_max) 
     const DocRun *rn = &d->runs[r];
     int face = run_face(rn, c->head);
     float size = run_size(rn, fs);
-    bool mono = run_mono(rn, false);
+    bool mono = run_mono(rn, false), rp = rn->st & DS_PRE;
     const char *t = d->text;
     int i = rn->off, e = rn->off + rn->len;
     while (i < e) {
       int j = i;
-      while (j < e && t[j] != ' ' && t[j] != '\n') j++;
+      while (j < e && (rp || t[j] != ' ') && t[j] != '\n') j++;
       float w = measure(t + i, j - i, face, size, mono);
       *word_max = FM_MAX(*word_max, w);
       line += w + (j < e && t[j] == ' ' ? font_width(face, size, " ", 1) : 0);
@@ -1139,14 +1136,8 @@ static FmColor run_color(const DocRun *r, FmColor base) {
   return base;
 }
 
-static void draw_mono(const char *s, int n, float x, float y, float size, FmColor c) {
-  float cw = mono_cell(size);
-  for (int i = 0; i < n;) {
-    int cl = cp_bytes((u8)s[i]);
-    if (s[i] != ' ' && s[i] != '\t') font_draw(FONT_REGULAR, size * 0.92f, x, y, s + i, cl, c);
-    x += cw;
-    i += cl;
-  }
+static void draw_mono(const char *s, int n, float x, float y, float size, bool bold, FmColor c) {
+  font_draw(mono_face(bold), size * 0.92f, x, y, s, n, c);
 }
 
 static void draw_frags(FmDoc *d, int f0, int nf, float ox, float oy, float fs, bool bold, bool pre, FmRect clip,
@@ -1175,9 +1166,9 @@ static void draw_frags(FmDoc *d, int f0, int nf, float ox, float oy, float fs, b
         gfx_rrect(FM_RECT(x + x0 - DP(1), y + lh * 0.06f, x1 - x0 + DP(2), lh * 0.88f), DP(3), hc);
       }
     }
-    if ((r->st & DS_CODE) && !pre) gfx_rrect(FM_RECT(x - DP(2), y + lh * 0.08f, f->w + DP(4), lh * 0.86f), DP(4), T.surface2);
+    if ((r->st & DS_CODE) && !(r->st & DS_PRE) && !pre) gfx_rrect(FM_RECT(x - DP(2), y + lh * 0.08f, f->w + DP(4), lh * 0.86f), DP(4), T.surface2);
     float yy = r->st & DS_SMALL ? y + (font_line_h(fs) - font_line_h(size)) * 0.5f : y;
-    if (mono) draw_mono(d->text + f->off, f->len, x, yy, size, c);
+    if (mono) draw_mono(d->text + f->off, f->len, x, yy, size, run_face(r, bold) == FONT_BOLD, c);
     else font_draw(run_face(r, bold), size, x, yy, d->text + f->off, f->len, c);
     if ((r->st & DS_LINK) && r->link >= 0) {
       FmRect hr = { x, y, f->w, lh };

@@ -12,9 +12,10 @@
 **   - The scroll position is a line anchor plus a pixel offset, not one
 **     float: with millions of lines a float would lose whole lines, and
 **     with word wrap the total height is unknown anyway.
-**   - Monospace is faked with fixed cells: each code point is drawn at
-**     column * cell width (wide CJK/emoji take two cells), so columns and
-**     the hex dump line up although the only font is Poppins.
+**   - Text is drawn in Hack (the monospace face) at fixed cells: each code
+**     point at column * cell width (wide CJK/emoji take two cells), so
+**     columns and the hex dump line up also where Hack has no glyph and a
+**     fallback font draws it.
 **   - Selection and find work on byte offsets in the file, so copying a
 **     range or finding a match far below the screen needs no decoded text.
 */
@@ -797,7 +798,7 @@ static void draw_hex(FmRect c, float fs) {
     char ob[24];
     for (int d = 0; d < digits; d++) ob[d] = kHex[(off >> (4 * (digits - 1 - d))) & 15];
     ob[digits] = 0;
-    font_draw(FONT_REGULAR, fs, x0, y + ty, ob, digits, T.text3);
+    font_draw(FONT_MONO, fs, x0, y + ty, ob, digits, T.text3);
     int nb = (int)FM_MIN((u64)B, g.ix.size - off);
     for (int i = 0; i < nb; i++) {
       u8 v = page ? page[(size_t)r * (size_t)B + (size_t)i] : 0;
@@ -809,9 +810,9 @@ static void draw_hex(FmRect c, float fs) {
         gfx_rect(FM_RECT(ax, y, cw, g.lh), col_alpha(T.warn, 0.45f));
       }
       char hb[2] = { kHex[v >> 4], kHex[v & 15] };
-      font_draw(FONT_REGULAR, fs, hx, y + ty, hb, 2, v ? T.text : T.text3);
+      font_draw(FONT_MONO, fs, hx, y + ty, hb, 2, v ? T.text : T.text3);
       char ab = (v >= 0x20 && v < 0x7F) ? (char)v : '.';
-      font_draw(FONT_REGULAR, fs, ax, y + ty, &ab, 1, (v >= 0x20 && v < 0x7F) ? T.text : T.text3);
+      font_draw(FONT_MONO, fs, ax, y + ty, &ab, 1, (v >= 0x20 && v < 0x7F) ? T.text : T.text3);
     }
   }
   g.bottom_gap = 0;
@@ -884,7 +885,7 @@ static void draw_text(FmRect c, float fs) {
     char num[24];
     int nn = fm_snprintf(num, sizeof num, "%llu", (unsigned long long)(li + 1));
     float nx = c.x + gut - DP(6) - nn * g.cell;
-    for (int k = 0; k < nn; k++) font_draw(FONT_REGULAR, fs * 0.9f, nx + k * g.cell, y + ty + fs * 0.05f, num + k, 1, T.text3);
+    for (int k = 0; k < nn; k++) font_draw(FONT_MONO, fs * 0.9f, nx + k * g.cell, y + ty + fs * 0.05f, num + k, 1, T.text3);
     /* rows of this line */
     int cp = 0;
     const char *p = L->txt;
@@ -916,7 +917,7 @@ static void draw_text(FmRect c, float fs) {
             for (int k = j; k < cp1; k++) q += cp_txt_bytes(L, k, q);
             break;
           }
-          if (*q != ' ') font_draw(FONT_REGULAR, fs, gx, ry + ty, q, nb, T.text);
+          if (*q != ' ') font_draw(FONT_MONO, fs, gx, ry + ty, q, nb, T.text);
           q += nb;
         }
         p = q;
@@ -995,7 +996,7 @@ enum { TM_TOP = 1, TM_BOTTOM, TM_WRAP, TM_COPY, TM_SELALL, TM_OPEN, TM_SHARE, TM
 static void txt_frame(FmRect area) {
   gfx_rect(area, T.surface);
   float fs = ui.m.font * 0.92f * g.zoom;
-  g.cell = font_width(FONT_REGULAR, fs, "0", 1);
+  g.cell = font_width(FONT_MONO, fs, "0", 1);
   g.lh = floorf(font_line_h(fs) * 1.12f);
   if (g.cell <= 0) g.cell = fs * 0.6f;
 

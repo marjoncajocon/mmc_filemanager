@@ -14,7 +14,8 @@
 #include "fui.h"
 
 enum { DB_P, DB_H, DB_LI, DB_DT, DB_DD, DB_PRE, DB_QUOTE, DB_IMG, DB_CAPTION, DB_HR, DB_TABLE };
-enum { DS_BOLD = 1, DS_ITALIC = 2, DS_CODE = 4, DS_LINK = 8, DS_SMALL = 16 };
+enum { DS_BOLD = 1, DS_ITALIC = 2, DS_CODE = 4, DS_LINK = 8, DS_SMALL = 16,
+       DS_PRE = 32 /* from a <pre>: lines and spaces kept (a code block in a table cell) */ };
 
 typedef struct DocRun { int off, len; u8 st; int link; } DocRun;   /* link: index in links, -1 = none */
 typedef struct DocFrag { float x, y, w; int run, off, len; } DocFrag;

@@ -9,7 +9,8 @@
 
 #include "fgfx.h"
 
-enum { FONT_REGULAR = 0, FONT_BOLD = 1 };
+/* Poppins for the interface; Hack (monospace) for code and plain text. */
+enum { FONT_REGULAR = 0, FONT_BOLD = 1, FONT_MONO = 2, FONT_MONO_BOLD = 3, FONT_FACES = 4 };
 
 bool  font_init(void);
 void  font_shutdown(void);
