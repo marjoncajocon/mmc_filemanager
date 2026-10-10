@@ -1826,3 +1826,38 @@ void aonline_demo(const char *source, const char *query, const char *state) {
   ui_focus(0);
   S.focus_search = false;
 }
+
+/* ---- the home screen's Favorites strip (fhome.c) ---------------------------------- */
+
+int aonline_fav_count(void) { return alib_count(ALIB_FAV); }
+
+bool aonline_fav_get(int i, FmAsrcItem *out, char *key, size_t cap) {
+  if (!alib_get(ALIB_FAV, i, out)) return false;
+  aitem_key(out, key, cap);
+  return true;
+}
+
+bool aonline_fav_has(const char *key) { return alib_has_key(ALIB_FAV, key); }
+
+/* A station or a track plays (the other favourites around it queue up,
+** as in the Favorites page); a podcast or an album opens its page. */
+void aonline_fav_open(const char *key) {
+  int n = alib_count(ALIB_FAV);
+  FmAsrcItem *all = (FmAsrcItem *)fm_calloc((size_t)(n > 0 ? n : 1), sizeof *all);
+  int at = -1;
+  for (int i = 0; i < n; i++) {
+    char k[192];
+    if (!alib_get(ALIB_FAV, i, &all[i])) continue;
+    aitem_key(&all[i], k, sizeof k);
+    if (at < 0 && !strcmp(k, key)) at = i;
+  }
+  if (at >= 0) {
+    if (aitem_container(&all[at])) {
+      aonline_open(all[at].source);
+      open_detail(&all[at]);
+    } else {
+      aplay_list(all, n, at);
+    }
+  }
+  fm_free(all);
+}

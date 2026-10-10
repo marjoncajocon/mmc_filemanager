@@ -1604,3 +1604,26 @@ void photo_demo(const char *source, const char *query, const char *state) {
   ui_focus(0);
   S.focus_search = false;
 }
+
+/* ---- the home screen's Favorites strip (fhome.c) ---------------------------------- */
+
+int photo_fav_count(void) { return palb_size(PALB_FAV); }
+
+bool photo_fav_get(int i, FmPsrcItem *out, char *src, size_t cap) {
+  if (i < 0 || i >= palb_size(PALB_FAV)) return false;
+  PhItem p;
+  palb_get(PALB_FAV, i, &p);
+  *out = p.it;
+  fm_strlcpy(src, p.src, cap);
+  return true;
+}
+
+bool photo_fav_has(const char *src, const char *id) { return palb_find(PALB_FAV, src, id) >= 0; }
+
+void photo_fav_open(const char *src, const char *id) {
+  int i = palb_find(PALB_FAV, src, id);
+  if (i < 0) return;
+  photo_open(NULL);
+  ph_show_album(PALB_FAV);
+  box_open(&S.alb, i);
+}

@@ -15,6 +15,7 @@
 #define FAUDIO_ONLINE_H
 
 #include "fui.h"
+#include "fasrc.h"
 
 /* ---- lifetime ----------------------------------------------------------- */
 
@@ -61,5 +62,12 @@ bool  aonline_settings_focus(void);
 ** download; outside --shot it really writes), or a forced state: "nokey",
 ** "offline", "empty", "error", "onboarding", "settings". */
 void aonline_demo(const char *source, const char *query, const char *state);
+
+/* The home screen's Favorites strip: online audio favourites, newest first.
+** key is the library's own key for the item ("source" + id). */
+int  aonline_fav_count(void);
+bool aonline_fav_get(int i, FmAsrcItem *out, char *key, size_t cap);
+bool aonline_fav_has(const char *key);
+void aonline_fav_open(const char *key);
 
 #endif

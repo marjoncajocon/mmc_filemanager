@@ -338,6 +338,13 @@ static void home_pick(int act) {
     case HOME_PHOTOS: open_photos(); break;
     case HOME_LIBRARY: open_library(LIB_SEC_SONGS); break;
     case HOME_CLOUD: home_close(); cloud_ui_home(); break;   /* a sheet over the panels */
+    case HOME_FOLDER: {                                    /* a favourite folder */
+      const char *d = home_picked_folder();
+      if (!plat_is_dir(d)) { ui_toast("%s is not available", d); break; }
+      home_close();
+      panel_go_path(P(), d);
+      break;
+    }
     case HOME_SETTINGS: open_settings(); break;
     case HOME_THEME:
       conf.dark = !T.dark;
@@ -398,6 +405,7 @@ static void go_place(int i, int panel) {
     ui_toast("%s is not available", g_places[i].label);
     return;
   }
+  if (conf_is_bookmark(g_places[i].path)) home_fav_touch('d', g_places[i].path);   /* home: to the front */
   FmLoc l;
   loc_local(&l, g_places[i].path);
   panel_go(p, &l, true);
@@ -408,6 +416,7 @@ static void go_place(int i, int panel) {
 void app_open(const char *path, const char *const *siblings, int n, int index) {
   FmType t = fm_type_from_name(path);
   if (t == FT_AUDIO || t == FT_VIDEO) lib_note_played(path);   /* flib: recently played */
+  if (lib_is_fav(path)) home_fav_touch('f', path);              /* home: a favourite opened goes first */
   const FmViewer *v = view_for(t, path);
   if (v && v->open && v->open(path, siblings, n, index)) {
     app.viewer = v;

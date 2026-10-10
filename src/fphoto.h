@@ -14,6 +14,7 @@
 #define FPHOTO_H
 
 #include "fui.h"
+#include "fpsrc.h"
 
 /* ---- lifetime ----------------------------------------------------------- */
 
@@ -62,5 +63,12 @@ bool  photo_settings_focus(void);
 ** really writes), or a forced state: "nokey", "offline", "quota",
 ** "empty", "error", "settings". */
 void photo_demo(const char *source, const char *query, const char *state);
+
+/* The home screen's Favorites strip: the photos favourited, newest first;
+** open shows one in the viewer (inside the photos view, Favorites album). */
+int  photo_fav_count(void);
+bool photo_fav_get(int i, FmPsrcItem *out, char *src, size_t cap);
+bool photo_fav_has(const char *src, const char *id);
+void photo_fav_open(const char *src, const char *id);
 
 #endif
