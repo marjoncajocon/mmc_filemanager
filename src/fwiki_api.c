@@ -344,6 +344,7 @@ FmErr wk_feed(const char *lang, WkFeed *out, volatile int *cancel) {
 
 void wk_article_free(WkArticle *a) {
   if (!a) return;
+  if (a->doc) { doc_free(a->doc); fm_free(a->doc); }
   fm_free(a->text);
   fm_free(a->b);
   memset(a, 0, sizeof *a);
@@ -480,6 +481,28 @@ FmErr wk_article(const char *lang, const char *title, WkArticle *out, volatile i
   }
   e = wk_parse_article((const char *)r.data, r.len, lang, out);
   net_resp_free(&r);
+  if (e != FM_OK && e != FM_ERR_NOT_FOUND) return e;
+  if (e == FM_ERR_NOT_FOUND && !out->title[0]) return e;
+  /* the page as HTML (action=parse): code, pictures, tables, links; the
+  ** plain text above stays as the fallback */
+  char te2[900], p2[1400], url2[1800], base[200];
+  net_urlencode(out->title[0] ? out->title : title, te2, sizeof te2);
+  fm_snprintf(p2, sizeof p2,
+              "action=parse&page=%s&prop=text&redirects=1&disableeditsection=1&disablelimitreport=1&disabletoc=1", te2);
+  api_url(url2, sizeof url2, lang, p2);
+  FmJson j;
+  char err2[200];
+  if (get_json(url2, &j, err2, sizeof err2, cancel) == FM_OK) {
+    const char *html = json_str(json_path(json_root(&j), "parse.text"), "");
+    if (html[0]) {
+      fm_snprintf(base, sizeof base, "https://%s/wiki/", lang);
+      out->doc = (FmDoc *)fm_calloc(1, sizeof *out->doc);
+      doc_parse(html, strlen(html), base, DOC_WIKI, out->doc);
+      if (!out->doc->nb) { doc_free(out->doc); fm_free(out->doc); out->doc = NULL; }
+    }
+    json_free(&j);
+  }
+  if (out->doc && e == FM_ERR_NOT_FOUND) { e = FM_OK; out->error[0] = 0; }   /* a list page: no plain text, but HTML */
   return e;
 }
 

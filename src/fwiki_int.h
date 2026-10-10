@@ -7,6 +7,7 @@
 #define FWIKI_INT_H
 
 #include "fwiki.h"
+#include "fdoc.h"
 
 #define WK_LANG 16
 
@@ -51,6 +52,7 @@ typedef struct WkArticle {
   char *text;                  /* every block's string lives in here */
   WkBlock *b;
   int nb;
+  FmDoc *doc;                  /* the page as HTML (headings, code, pictures, tables, links); NULL = text only */
   char error[256];
 } WkArticle;
 

@@ -299,10 +299,90 @@ static void rt_live(void) {
   }
 }
 
+static void dt_offline(void);
+
 int test_reading(const char *tmp) {
   FM_UNUSED(tmp);
   int before = g_test_fail;
   rt_offline();
+  dt_offline();
   rt_live();
   return g_test_fail - before;
+}
+
+/* ---- fdoc: HTML into blocks ---------------------------------------------------------------- */
+
+static const char kHtml[] =
+  "<html><head><title>x</title><style>p{color:red}</style></head><body>"
+  "<div class=\"navbox\"><p>NAV</p></div><h2 id=\"Top\">Intro <span class=\"mw-editsection\">edit</span></h2>"
+  "<p>Hello <b>bold</b> and <i>it</i> &amp; <a href=\"/wiki/Mango\">mango</a><sup class=\"reference\">[1]</sup>.</p>"
+  "<ul><li>one<p>inner</p></li><li>two</li></ul><ol><li>first</li></ol>"
+  "<pre>int  main()\n{\n}</pre><p>x<img src=\"//up/x/16px-flag.png\" width=\"16\" height=\"12\">y</p>"
+  "<figure><a href=\"/wiki/File:A.jpg\"><img src=\"//up/a/250px-A.jpg\" width=\"250\" height=\"180\"></a>"
+  "<figcaption>A caption</figcaption></figure>"
+  "<table class=\"infobox\"><tr><th>Capital</th><td>Cebu City<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table></td></tr>"
+  "<tr><td colspan=\"2\">wide</td></tr></table>"
+  "<p style=\"display:none\">HIDDEN</p><p>E = <img class=\"mwe-math-fallback-image-inline\" alt=\"{\\displaystyle mc^{2}}\" src=\"//m.svg\"></p>"
+  "</body></html>";
+
+static void dt_offline(void) {
+  FmDoc d;
+  doc_parse(kHtml, sizeof kHtml - 1, "https://en.wikipedia.org/wiki/", DOC_WIKI, &d);
+  char t[300];
+  int kinds[16] = { 0 };
+  for (int i = 0; i < d.nb; i++) kinds[d.b[i].kind]++;
+  TEST_CHECK(kinds[DB_H] == 1 && kinds[DB_LI] == 3 && kinds[DB_PRE] == 1 && kinds[DB_IMG] == 1 && kinds[DB_CAPTION] == 1 &&
+             kinds[DB_TABLE] == 1);
+  doc_block_text(&d, 0, t, sizeof t);
+  TEST_CHECK(!strcmp(t, "Intro"));                                   /* no edit link */
+  doc_block_text(&d, 1, t, sizeof t);
+  TEST_CHECK(!strcmp(t, "Hello bold and it & mango."));               /* no reference marker */
+  bool bold = false, ital = false, link = false;
+  for (int r = d.b[1].run0; r < d.b[1].run0 + d.b[1].nrun; r++) {
+    bold |= (d.runs[r].st & DS_BOLD) != 0;
+    ital |= (d.runs[r].st & DS_ITALIC) != 0;
+    if (d.runs[r].st & DS_LINK) link = !strcmp(d.links[d.runs[r].link], "/wiki/Mango");
+  }
+  TEST_CHECK(bold && ital && link);
+  TEST_CHECK(d.nb > 3 && d.b[2].kind == DB_LI && !strcmp(d.b[2].marker, "\xE2\x80\xA2"));
+  doc_block_text(&d, 2, t, sizeof t);
+  TEST_CHECK(!strcmp(t, "one inner"));                                /* a paragraph inside an item stays in it */
+  TEST_CHECK(d.nb > 4 && !strcmp(d.b[4].marker, "1."));
+  int pre = -1, img = -1, tab = -1;
+  for (int i = 0; i < d.nb; i++) {
+    if (d.b[i].kind == DB_PRE) pre = i;
+    if (d.b[i].kind == DB_IMG) img = i;
+    if (d.b[i].kind == DB_TABLE) tab = i;
+  }
+  TEST_CHECK(pre >= 0 && d.runs[d.b[pre].run0].len == 15 && !strncmp(d.text + d.runs[d.b[pre].run0].off, "int  main()\n{\n}", 15));
+  TEST_CHECK(img >= 0 && d.nimgs == 1 && !strcmp(d.imgs[0].src, "https://up/a/250px-A.jpg") && d.imgs[0].href &&
+             !strcmp(d.imgs[0].href, "/wiki/File:A.jpg") && d.imgs[0].w == 250);   /* the flag icon left out */
+  if (tab >= 0) {
+    DocTable *tb = &d.tabs[d.b[tab].tab];
+    TEST_CHECK(tb->box && tb->cols == 2 && tb->rows == 2 && tb->ncell == 3 && d.cells[tb->cell0].head);
+    char c2[100] = "";
+    size_t o = 0;
+    const DocCell *cl = &d.cells[tb->cell0 + 1];
+    for (int r = cl->run0; r < cl->run0 + cl->nrun; r++) {
+      memcpy(c2 + o, d.text + d.runs[r].off, (size_t)d.runs[r].len);
+      o += (size_t)d.runs[r].len;
+    }
+    c2[o] = 0;
+    TEST_CHECK(strstr(c2, "Cebu City") && strstr(c2, "a   b") && strstr(c2, "\nc"));   /* the nested table: rows as lines */
+  }
+  bool hidden = false, math = false;
+  for (int i = 0; i < d.nb; i++) {
+    doc_block_text(&d, i, t, sizeof t);
+    hidden |= strstr(t, "HIDDEN") || strstr(t, "NAV");
+    math |= strstr(t, "E = mc^{2}") != NULL;
+  }
+  TEST_CHECK(!hidden && math);
+  TEST_CHECK(doc_anchor(&d, "Top") == 0);
+  TEST_CHECK(doc_find(&d, "MANGO") == 1 && d.hl_len == 5);   /* (layout needs the fonts: checked in the app) */
+  doc_free(&d);
+  /* garbage never fails */
+  static const char kBad[] = "<p><b>unclosed <table><td>x<tr><li>y</ul></table></i>&#xZZ;&bogus; <<<>>";
+  doc_parse(kBad, sizeof kBad - 1, "", DOC_WIKI, &d);
+  TEST_CHECK(d.nb >= 1);
+  doc_free(&d);
 }

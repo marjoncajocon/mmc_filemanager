@@ -147,10 +147,12 @@ Everything streams, with nothing downloaded before playback. Downloads are optio
   - **Free books** (Project Gutenberg): popular books (in the chosen language), search by title or author; a book opens whole, in chapters, from gutenberg.org.
   - **Plants & animals** (iNaturalist): the most observed species of a group (plants, birds, mammals, insects, fish, reptiles, amphibians, fungi, mollusks, spiders), search by name; a species shows its photos, a summary, classification, conservation status and local names (in the chosen language), with "Read on Wikipedia".
   - **Fruits** (Fruityvice): 49 fruits with nutrition per 100 g and classification.
+- Pages are drawn from their HTML (the wikis' pages, Gutenberg's HTML editions) by a small built-in layout (`fdoc.c`): headings, paragraphs, bulleted and numbered lists, **code blocks** (monospace box), quotes, **pictures in the text** with captions (tap for full size), **tables** (with the infobox, column widths from their content), **bold**, *italic*, `inline code` and **links** (a wiki link opens that page in the reader, a book's contents link jumps to the chapter, other links go to the browser). Plain text is the fallback.
+- **Find in page**: Ctrl+F (or ⋮ > Find in page): every match highlighted, "3 of 12", Enter / F3 for the next, Shift+F3 the previous.
 - Reader: bigger/smaller text (Ctrl +/-), Page Up/Down, contents; pictures open in the image viewer, videos in the video player (VP9/Opus WebM, up to 480p), sounds in the music player, all downloaded first with progress.
 - **Saved** (the star; also in the home screen's Favorites) and **history** across every source; **language**: English, Tagalog, Cebuano, Simple English, Ilokano, Waray, Kapampangan, Bikol and more.
 - Wikimedia allows an unidentified app only 10 requests a minute (thumbnails included); with a contact (an email or a web page, ⋮ > Wikimedia contact, sent only to Wikimedia in an `Api-User-Agent` header) it allows 200.
-- Not shown: infoboxes, tables and formulas (Open in browser has them); links inside the text (listed under Related). Gutenberg's catalog is slow (lists can take ~20 s); a long book is a 1-2 MB download.
+- Not shown: page styling and colours, math formulas (their TeX source shows as code), interactive maps; tables inside tables are flattened into lines. Scripts the fonts lack (Ethiopic, some Indic) show as boxes. Gutenberg's catalog is slow (lists can take ~20 s); a long book is a 1-2 MB download.
 
 ### Cloud storage
 

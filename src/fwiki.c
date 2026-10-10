@@ -15,9 +15,14 @@
 **   - Every request runs on its own thread (WkTask), polled each frame; one
 **     that is no longer wanted is cancelled and joined later (reap), as the
 **     photo and video views do.
-**   - Articles are drawn as wrapped text: block heights are measured once per
-**     width and text size, then only the blocks on screen are drawn (a whole
-**     Gutenberg book is a few thousand blocks).
+**   - Articles are drawn from the page's HTML when the source has it (the
+**     wikis, Gutenberg's HTML editions; fdoc.c: headings, lists, code,
+**     pictures, tables, bold/italic, links), else as wrapped plain text.
+**     Either way the layout is measured once per width and text size and only
+**     what is on screen is drawn (a whole book is a few thousand blocks).
+**   - A link inside a page opens that page in the same source (a wiki
+**     article, a #section of the book); a picture opens in the image viewer
+**     at full size; anything else goes to the browser.
 **   - Pictures open in the app's image viewer, videos in the video player,
 **     sounds in the music player; all are downloaded whole into the cache
 **     first (upload.wikimedia.org answers 429 to streaming's many range
@@ -327,6 +332,12 @@ static struct {
   struct { int src; char lang[WK_LANG], id[64], title[256]; float y; } stack[WK_STACK];
   int nstack;
   int back_page;               /* a sub-page returns here */
+  /* find in page */
+  bool find_open, find_focus;
+  char find_q[128], find_ran[128];
+  int find_n, find_cur;
+  int *find_blk;               /* plain text pages: the block of each match */
+  float art_view_h;
   char contact[300];           /* for Wikimedia's rate limits (Api-User-Agent) */
   char contact_field[300];
   /* lists */
@@ -774,6 +785,10 @@ void wiki_pump(void) {
       }
       S.scroll[WP_ARTICLE].y = S.restore_y;
       S.restore_y = 0;
+      fm_free(S.find_blk);
+      S.find_blk = NULL;
+      S.find_n = 0;
+      S.find_ran[0] = 1;                             /* find again in the new page */
       ref_front(S.hist, &S.nhist, WK_HIST_MAX, kSrc[S.art_src].key, S.art.lang, S.art.id, S.art.title, S.art.desc,
                 S.art.lead);
       save_file();
@@ -940,7 +955,7 @@ static int chips(u32 base, float x, float *y, float w, const char *const *labels
 /* ---- the top bar ---------------------------------------------------------------------------- */
 
 enum { MI_RANDOM = 1, MI_SAVED, MI_HISTORY, MI_LANG, MI_BIGGER, MI_SMALLER, MI_WEB, MI_COPY, MI_RELATED, MI_LANGS,
-       MI_CONTACT, MI_WIKI };
+       MI_CONTACT, MI_WIKI, MI_FIND };
 static u32 g_menu_id;
 
 static void more_menu(float x, float y) {
@@ -956,6 +971,7 @@ static void more_menu(float x, float y) {
   m[n++] = (FmMenuItem){ MI_LANG, IC_NETWORK, lang_label, NULL, 0 };
   m[n++] = (FmMenuItem){ MI_CONTACT, IC_PERSON, "Wikimedia contact", NULL, 0 };
   if (art) {
+    m[n++] = (FmMenuItem){ MI_FIND, IC_SEARCH, "Find in page", "Ctrl+F", 0 };
     if (S.art.wiki[0]) m[n++] = (FmMenuItem){ MI_WIKI, IC_TEXT, "Read on Wikipedia", NULL, 0 };
     if (s->related) m[n++] = (FmMenuItem){ MI_RELATED, IC_LINK, "Related pages and links", NULL, 0 };
     if (s->langs) m[n++] = (FmMenuItem){ MI_LANGS, IC_NETWORK, "In other languages", NULL, 0 };
@@ -983,6 +999,7 @@ static void menu_results(void) {
     case MI_RELATED: sub_start(WP_RELATED); break;
     case MI_LANGS: sub_start(WP_LANGS); break;
     case MI_WIKI: open_wiki_of_art(); break;
+    case MI_FIND: S.find_open = S.find_focus = true; S.find_ran[0] = 1; break;
     case MI_BIGGER: S.zoom = FM_MIN(1.6f, S.zoom + 0.1f); layout_reset(); save_file(); break;
     case MI_SMALLER: S.zoom = FM_MAX(0.8f, S.zoom - 0.1f); layout_reset(); save_file(); break;
     case MI_WEB: open_web(S.art.url); break;
@@ -1319,6 +1336,143 @@ static void page_results(FmRect r) {
   }
 }
 
+/* ---- the HTML document: pictures, links -------------------------------------------- */
+
+/* A picture in a page: drawn in its own shape; one the page gave no size
+** learns it from the picture (the page is laid out again). */
+static void doc_thumb(FmDoc *d, DocImage *im, FmRect r) {
+  float fade = 1;
+  SDL_Texture *tex = othumb_get_ex(im->src, (int)FM_MAX(r.w, r.h) * 2, 0, strstr(im->src, "wikimedia.org") ? wk_headers() : NULL,
+                                   &fade);
+  int tw = 0, th = 0;
+  if (!tex || SDL_QueryTexture(tex, NULL, NULL, &tw, &th) != 0 || tw <= 0 || th <= 0) {
+    gfx_rrect(r, DP(8), T.surface2);
+    float is = FM_MIN(r.w, r.h) * 0.3f;
+    icon_draw(IC_IMAGE, rect_center(r, is, is), T.text2);
+    return;
+  }
+  doc_image_shape(d, im, (int)(r.w / ui.scale), (int)((float)(r.w / ui.scale) * th / tw));
+  float k = FM_MIN(r.w / tw, r.h / th);
+  gfx_tex_rounded(tex, rect_center(r, tw * k, th * k), DP(6), FM_RGBA(255, 255, 255, (u8)(255 * fade)));
+  if (fade < 1) ui_animate();
+}
+
+/* A wiki page title from a link inside a wiki page ("/wiki/Mango",
+** "./Mango", "https://en.wikipedia.org/wiki/Mango#Fruit"); false = not one. */
+static bool wiki_title(const char *href, char *host, size_t hcap, char *out, size_t cap) {
+  host[0] = 0;
+  const char *p = NULL;
+  if (!strncmp(href, "/wiki/", 6)) p = href + 6;
+  else if (!strncmp(href, "./", 2)) p = href + 2;
+  else if (!strncmp(href, "https://", 8) || !strncmp(href, "//", 2)) {
+    const char *h = href + (href[0] == '/' ? 2 : 8);
+    const char *w = strstr(h, "/wiki/");
+    if (!w || (size_t)(w - h) >= hcap) return false;
+    memcpy(host, h, (size_t)(w - h));
+    host[w - h] = 0;
+    if (!wk_host_ok(host)) return false;
+    p = w + 6;
+  }
+  if (!p || !*p) return false;
+  char raw[600];
+  fm_strlcpy(raw, p, sizeof raw);
+  raw[strcspn(raw, "#?")] = 0;
+  doc_url_decode(raw, out, cap);
+  return out[0] != 0;
+}
+
+static void open_doc_link(const char *href) {
+  const Src *s = &kSrc[S.art_src];
+  FmDoc *d = S.art.doc;
+  if (href[0] == '#') {                              /* a place in this page */
+    int b = d ? doc_anchor(d, href + 1) : -1;
+    if (b >= 0) {
+      S.scroll[WP_ARTICLE].y = S.lay_top + d->b[b].y - DP(8);
+      S.scroll[WP_ARTICLE].vel = 0;
+      ui_redraw();
+    }
+    return;
+  }
+  char host[64], title[512];
+  if (s->kind == SK_WIKI && wiki_title(href, host, sizeof host, title, sizeof title)) {
+    const char *colon = strchr(title, ':');
+    if (colon && (!fm_strnicmp(title, "File:", 5) || !fm_strnicmp(title, "Image:", 6))) {
+      if (!S.t_image) {
+        S.t_image = task_start(WT_IMAGE, S.art_src, S.art.lang, title, NULL, WM_IMAGE);
+        ui_toast("Opening the picture\xE2\x80\xA6");
+      }
+      return;
+    }
+    if (!colon || !host[0]) {
+      /* another wiki of ours (a link to Wiktionary, or another language) */
+      int src = S.art_src;
+      char lang[WK_LANG];
+      fm_strlcpy(lang, S.art.lang, sizeof lang);
+      if (host[0]) {
+        for (int i = 0; i < NSRC; i++) {
+          if (kSrc[i].kind != SK_WIKI) continue;
+          const char *dot = strchr(host, '.');
+          char suffix[64];
+          fm_strlcpy(suffix, kSrc[i].host, sizeof suffix);
+          const char *ps = strstr(suffix, "%s");
+          if (ps && dot && !strcmp(dot, ps + 2) && (size_t)(dot - host) < sizeof lang) {
+            src = i;
+            memcpy(lang, host, (size_t)(dot - host));
+            lang[dot - host] = 0;
+          } else if (!ps && !strcmp(host, suffix)) {
+            src = i;
+          }
+        }
+      }
+      if (!colon) { article_start(src, lang, NULL, title, true); return; }
+    }
+  }
+  char abs[1200];
+  if (!strncmp(href, "http://", 7) || !strncmp(href, "https://", 8)) fm_strlcpy(abs, href, sizeof abs);
+  else if (!strncmp(href, "//", 2)) fm_snprintf(abs, sizeof abs, "https:%s", href);
+  else if (s->kind == SK_WIKI && href[0] == '/') {
+    char h2[64];
+    host_of(S.art_src, S.art.lang, h2, sizeof h2);
+    fm_snprintf(abs, sizeof abs, "https://%s%s", h2, href);
+  } else if (s->kind == SK_GUTEN) {
+    fm_snprintf(abs, sizeof abs, "https://www.gutenberg.org/cache/epub/%s/%s", S.art.id, href);
+  } else {
+    fm_strlcpy(abs, href, sizeof abs);
+  }
+  open_web(abs);
+}
+
+static bool image_like(const char *u) {
+  char t[600];
+  fm_strlcpy(t, u, sizeof t);
+  t[strcspn(t, "?#")] = 0;
+  size_t n = strlen(t);
+  static const char *const kExt[] = { ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp" };
+  for (int i = 0; i < FM_COUNT(kExt); i++) {
+    size_t e = strlen(kExt[i]);
+    if (n > e && !fm_stricmp(t + n - e, kExt[i])) return true;
+  }
+  return false;
+}
+
+static void open_doc_image(const DocImage *im) {
+  if (S.t_image) return;
+  char host[64], title[512];
+  if (im->href && kSrc[S.art_src].kind == SK_WIKI && wiki_title(im->href, host, sizeof host, title, sizeof title) &&
+      (!fm_strnicmp(title, "File:", 5) || !fm_strnicmp(title, "Image:", 6))) {
+    S.t_image = task_start(WT_IMAGE, S.art_src, S.art.lang, title, NULL, WM_IMAGE);   /* full size, from the wiki */
+  } else {
+    char url[1100];
+    const char *u = im->href && image_like(im->href) ? im->href : im->src;
+    if (!strncmp(u, "http", 4)) fm_strlcpy(url, u, sizeof url);
+    else if (!strncmp(u, "//", 2)) fm_snprintf(url, sizeof url, "https:%s", u);
+    else if (kSrc[S.art_src].kind == SK_GUTEN) fm_snprintf(url, sizeof url, "https://www.gutenberg.org/cache/epub/%s/%s", S.art.id, u);
+    else fm_strlcpy(url, im->src, sizeof url);
+    S.t_image = task_start(WT_IMAGE, S.art_src, S.art.lang, im->alt ? im->alt : "Picture", url, WM_IMAGE);
+  }
+  ui_toast("Opening the picture\xE2\x80\xA6");
+}
+
 /* Article layout: block heights at the current width and text size. */
 static float block_font(int kind) {
   return kind == WB_H2 ? ui.m.font_title * 1.25f * S.zoom : kind == WB_H3 ? ui.m.font_title * 1.05f * S.zoom
@@ -1343,6 +1497,113 @@ static void layout(float w) {
   S.lay_total = total;
 }
 
+/* ---- find in page ------------------------------------------------------------------------ */
+
+static char fold_c(char c) { return c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c; }
+
+static int count_in(const char *s, const char *q, size_t qn) {
+  int n = 0;
+  for (; *s; s++) {
+    size_t k = 0;
+    while (k < qn && s[k] && fold_c(s[k]) == fold_c(q[k])) k++;
+    if (k == qn) { n++; s += qn - 1; }
+  }
+  return n;
+}
+
+/* Where match i sits, as the article's scroll position. */
+static float find_y(int i) {
+  if (S.art.doc) return S.lay_top + doc_offset_y(S.art.doc, S.art.doc->hl[i]);
+  float y = S.lay_top;
+  int b = S.find_blk ? S.find_blk[i] : 0;
+  for (int k = 0; k < b && k < S.art.nb && S.bh; k++) y += S.bh[k];
+  return y;
+}
+
+static void find_show(int i) {
+  if (S.find_n <= 0) return;
+  S.find_cur = (i % S.find_n + S.find_n) % S.find_n;
+  if (S.art.doc) S.art.doc->hl_cur = S.find_cur;
+  S.scroll[WP_ARTICLE].y = FM_MAX(0, find_y(S.find_cur) - S.art_view_h * 0.3f);
+  S.scroll[WP_ARTICLE].vel = 0;
+  ui_redraw();
+}
+
+/* The query changed: every match again, then the first one below the view. */
+static void find_run(void) {
+  fm_strlcpy(S.find_ran, S.find_q, sizeof S.find_ran);
+  fm_free(S.find_blk);
+  S.find_blk = NULL;
+  S.find_n = 0;
+  S.find_cur = -1;
+  size_t qn = strlen(S.find_q);
+  if (S.art.doc) {
+    S.find_n = doc_find(S.art.doc, qn ? S.find_q : NULL);
+  } else if (qn) {
+    int cap = 0;
+    for (int b = 0; b < S.art.nb; b++) {
+      int c = count_in(S.art.b[b].s, S.find_q, qn);
+      for (int k = 0; k < c; k++) {
+        if (S.find_n == cap) {
+          cap = cap ? cap * 2 : 64;
+          S.find_blk = (int *)fm_realloc(S.find_blk, (size_t)cap * sizeof *S.find_blk);
+        }
+        S.find_blk[S.find_n++] = b;
+      }
+    }
+  }
+  if (!S.find_n) return;
+  float at = S.scroll[WP_ARTICLE].y + S.art_view_h * 0.3f - DP(4);
+  int first = 0;
+  while (first < S.find_n && find_y(first) < at) first++;
+  find_show(first < S.find_n ? first : 0);
+}
+
+static void find_close(void) {
+  S.find_open = false;
+  S.find_q[0] = S.find_ran[0] = 0;
+  if (S.art.doc) doc_find(S.art.doc, NULL);
+  fm_free(S.find_blk);
+  S.find_blk = NULL;
+  S.find_n = 0;
+  ui_focus(0);
+  ui_redraw();
+}
+
+static void find_bar(FmRect r) {
+  float bh = DP(ui.touch_mode ? 52 : 46), w = FM_MIN(r.w - DP(16), DP(560));
+  FmRect c = { r.x + (r.w - w) * 0.5f, r.y + r.h - bh - DP(10), w, bh };
+  gfx_shadow(c, DP(12), DP(12), col_alpha(T.shadow, 0.8f));
+  gfx_rrect(c, DP(12), T.surface2);
+  gfx_rrect_line(c, DP(12), DP(1), T.border);
+  FmRect in = rect_inset2(c, DP(8), DP(6));
+  float bs = in.h;
+  u32 base = ui_id("wk.find");
+  FmRect bx = rect_cut_right(&in, bs);
+  if (ui_icon_btn(ui_idn(base, 1), bx, IC_CLOSE, T.text2, "Close (Esc)")) { find_close(); return; }
+  bx = rect_cut_right(&in, bs);
+  if (ui_icon_btn(ui_idn(base, 2), bx, IC_CHEVRON_DOWN, T.text, "Next (Enter, F3)")) find_show(S.find_cur + 1);
+  bx = rect_cut_right(&in, bs);
+  if (ui_icon_btn(ui_idn(base, 3), bx, IC_CHEVRON_UP, T.text, "Previous (Shift+F3)")) find_show(S.find_cur - 1);
+  char cnt[40];
+  if (!S.find_q[0]) cnt[0] = 0;
+  else if (!S.find_n) fm_strlcpy(cnt, "No match", sizeof cnt);
+  else fm_snprintf(cnt, sizeof cnt, "%d of %d", S.find_cur + 1, S.find_n);
+  float cw = font_width(FONT_REGULAR, ui.m.font_small, cnt, -1) + DP(12);
+  FmRect cr = rect_cut_right(&in, cw);
+  font_draw(FONT_REGULAR, ui.m.font_small, cr.x + DP(4), cr.y + (cr.h - font_line_h(ui.m.font_small)) * 0.5f, cnt, -1,
+            S.find_q[0] && !S.find_n ? T.warn : T.text2);
+  FmRect ic = rect_center(rect_cut_left(&in, DP(28)), DP(16), DP(16));
+  icon_draw(IC_SEARCH, ic, T.text2);
+  u32 fid = ui_idn(base, 4);
+  if (S.find_focus) { ui_focus(fid); S.find_focus = false; }
+  int res = ui_textfield(fid, in, S.find_q, sizeof S.find_q, "Find in page", 0);
+  if (strcmp(S.find_q, S.find_ran)) find_run();
+  if (res & UI_TF_SUBMIT) { find_show(S.find_cur + 1); ui_focus(fid); }
+  if (ui_key(SDLK_F3, KMOD_SHIFT)) find_show(S.find_cur - 1);
+  else if (ui_key(SDLK_F3, 0)) find_show(S.find_cur + 1);
+}
+
 static void page_article(FmRect r) {
   if (S.t_art || !S.art_ok) {
     bool book = S.t_art && kSrc[S.t_art->src].kind == SK_GUTEN;
@@ -1353,9 +1614,16 @@ static void page_article(FmRect r) {
   FmScroll *sc = &S.scroll[WP_ARTICLE];
   float col = FM_MIN(r.w - DP(32), DP(780));
   float x = r.x + (r.w - col) * 0.5f;
-  layout(col);
+  FmDoc *doc = S.art.doc;
+  S.art_view_h = r.h;
+  if (doc) {
+    S.lay_total = doc_layout(doc, col, txt());
+  } else {
+    layout(col);
+  }
   float lead_h = 0, ar = 1.5f;
-  if (S.art.lead[0]) {
+  /* a page from HTML shows its own pictures; a book its cover first */
+  if (S.art.lead[0] && (!doc || kSrc[S.art_src].kind == SK_GUTEN)) {
     ar = S.art.lead_w > 0 && S.art.lead_h > 0 ? (float)S.art.lead_w / (float)S.art.lead_h : kSrc[S.art_src].kind == SK_GUTEN ? 0.66f : 1.5f;
     lead_h = FM_MIN(col / ar, r.h * 0.5f);
   }
@@ -1378,7 +1646,13 @@ static void page_article(FmRect r) {
   if (desc_h > 0) font_draw_wrap(FONT_REGULAR, txt(), x, y, col, S.art.desc, T.text2, true);
   y += desc_h + DP(18);
   S.lay_top = y + sc->y - r.y;              /* where the first block starts, scroll 0 */
-  for (int i = 0; i < S.art.nb; i++) {
+  if (doc) {
+    DocHit hit = doc_draw(doc, x, y, r, ui_id("wk.doc"), doc_thumb);
+    y += doc->total;
+    if (hit.link >= 0 && hit.link < doc->nlinks) open_doc_link(doc->links[hit.link]);
+    if (hit.img >= 0 && hit.img < doc->nimgs) open_doc_image(&doc->imgs[hit.img]);
+  }
+  for (int i = 0; i < (doc ? 0 : S.art.nb); i++) {
     float h = S.bh[i];
     if (y + h >= r.y && y <= r.y + r.h) {
       const WkBlock *b = &S.art.b[i];
@@ -1416,6 +1690,7 @@ static void page_article(FmRect r) {
   }
   gfx_clip_pop();
   ui_scrollbar(sc, r, content);
+  if (S.find_open) find_bar(r);
   if (ui_input_ok() && !ui.focus && !ui_menu_is_open()) {
     if (ui_key(SDLK_EQUALS, KMOD_CTRL) || ui_key(SDLK_PLUS, KMOD_CTRL)) { S.zoom = FM_MIN(1.6f, S.zoom + 0.1f); save_file(); }
     if (ui_key(SDLK_MINUS, KMOD_CTRL)) { S.zoom = FM_MAX(0.8f, S.zoom - 0.1f); save_file(); }
@@ -1425,8 +1700,47 @@ static void page_article(FmRect r) {
   }
 }
 
+/* Contents of an HTML page: its headings (levels 1..4). */
+static void page_toc_doc(FmRect r, FmDoc *d) {
+  FmScroll *sc = &S.scroll[WP_TOC];
+  float col = FM_MIN(r.w - DP(16), DP(700)), x = r.x + (r.w - col) * 0.5f, rh = DP(ui.touch_mode ? 48 : 40);
+  int n = 0;
+  for (int i = 0; i < d->nb; i++) n += d->b[i].kind == DB_H && d->b[i].level <= 4;
+  float content = (n + 1) * rh + DP(40);
+  ui_scroll(sc, ui_id("wk.toc"), r, content);
+  gfx_clip_push(r);
+  float y = r.y + DP(8) - sc->y;
+  u32 base = ui_id("wk.toc.row");
+  int lv0 = 6;
+  for (int i = 0; i < d->nb; i++)
+    if (d->b[i].kind == DB_H) lv0 = FM_MIN(lv0, d->b[i].level);
+  for (int i = -1; i < d->nb; i++) {
+    if (i >= 0 && (d->b[i].kind != DB_H || d->b[i].level > 4)) continue;
+    FmRect c = { x, y, col, rh };
+    y += rh;
+    if (!gfx_visible(c)) continue;
+    char label[200];
+    if (i < 0) fm_strlcpy(label, "(Top)", sizeof label);
+    else doc_block_text(d, i, label, sizeof label);
+    int lv = i < 0 ? lv0 : d->b[i].level;
+    float indent = DP(22) * FM_MAX(0, lv - lv0);
+    int f = ui_hit(ui_idn(base, (u32)(i + 1)), c);
+    if (f & UI_HOVER) gfx_rrect(c, DP(8), T.surface2);
+    font_draw_ellipsis(lv == lv0 ? FONT_BOLD : FONT_REGULAR, ui.m.font, x + DP(10) + indent, c.y + (rh - font_line_h(ui.m.font)) * 0.5f,
+                       label, col - DP(20) - indent, T.text);
+    if (f & UI_CLICK) {
+      S.scroll[WP_ARTICLE].y = i < 0 ? 0 : S.lay_top + d->b[i].y - DP(8);
+      S.scroll[WP_ARTICLE].vel = 0;
+      go(WP_ARTICLE);
+    }
+  }
+  gfx_clip_pop();
+  ui_scrollbar(sc, r, content);
+}
+
 static void page_toc(FmRect r) {
   if (!S.art_ok) { go(WP_ARTICLE); return; }
+  if (S.art.doc) { page_toc_doc(r, S.art.doc); return; }
   FmScroll *sc = &S.scroll[WP_TOC];
   float col = FM_MIN(r.w - DP(16), DP(700)), x = r.x + (r.w - col) * 0.5f, rh = DP(ui.touch_mode ? 48 : 40);
   int n = 0;
@@ -1768,15 +2082,29 @@ void wiki_frame(FmRect area) {
   if ((S.t_image || S.t_play || S.t_random) && !ui_menu_is_open()) ui_animate();
   if (ui_input_ok() && !ui_menu_is_open()) {
     if (ui_key(SDLK_ESCAPE, 0) || ui_key(SDLK_AC_BACK, 0) || ui_key(SDLK_BACKSPACE, KMOD_ALT)) {
-      if (ui.focus) ui_focus(0);
+      if (S.find_open && S.page == WP_ARTICLE) find_close();
+      else if (ui.focus) ui_focus(0);
       else go_back();
     }
-    if (ui_key(SDLK_f, KMOD_CTRL) || ui_key(SDLK_l, KMOD_CTRL)) { S.focus_search = true; go(WP_HOME); }
+    if (ui_key(SDLK_f, KMOD_CTRL) && S.page == WP_ARTICLE && S.art_ok) {
+      S.find_open = S.find_focus = true;
+      S.find_ran[0] = 1;
+    } else if (ui_key(SDLK_f, KMOD_CTRL) || ui_key(SDLK_l, KMOD_CTRL)) {
+      S.focus_search = true;
+      go(WP_HOME);
+    }
   }
 }
 
 void wiki_demo_page(const char *page) {
   load_file();
+  if (page && !strncmp(page, "find:", 5)) {            /* --demo-wiki-page find:WORD */
+    S.find_open = true;
+    fm_strlcpy(S.find_q, page + 5, sizeof S.find_q);
+    S.find_ran[0] = 1;
+    S.demo_page = -1;
+    return;
+  }
   S.demo_page = !page ? -1 : !strcmp(page, "media") ? WP_MEDIA : !strcmp(page, "toc") ? WP_TOC
               : !strcmp(page, "langs") ? WP_LANGS : !strcmp(page, "related") ? WP_RELATED : -1;
 }
@@ -1810,6 +2138,7 @@ void wiki_shutdown(void) {
   wk_list_free(&S.rel);
   wk_list_free(&S.links);
   fm_free(S.bh);
+  fm_free(S.find_blk);
   fm_free(S.saved);
   fm_free(S.hist);
   memset(&S, 0, sizeof S);

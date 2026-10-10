@@ -294,14 +294,89 @@ static void header_field(const char *text, const char *name, char *out, size_t c
   }
 }
 
+/* The HTML edition (pictures, the book's own contents with links): its
+** <title> is "The Project Gutenberg eBook of <title>, by <author>". */
+static bool guten_html(const char *id, WkArticle *out, volatile int *cancel) {
+  char url[300], base[200];
+  fm_snprintf(base, sizeof base, "https://www.gutenberg.org/cache/epub/%s/", id);
+  fm_snprintf(url, sizeof url, "%spg%s-images.html", base, id);
+  FmNetResp r;
+  memset(&r, 0, sizeof r);
+  FmErr e = net_get(url, NULL, RD_MAX_REPLY, &r, cancel);
+  if (e != FM_OK || r.status != 200 || !r.data) { net_resp_free(&r); return false; }
+  const char *h = (const char *)r.data;
+  const char *t0 = strstr(h, "<title>");
+  if (t0) {
+    t0 += 7;
+    const char *t1 = strstr(t0, "</title>");
+    char t[400];
+    size_t n = t1 ? FM_MIN((size_t)(t1 - t0), sizeof t - 1) : 0;
+    memcpy(t, t0, n);
+    t[n] = 0;
+    for (char *c = t; *c; c++)
+      if (*c == '\n' || *c == '\r') *c = ' ';
+    char *s = t;
+    while (*s == ' ') s++;
+    if (!strncmp(s, "The Project Gutenberg eBook of ", 31)) s += 31;
+    char *by = strstr(s, ", by ");
+    if (by) {
+      *by = 0;
+      fm_strlcpy(out->desc, by + 5, sizeof out->desc);
+    }
+    fm_strlcpy(out->title, s, sizeof out->title);
+    size_t tl = strlen(out->title);
+    while (tl && out->title[tl - 1] == ' ') out->title[--tl] = 0;
+  }
+  /* <meta name="dc.title" content="..."> and dc.creator ("Dale, J. B., Mrs., 1853-1921") */
+  static const char *const kMeta[] = { "<meta name=\"dc.title\" content=\"", "<meta name=\"dc.creator\" content=\"" };
+  for (int k = 0; k < 2; k++) {
+    const char *m = strstr(h, kMeta[k]);
+    if (!m) continue;
+    m += strlen(kMeta[k]);
+    const char *q = strchr(m, '"');
+    if (!q) continue;
+    char v[300];
+    size_t n = FM_MIN((size_t)(q - m), sizeof v - 1);
+    memcpy(v, m, n);
+    v[n] = 0;
+    if (k == 0) { fm_strlcpy(out->title, v, sizeof out->title); continue; }
+    /* "Last, First, 1853-1921" -> "First Last" */
+    char *c1 = strchr(v, ',');
+    if (c1) {
+      *c1 = 0;
+      char *first = c1 + 1;
+      while (*first == ' ') first++;
+      char *c2 = strchr(first, ',');
+      if (c2) *c2 = 0;
+      fm_snprintf(out->desc, sizeof out->desc, "%s %s", first, v);
+    } else {
+      fm_strlcpy(out->desc, v, sizeof out->desc);
+    }
+  }
+  out->doc = (FmDoc *)fm_calloc(1, sizeof *out->doc);
+  doc_parse(h, r.len, base, DOC_BOOK, out->doc);
+  net_resp_free(&r);
+  if (out->doc->nb < 3) { doc_free(out->doc); fm_free(out->doc); out->doc = NULL; return false; }
+  return true;
+}
+
 /* Straight from gutenberg.org (Gutendex, the catalog, takes ~20 s and is
-** not needed: the text's address follows from the number, and its header
-** names the title and the author). */
+** not needed: the files' addresses follow from the number, and the book
+** names its title and author). The HTML edition first, else the text. */
 FmErr rd_guten_book(const char *id, WkArticle *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
   if (!id[0] || strlen(id) > 8) { fm_strlcpy(out->error, "Not a Gutenberg book", sizeof out->error); return FM_ERR_FORMAT; }
   for (const char *c = id; *c; c++)
     if (*c < '0' || *c > '9') { fm_strlcpy(out->error, "Not a Gutenberg book", sizeof out->error); return FM_ERR_FORMAT; }
+  fm_strlcpy(out->id, id, sizeof out->id);
+  fm_snprintf(out->lead, sizeof out->lead, "https://www.gutenberg.org/cache/epub/%s/pg%s.cover.medium.jpg", id, id);
+  fm_snprintf(out->url, sizeof out->url, "https://www.gutenberg.org/ebooks/%s", id);
+  if (guten_html(id, out, cancel)) {
+    if (!out->title[0]) fm_snprintf(out->title, sizeof out->title, "Book %s", id);
+    out->text = fm_strdup("");
+    return FM_OK;
+  }
+  if (cancel && *cancel) return FM_ERR_CANCEL;
   char url[300];
   /* the https file itself (ebooks/<id>.txt.utf-8 redirects to plain http) */
   fm_snprintf(url, sizeof url, "https://www.gutenberg.org/cache/epub/%s/pg%s.txt", id, id);
