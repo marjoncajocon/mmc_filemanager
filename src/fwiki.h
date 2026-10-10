@@ -1,4 +1,5 @@
-/* fwiki.h -- Wikipedia: read the encyclopedia inside the app.
+/* fwiki.h -- Online reading: Wikipedia and its sister wikis, free books,
+** plants and animals, fruits and a dictionary, read inside the app.
 **
 ** A full-window view like the online views: today's featured content,
 ** search, articles as text in sections (contents, text size), the article's
@@ -24,11 +25,15 @@ void wiki_pump(void);                  /* every frame: finished requests */
 void wiki_shutdown(void);
 /* --demo-wiki-page: once the article is open, go to "media", "toc", "langs" or "related". */
 void wiki_demo_page(const char *page);
+/* --demo-wiki-src: the source on screen ("wikipedia", "gutenberg", "inaturalist", ...). */
+void wiki_demo_source(const char *key);
 
-/* Saved articles, newest first (the home screen's Favorites strip). */
+/* Saved pages, newest first (the home screen's Favorites strip). key is
+** "source|lang|id|title"; desc names the source. */
 int  wiki_saved_count(void);
-bool wiki_saved_get(int i, char *lang, size_t lcap, char *title, size_t tcap, char *desc, size_t dcap, char *thumb,
+bool wiki_saved_get(int i, char *key, size_t kcap, char *title, size_t tcap, char *desc, size_t dcap, char *thumb,
                     size_t thcap);
-bool wiki_saved_has(const char *lang, const char *title);
+bool wiki_saved_has(const char *key);
+bool wiki_open_saved(const char *key);
 
 #endif

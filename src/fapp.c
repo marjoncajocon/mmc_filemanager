@@ -2875,7 +2875,7 @@ static const char *arg_positional(void) {
                                       "--demo-online", "--demo-online-state",
                                       "--demo-photos", "--demo-photos-state" /* photos */,
                                       "--demo-audio-online", "--demo-audio-online-state" /* audio */,
-                                      "--demo-cloud" /* cloud */, "--demo-wiki", "--demo-wiki-page" /* wiki */ };
+                                      "--demo-cloud" /* cloud */, "--demo-wiki", "--demo-wiki-page", "--demo-wiki-src" /* wiki */ };
   for (int i = 1; i < app.argc; i++) {
     const char *a = app.argv[i];
     bool val = false;
@@ -3140,6 +3140,7 @@ void app_init(void) {
   /* wiki: --demo-wiki TITLE [--demo-wiki-page media|toc|langs|related|home] */
   const char *dwk = arg_value("--demo-wiki");
   if (dwk) {
+    wiki_demo_source(arg_value("--demo-wiki-src"));
     open_wiki();
     if (strcmp(dwk, "home")) wiki_open_article("", dwk);
     wiki_demo_page(arg_value("--demo-wiki-page"));

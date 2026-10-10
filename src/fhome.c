@@ -165,14 +165,7 @@ static bool still_fav(const HfLog *e) {
     case FK_FILE: return lib_is_fav(e->key);
     case FK_DIR: return conf_is_bookmark(e->key);
     case FK_AUDIO: return aonline_fav_has(e->key);
-    case FK_WIKI: {
-      char lang[16];
-      const char *bar = strchr(e->key, '|');
-      if (!bar || (size_t)(bar - e->key) >= sizeof lang) return false;
-      memcpy(lang, e->key, (size_t)(bar - e->key));
-      lang[bar - e->key] = 0;
-      return wiki_saved_has(lang, bar + 1);
-    }
+    case FK_WIKI: return wiki_saved_has(e->key);
     case FK_PHOTO: {
       char src[64];
       const char *bar = strchr(e->key, '|');
@@ -232,16 +225,14 @@ static void collect(void) {
     fm_strlcpy(f->thumb, ai.art, sizeof f->thumb);
     f->icon = ai.kind == AITEM_STATION ? IC_RADIO : ai.kind == AITEM_PODCAST ? IC_PODCAST : IC_MUSIC;
   }
-  /* saved Wikipedia articles */
+  /* saved Online reading pages (Wikipedia, books, species...) */
   for (int i = 0; i < wiki_saved_count() && i < HF_SCAN; i++) {
-    char wl[16], wt[256], wd[256], wth[512];
-    if (!wiki_saved_get(i, wl, sizeof wl, wt, sizeof wt, wd, sizeof wd, wth, sizeof wth)) continue;
-    fm_snprintf(key, sizeof key, "%s|%s", wl, wt);
+    char wt[256], wd[256], wth[512];
+    if (!wiki_saved_get(i, key, sizeof key, wt, sizeof wt, wd, sizeof wd, wth, sizeof wth)) continue;
     HFav *f = cand_add(FK_WIKI, key);
     if (!f) break;
     fm_strlcpy(f->title, wt, sizeof f->title);
-    if (wd[0]) fm_snprintf(f->sub, sizeof f->sub, "Wikipedia \xC2\xB7 %s", wd);
-    else fm_strlcpy(f->sub, "Wikipedia", sizeof f->sub);
+    fm_strlcpy(f->sub, wd, sizeof f->sub);
     fm_strlcpy(f->thumb, wth, sizeof f->thumb);
     f->icon = IC_TEXT;
   }
@@ -318,15 +309,9 @@ static int fav_open(const HFav *f) {
     case FK_AUDIO:
       aonline_fav_open(c.key);
       return HOME_NONE;
-    case FK_WIKI: {
-      char lang[16];
-      const char *bar = strchr(c.key, '|');
-      if (!bar || (size_t)(bar - c.key) >= sizeof lang) return HOME_NONE;
-      memcpy(lang, c.key, (size_t)(bar - c.key));
-      lang[bar - c.key] = 0;
-      wiki_open_article(lang, bar + 1);
+    case FK_WIKI:
+      wiki_open_saved(c.key);
       return HOME_NONE;
-    }
     case FK_PHOTO: {
       char src[64];
       const char *bar = strchr(c.key, '|');

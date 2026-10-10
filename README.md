@@ -138,18 +138,19 @@ Openverse, Wikimedia Commons, NASA Images and the Art Institute of Chicago need 
 
 Everything streams, with nothing downloaded before playback. Downloads are optional.
 
-### Online reading (Wikipedia)
+### Online reading
 
-- "Online reading" (home tile 7, the sidebar's Places, or the places menu) holds the reader sources; the first is Wikipedia, through its public APIs, no key:
-  - **Today**: the featured article, most read, picture of the day, on this day.
-  - **Search** with thumbnails and short descriptions; endless results.
-  - **Articles** as clean text in sections: lead picture, contents (jump to a section), bigger/smaller text (Ctrl +/-), Page Up/Down.
-  - **Pictures, videos and sounds** of an article: pictures open in the image viewer, videos in the video player (VP9/Opus WebM, up to 480p), sounds in the music player (MP3). Videos and sounds are downloaded whole first, with progress (Wikimedia refuses the many range requests of streaming).
-  - **The same article in other languages**, related articles, every article it links to, random articles.
-  - **Saved articles** (the star; they also show in the home screen's Favorites) and **history**.
-  - **Language**: English, Tagalog, Cebuano, Simple English, Ilokano, Waray, Kapampangan, Bikol and more (⋮ > Language).
+- Home tile 7, the sidebar's Places, or the places menu. Sources, as chips under the search field (all through public APIs, no key):
+  - **Wikipedia**: today's featured article, most read, picture of the day, on this day; search; articles in sections with contents; pictures, videos and sounds; other languages; related pages and links; random.
+  - **Dictionary** (dictionaryapi.dev): English meanings, examples, similar and opposite words, recorded pronunciations.
+  - **Wiktionary, Wikivoyage, Wikibooks, Wikisource, Wikispecies**: the same reader on Wikipedia's sister sites (words in every language, travel guides, textbooks and cookbooks, free texts, the classification of living things).
+  - **Free books** (Project Gutenberg): popular books (in the chosen language), search by title or author; a book opens whole, in chapters, from gutenberg.org.
+  - **Plants & animals** (iNaturalist): the most observed species of a group (plants, birds, mammals, insects, fish, reptiles, amphibians, fungi, mollusks, spiders), search by name; a species shows its photos, a summary, classification, conservation status and local names (in the chosen language), with "Read on Wikipedia".
+  - **Fruits** (Fruityvice): 49 fruits with nutrition per 100 g and classification.
+- Reader: bigger/smaller text (Ctrl +/-), Page Up/Down, contents; pictures open in the image viewer, videos in the video player (VP9/Opus WebM, up to 480p), sounds in the music player, all downloaded first with progress.
+- **Saved** (the star; also in the home screen's Favorites) and **history** across every source; **language**: English, Tagalog, Cebuano, Simple English, Ilokano, Waray, Kapampangan, Bikol and more.
 - Wikimedia allows an unidentified app only 10 requests a minute (thumbnails included); with a contact (an email or a web page, ⋮ > Wikimedia contact, sent only to Wikimedia in an `Api-User-Agent` header) it allows 200.
-- Not shown: infoboxes, tables and formulas (Open in browser has them); links inside the text (the article's links are listed under Related).
+- Not shown: infoboxes, tables and formulas (Open in browser has them); links inside the text (listed under Related). Gutenberg's catalog is slow (lists can take ~20 s); a long book is a 1-2 MB download.
 
 ### Cloud storage
 

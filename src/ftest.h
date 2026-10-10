@@ -33,6 +33,7 @@ int test_generic(const char *tmp);    /* ftest_generic.c: native "Any site" page
 int test_online_ui(const char *tmp);  /* ftest_online.c: online videos view: formatting, recent searches */
 int test_psrc(const char *tmp);       /* ftest_psrc.c: online photo sources (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
 int test_wiki(const char *tmp);       /* ftest_wiki.c: Wikipedia (MMCFM_WIKI_TEST=<article> for the network) */
+int test_reading(const char *tmp);    /* ftest_wiki.c: books, species, fruits, dictionary, the sister wikis (MMCFM_READ_TEST=1) */
 int test_photo_ui(const char *tmp);   /* ftest_photo.c: online photos view: rows, albums file, recent searches */
 int test_asrc(const char *tmp);       /* ftest_asrc.c: online audio sources, XML reader (MMCFM_NET_TEST=1, MMCFM_*_KEY) */
 int test_aonline_ui(const char *tmp); /* ftest_aonline.c: online audio view: item lines, library file (MMCFM_AONLINE_PLAY) */

@@ -118,6 +118,7 @@ static const TestArea kAreas[] = {
   { "dav", test_dav },
   { "mega", test_mega },
   { "wiki", test_wiki },
+  { "reading", test_reading },
 };
 
 int test_run_all(void) {

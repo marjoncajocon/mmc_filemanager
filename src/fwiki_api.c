@@ -1,7 +1,7 @@
 /* fwiki_api.c -- Wikipedia's public APIs (see fwiki_int.h).
 **
 ** Checked from this PC (2026-10-10), all with our plain User-Agent:
-**   - Action API  https://<lang>.wikipedia.org/w/api.php (format=json, formatversion=2):
+**   - Action API  https://<lang>.wikipedia.org/w/api.php (and the sister sites: any host) (format=json, formatversion=2):
 **       search    generator=search + prop=pageimages|description (thumbnails, short text)
 **       article   prop=extracts&explaintext&exsectionformat=wiki: the whole article as
 **                 plain text, headings as "== Name ==" lines; + pageimages (lead picture),
@@ -55,6 +55,23 @@ static void limited(char *err, size_t cap) {
              cap);
 }
 
+/* A Wikimedia site this reader talks to: <lang>.wikipedia.org and its
+** sister projects, species.wikimedia.org. */
+bool wk_host_ok(const char *host) {
+  static const char *const kDom[] = { ".wikipedia.org", ".wiktionary.org", ".wikivoyage.org", ".wikibooks.org",
+                                      ".wikisource.org", ".wikiquote.org" };
+  if (!host || !strcmp(host, "species.wikimedia.org")) return host != NULL;
+  size_t n = strlen(host);
+  if (n < 6 || n > 60) return false;
+  for (size_t i = 0; i < n; i++)
+    if (!((host[i] >= 'a' && host[i] <= 'z') || host[i] == '-' || host[i] == '.')) return false;
+  for (int k = 0; k < FM_COUNT(kDom); k++) {
+    size_t d = strlen(kDom[k]);
+    if (n > d + 1 && !strcmp(host + n - d, kDom[k]) && !memchr(host, '.', n - d)) return true;   /* one label before */
+  }
+  return false;
+}
+
 bool wk_lang_ok(const char *lang) {
   size_t n = lang ? strlen(lang) : 0;
   if (n < 2 || n >= WK_LANG) return false;
@@ -94,8 +111,8 @@ static FmErr get_json(const char *url, FmJson *j, char *err, size_t cap, volatil
   return e;
 }
 
-static void api_url(char *out, size_t cap, const char *lang, const char *params) {
-  fm_snprintf(out, cap, "https://%s.wikipedia.org/w/api.php?format=json&formatversion=2&%s", lang, params);
+static void api_url(char *out, size_t cap, const char *host, const char *params) {
+  fm_snprintf(out, cap, "https://%s/w/api.php?format=json&formatversion=2&%s", host, params);
 }
 
 /* A title for a REST path: spaces as underscores, then percent-encoded. */
@@ -168,7 +185,7 @@ FmErr wk_parse_search(const char *json, size_t len, WkList *out) {
 
 static FmErr gen_search(const char *lang, const char *srsearch, int offset, int limit, WkList *out,
                         volatile int *cancel) {
-  if (!wk_lang_ok(lang)) { fm_strlcpy(out->error, "Not a Wikipedia language", sizeof out->error); return FM_ERR_FORMAT; }
+  if (!wk_host_ok(lang)) { fm_strlcpy(out->error, "Not a Wikimedia site", sizeof out->error); return FM_ERR_FORMAT; }
   char qe[1200], p[1600], url[2000];
   net_urlencode(srsearch, qe, sizeof qe);
   fm_snprintf(p, sizeof p,
@@ -216,7 +233,7 @@ FmErr wk_related(const char *lang, const char *title, WkList *out, volatile int 
 FmErr wk_links(const char *lang, const char *title, WkList *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
   out->next = -1;
-  if (!wk_lang_ok(lang)) return FM_ERR_FORMAT;
+  if (!wk_host_ok(lang)) return FM_ERR_FORMAT;
   char te[900], p[1200], url[1600];
   net_urlencode(title, te, sizeof te);
   fm_snprintf(p, sizeof p, "action=query&prop=links&titles=%s&pllimit=500&plnamespace=0&redirects=1", te);
@@ -233,7 +250,7 @@ FmErr wk_links(const char *lang, const char *title, WkList *out, volatile int *c
 
 FmErr wk_random(const char *lang, char *title, size_t cap, volatile int *cancel) {
   title[0] = 0;
-  if (!wk_lang_ok(lang)) return FM_ERR_FORMAT;
+  if (!wk_host_ok(lang)) return FM_ERR_FORMAT;
   char url[400], err[200];
   api_url(url, sizeof url, lang, "action=query&list=random&rnnamespace=0&rnlimit=1");
   FmJson j;
@@ -299,14 +316,14 @@ FmErr wk_parse_feed(const char *json, size_t len, WkFeed *out) {
 
 FmErr wk_feed(const char *lang, WkFeed *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
-  if (!wk_lang_ok(lang)) return FM_ERR_FORMAT;
+  if (!wk_host_ok(lang)) return FM_ERR_FORMAT;
   time_t now = time(NULL);
   struct tm g;
   const struct tm *gp = gmtime(&now);                /* tcc's msvcrt has no gmtime_s */
   if (!gp) return FM_ERR_IO;
   g = *gp;
   char url[300];
-  fm_snprintf(url, sizeof url, "https://%s.wikipedia.org/api/rest_v1/feed/featured/%04d/%02d/%02d", lang,
+  fm_snprintf(url, sizeof url, "https://%s/api/rest_v1/feed/featured/%04d/%02d/%02d", lang,
               g.tm_year + 1900, g.tm_mon + 1, g.tm_mday);
   FmNetResp r;
   memset(&r, 0, sizeof r);
@@ -359,7 +376,7 @@ static char *trim(char *s) {
 }
 
 /* Splits the plain text into headings and paragraphs (pointers into a->text). */
-static void split_blocks(WkArticle *a) {
+void wk_blocks_from_lines(WkArticle *a) {
   int cap = 64;
   a->b = (WkBlock *)fm_alloc((size_t)cap * sizeof *a->b);
   a->nb = 0;
@@ -419,7 +436,7 @@ FmErr wk_parse_article(const char *json, size_t len, const char *lang, WkArticle
     json_free(&j);
     return FM_ERR_NOT_FOUND;
   }
-  fm_strlcpy(out->lang, lang, sizeof out->lang);
+  FM_UNUSED(lang);
   fm_strlcpy(out->title, json_str(json_get(p, "title"), ""), sizeof out->title);
   fm_strlcpy(out->desc, json_str(json_get(p, "description"), ""), sizeof out->desc);
   fm_strlcpy(out->url, json_str(json_get(p, "fullurl"), ""), sizeof out->url);
@@ -431,7 +448,7 @@ FmErr wk_parse_article(const char *json, size_t len, const char *lang, WkArticle
   out->text = fm_strdup(ex);
   json_free(&j);
   cut_tex(out->text);
-  split_blocks(out);
+  wk_blocks_from_lines(out);
   if (!out->nb) {
     fm_strlcpy(out->error, "This article has no text (a list or a disambiguation page?): try Open in browser",
                sizeof out->error);
@@ -442,7 +459,7 @@ FmErr wk_parse_article(const char *json, size_t len, const char *lang, WkArticle
 
 FmErr wk_article(const char *lang, const char *title, WkArticle *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
-  if (!wk_lang_ok(lang)) { fm_strlcpy(out->error, "Not a Wikipedia language", sizeof out->error); return FM_ERR_FORMAT; }
+  if (!wk_host_ok(lang)) { fm_strlcpy(out->error, "Not a Wikimedia site", sizeof out->error); return FM_ERR_FORMAT; }
   char te[900], p[1400], url[1800];
   net_urlencode(title, te, sizeof te);
   fm_snprintf(p, sizeof p,
@@ -508,16 +525,17 @@ FmErr wk_parse_media(const char *json, size_t len, WkMediaList *out) {
 
 FmErr wk_media(const char *lang, const char *title, WkMediaList *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
-  if (!wk_lang_ok(lang)) return FM_ERR_FORMAT;
+  if (!wk_host_ok(lang)) return FM_ERR_FORMAT;
   char te[900], url[1200];
   rest_title(title, te, sizeof te);
-  fm_snprintf(url, sizeof url, "https://%s.wikipedia.org/api/rest_v1/page/media-list/%s", lang, te);
+  fm_snprintf(url, sizeof url, "https://%s/api/rest_v1/page/media-list/%s", lang, te);
   FmNetResp r;
   memset(&r, 0, sizeof r);
   FmErr e = net_get(url, wk_headers(), WK_MAX_REPLY, &r, cancel);
   if (e != FM_OK || r.status != 200 || !r.data) {
     if (e != FM_OK) fm_snprintf(out->error, sizeof out->error, "Network error: %s", r.error[0] ? r.error : fm_err_str(e));
     else if (r.status == 429) limited(out->error, sizeof out->error);
+    else if (r.status == 404) fm_strlcpy(out->error, "This site keeps no list of pictures for its pages", sizeof out->error);
     else fm_snprintf(out->error, sizeof out->error, "Wikipedia answered %d", r.status);
     net_resp_free(&r);
     return e != FM_OK ? e : FM_ERR_IO;
@@ -579,7 +597,7 @@ FmErr wk_parse_file(const char *json, size_t len, int type, WkFile *out) {
 
 FmErr wk_file(const char *lang, const char *file, int type, WkFile *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
-  if (!wk_lang_ok(lang)) return FM_ERR_FORMAT;
+  if (!wk_host_ok(lang)) return FM_ERR_FORMAT;
   char fe[900], p[1300], url[1700];
   net_urlencode(file, fe, sizeof fe);
   if (type == WM_IMAGE)
@@ -612,7 +630,7 @@ void wk_langs_free(WkLangs *l) {
 
 FmErr wk_langs(const char *lang, const char *title, WkLangs *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
-  if (!wk_lang_ok(lang)) return FM_ERR_FORMAT;
+  if (!wk_host_ok(lang)) return FM_ERR_FORMAT;
   char te[900], p[1200], url[1600];
   net_urlencode(title, te, sizeof te);
   fm_snprintf(p, sizeof p, "action=query&prop=langlinks&titles=%s&lllimit=500&llprop=autonym&redirects=1", te);
