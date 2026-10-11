@@ -131,7 +131,7 @@ typedef struct WkTask {
   char lang[WK_LANG];
   char host[64];
   char arg[512];              /* query, title, file or URL */
-  char id[64];                /* the source's id */
+  char id[1024];              /* the source's id, or the URL of a picture or sound (WT_PLAY, WT_IMAGE): 64 cut dictionary sound URLs */
   int num;                    /* search page or offset, media type */
   FmErr err;
   char error[256];
@@ -244,7 +244,8 @@ static int task_main(void *u) {
           t->err = net_download(u, wm ? wk_headers() : NULL, t->path, dl_progress, t, &r, &t->cancel);
           if (t->err == FM_OK && r.status != 200) {
             t->err = FM_ERR_IO;
-            fm_snprintf(t->error, sizeof t->error, "The server answered %d", r.status);
+            if (r.status >= 500) fm_snprintf(t->error, sizeof t->error, "The server is not answering right now (%d): try again later", r.status);
+            else fm_snprintf(t->error, sizeof t->error, "The server answered %d", r.status);
             plat_remove_file(t->path);
           }
           net_resp_free(&r);

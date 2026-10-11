@@ -4,6 +4,7 @@
 ** own decoders (fetched at the size the viewers use).
 */
 #include "ftest.h"
+#include "flyrics.h"
 #include "fwiki_int.h"
 #include "fplat.h"
 #include "fnet.h"
@@ -374,9 +375,50 @@ static void rt_live(void) {
 
 static void dt_offline(void);
 
+/* ---- lyrics (flyrics.c): LRCLIB replies and titles ------------------------------------------ */
+
+static const char kLrc[] =
+  "{\"id\":1,\"trackName\":\"Hello\",\"artistName\":\"Adele\",\"instrumental\":false,"
+  "\"plainLyrics\":\"Hello, it's me\\nI was wondering\","
+  "\"syncedLyrics\":\"[ar:Adele]\\n[00:13.50] Hello, it's me\\n[00:19.10] I was wondering\\n[00:05.00]\\n"
+  "[01:00.00][02:00.25] Chorus line\"}";
+
+static void lt_offline(void) {
+  TEST_CHECK(lyrics_parse(kLrc, sizeof kLrc - 1) == LY_SYNCED);
+  double t0 = 0, t1 = 0, t4 = 0;
+  const char *l0 = lyrics_line(0, &t0), *l1 = lyrics_line(1, &t1), *l4 = lyrics_line(4, &t4);
+  /* sorted by time: the empty 0:05 line first, a line with two stamps twice, the [ar:] tag skipped */
+  TEST_CHECK(lyrics_count() == 5 && l0 && !l0[0] && t0 == 5.0 && l1 && !strcmp(l1, "Hello, it's me") && t1 == 13.5);
+  TEST_CHECK(l4 && !strcmp(l4, "Chorus line") && t4 > 120.2 && t4 < 120.3);
+  TEST_CHECK(!strcmp(lyrics_song(), "Adele - Hello"));
+  /* no synced lyrics: the plain ones, without times */
+  static const char kPlain[] = "{\"trackName\":\"X\",\"artistName\":\"Y\",\"plainLyrics\":\"a\\nb\",\"syncedLyrics\":null}";
+  double tp = 0;
+  TEST_CHECK(lyrics_parse(kPlain, sizeof kPlain - 1) == LY_PLAIN && lyrics_count() == 2 && lyrics_line(1, &tp) && tp < 0);
+  static const char kInstr[] = "{\"trackName\":\"X\",\"artistName\":\"Y\",\"instrumental\":true}";
+  TEST_CHECK(lyrics_parse(kInstr, sizeof kInstr - 1) == LY_MISSING);
+  /* titles as videos and files name them */
+  static const char *const kCase[][4] = {
+    { "", "Adele - Hello (Official Music Video)", "Adele", "Hello" },
+    { "AdeleVEVO", "Hello [HD]", "Adele", "Hello" },
+    { "Bruno Mars - Topic", "Uptown Funk (feat. Bruno Mars)", "Bruno Mars", "Uptown Funk" },
+    { "", "Ed Sheeran - Perfect.mp3", "Ed Sheeran", "Perfect" },
+    { "x", "Coldplay - Yellow | Lyrics", "Coldplay", "Yellow" },
+    { "", "Mark Ronson - Uptown Funk ft. Bruno Mars", "Mark Ronson", "Uptown Funk" },
+  };
+  for (int i = 0; i < FM_COUNT(kCase); i++) {
+    char a[200], t[300];
+    lyrics_clean(kCase[i][0], kCase[i][1], a, sizeof a, t, sizeof t);
+    bool ok = !strcmp(a, kCase[i][2]) && !strcmp(t, kCase[i][3]);
+    if (!ok) printf("    lyrics_clean(\"%s\", \"%s\") = \"%s\" / \"%s\"\n", kCase[i][0], kCase[i][1], a, t);
+    TEST_CHECK(ok);
+  }
+}
+
 int test_reading(const char *tmp) {
   FM_UNUSED(tmp);
   int before = g_test_fail;
+  lt_offline();
   rt_offline();
   dt_offline();
   rt_live();

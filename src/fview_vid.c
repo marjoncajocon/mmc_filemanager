@@ -51,6 +51,7 @@
 #include "fvsrc.h"
 #include "fnetstream.h"
 #include "fonline_int.h"
+#include "flyrics.h"
 
 #define QN 3
 #define AUDIO_AHEAD 1.0      /* seconds of decoded audio kept queued */
@@ -130,6 +131,7 @@ static struct {
   int skip_flash;          /* -1 / +1 */
   u64 skip_flash_t;
   bool info_open;
+  bool lyrics;                /* the lyrics over the picture (flyrics.c) */
   u64 vol_shown_until;
   /* visualizer */
   bool viz_on;             /* the callback keeps samples (lock) */
@@ -924,7 +926,7 @@ static void vid_seek_bar(FmRect r) {
   if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
 }
 
-enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ, VM_ASPECT, VM_LOCK, VM_QUALITY, VM_BG, VM_PIP, VM_AR0 = 100,
+enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ, VM_ASPECT, VM_LOCK, VM_QUALITY, VM_BG, VM_PIP, VM_LYRICS, VM_AR0 = 100,
        VM_Q0 = 200 };
 
 /* "VP9 · 1.4 Mb/s", or why it cannot be chosen */
@@ -1620,6 +1622,13 @@ static void vid_view_frame(FmRect area) {
     float is = DP(96);
     icon_draw(IC_MUSIC, rect_center(area, is, is), VIEW_FG2);
   }
+  /* the lyrics (LRCLIB, synced): the line sung and the next, above the controls */
+  if (V.lyrics && ready) {
+    lyrics_want("", V.title, V.info.duration);
+    FmRect lr = area;
+    rect_cut_bottom(&lr, DP(ui.touch_mode ? 150 : 130) * FM_MAX(chrome, 0.35f));
+    lyrics_draw(lr, V.clock, true);
+  }
   /* streams: opening, switching, reconnecting, downloading, buffering */
   if (V.stream && state != VS_ERROR) {
     bool resolving = g_on && g_on->thr;
@@ -1761,6 +1770,7 @@ static void vid_view_frame(FmRect area) {
       { VM_PIP, IC_PIP, "Picture in picture (small window)", "P", ready && V.info.has_video ? 0 : UI_MI_DISABLED },
 #endif
       { VM_QUALITY, IC_SETTINGS, "Quality", NULL, 0 },
+      { VM_LYRICS, V.lyrics ? IC_CHECK : IC_MIC, "Lyrics (sing along)", NULL, ready && V.info.has_audio ? 0 : UI_MI_DISABLED },
       { VM_SHARE, IC_SHARE, "Share", NULL, V.stream ? UI_MI_DISABLED : 0 },
       { VM_OPEN, IC_OPEN_WITH, "Open with system player", NULL, 0 },
       { VM_VIZ, IC_EQUALIZER, "Visualizer settings", NULL, V.info.has_audio ? 0 : UI_MI_DISABLED },
@@ -1818,6 +1828,7 @@ static void vid_view_frame(FmRect area) {
   if (mres >= VM_AR0 && mres < VM_AR0 + AR_COUNT) set_aspect(mres - VM_AR0);
   switch (mres) {
     case VM_INFO: V.info_open = true; break;
+    case VM_LYRICS: V.lyrics = !V.lyrics; break;
     case VM_SHARE: plat_share(V.path); break;
     case VM_OPEN: set_paused(true); open_outside(); break;
     case VM_VIZ: V.viz_panel = true; viz_panel_tab(0); break;

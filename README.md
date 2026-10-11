@@ -56,6 +56,7 @@ Version: 0.1.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party c
   Extraction refuses absolute paths and `..` ("zip slip"). Wrong passwords are asked again.
 - **20 built-in themes** (24 palettes): Graphite, Daylight, Tonal, Nord, Dracula Neon, Solarized Warm, OLED Contrast, Commander, Gallery, Finder Split, X-plore Tree, Frost Layers, Pastel Soft, Phosphor, Brutal Blocks, Aurora Hero, Mono Red, Bento Board, Thumb Zone, Fold Duo. Graphite, Tonal, Solarized and Mono have both dark and light variants. There are 8 accent colours plus each theme's own, and a UI zoom from 0.75x to 2x.
 - **Font**: Hack (monospace, the default) or Poppins for the interface (Settings > Appearance > Font, switches at once); code and plain text are always in Hack.
+- **Data usage** (home screen, top right): what this app downloaded and uploaded today and this month; tap it for every group (online videos, audio, photos, reading, cloud, other) for today, this month and in total, and **Clear usage** (asked twice). Kept per day in `data-usage.txt` in the settings folder. Bodies only (headers and TLS add a few percent), and yt-dlp's own downloads are not counted.
 - **Battery**: nothing is drawn while nothing changes, and a frame is sent to the GPU only when its picture differs from the one on screen (a pointer move that changes nothing costs no GPU work). **Maximum frame rate** (Settings > Appearance): 15 / 30 / **60** (default) / Screen max caps every frame (scrolling, menus, the visualizer, the video player's screen, input), most useful on 90/120 Hz phones; quick taps still register at 15. **Loading animations** (spinners, loading bars, placeholder shimmer, busy rings, picture fade-ins) run at Off / 15 / **30** (default) / 60 frames a second, never above the maximum; they move by the clock, so a lower rate is less smooth but never slower, and they stop asking for frames when off screen or under a dialog.
 - **Custom title bar** (desktop): a borderless window with its own minimize/maximize/close buttons. On macOS they are traffic lights on the left. It supports Aero Snap, double-click to maximize and resize edges. On Windows the corners are rounded. "System title bar" in Settings brings back the OS frame.
 - **Touch mode**: automatic, on or off. It gives larger targets, long-press menus and swipe gestures. Dialogs move above the on-screen keyboard on Android.
@@ -71,6 +72,7 @@ Version: 0.1.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party c
 - **Music player**:
   - MP3, FLAC, WAV/AIFF and Ogg Vorbis built in; AAC, Opus, WMA and others through FFmpeg or the OS decoders
   - tags and cover art
+  - **Lyrics** (the mic button): synced lyrics from LRCLIB (lrclib.net, free, no key) in the cover's place, the line being sung in the middle and highlighted; plain lyrics when a song has no timing; radio uses the station's current title. The video player has them too (⋮ > Lyrics (sing along)): the line sung and the next over the picture. Titles like "Artist - Song (Official Video)" or a file "Artist - Song.mp3" are understood; each song is fetched once (disk cache).
   - keeps playing in a mini bar after the viewer closes
   - **Visualizer**: 9 styles (Bars, Mirror, Pills, Wave, Scope, Radial, Pulse, Dots, Neon) plus a custom slot with its own knobs
   - **Equalizer**: 16 presets plus a 10-band custom curve (±12 dB), preamp, stereo width, balance and a limiter. It is shared with the video player.
@@ -107,6 +109,7 @@ Search, stream with a buffer, pick a quality from the menu (it reopens at the cu
 | Source | Notes |
 |---|---|
 | YouTube | Built in through YouTube's InnerTube API, with no key and no yt-dlp. 144p to 2160p60. Live streams play natively too (HLS, 144p to 1080p, H.264 + AAC): built in on Windows (Media Foundation) and Android 9+, through FFmpeg on Linux, macOS and the web build. Scheduled and ended live streams say so. An optional free Data API v3 key (Settings) makes search use the official API. |
+| Karaoke | Sing-along versions from YouTube's karaoke channels (Sing King, KaraFun, Zoom Karaoke ...): YouTube's search with "karaoke" added, karaoke versions first; plays and downloads like YouTube. No karaoke service has a public API. |
 | Internet Archive | Direct streams, no key. |
 | PeerTube | Through SepiaSearch, no key. |
 | Dailymotion | Native, with its own HLS reader, no key. |
@@ -121,7 +124,7 @@ Search, stream with a buffer, pick a quality from the menu (it reopens at the cu
 
 Openverse, Wikimedia Commons, NASA Images and the Art Institute of Chicago need no key. Pexels, Unsplash and Pixabay need a free key.
 
-- Justified photo wall.
+- Justified photo wall. Tiles download each source's **thumbnail** (Wikimedia 480 px, Unsplash 400, Pexels 350 high, Pixabay 640 on desktop and 340 on phones, the boorus' previews): the full picture only when a photo is opened. Six downloads at a time over kept connections; the next page only once the end is a screen away and what is on screen has loaded; failed tiles back off (20 s doubling to 5 min), and too-large or refused ones are not asked again. With a Wikimedia contact set (Online reading, ⋮ > Wikimedia contact), Wikimedia's limit is 200 requests a minute instead of 10.
 - Lightbox with wheel, pinch and double-tap zoom that loads the full-size image.
 - Favourites and local albums.
 - Background downloads that save a `.txt` credit/licence file next to each photo.
@@ -446,6 +449,7 @@ The tests are offline by default. Network checks are opt-in through the variable
 | `MMCFM_MEGA_LINK=link[\|...]` | Opens and downloads MEGA public links. |
 | `MMCFM_MEGA_LOGIN=email\|password`, `MMCFM_MEGA_WRITE=1` | Live MEGA account test (with writes). |
 | `MMCFM_AMC_TRACE=1` | Android: logs every MediaCodec extractor read. |
+| `MMCFM_PHOTO_LOG=1` | Thumbnails per search: time to the first tile and until the screen is filled, downloads and disk-cache hits, KB, failures (429s), pictures decoded again. |
 | `MMCFM_SEG_LOG=1` | HLS: one log line per segment (size, time on the network, Mbit/s against what the video needs, ring fill, time the reader starved), failed tries, stream opens, closes and seeks. |
 | `MMCFM_DEMO_QUERY=text` | The query for `--demo-online` (may hold spaces; Android test arguments split on them). |
 | `MMCFM_TEST_TAP=x,y,ms[;x,y,ms...]` | Queues a press and its release together at x,y (window pixels) ms after start, several in order: checks quick taps under a frame-rate cap, two-tap confirmations. |

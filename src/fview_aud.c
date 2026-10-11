@@ -76,6 +76,7 @@
 #include "feq.h"
 #include "fonline_int.h"
 #include "fqueue.h"
+#include "flyrics.h"
 
 #define RING_SEC 0.75
 #define QSAVE_MS 2000           /* a changed queue is written this long after the edit */
@@ -175,6 +176,7 @@ static struct {
   int viz_pos;
   float viz_snap[VIZ_FFT];
   bool viz_open;              /* settings panel shown */
+  bool lyrics_open;           /* the lyrics take the cover's place (flyrics.c) */
   FmEq eq;                    /* equalizer state (callback, under the lock) */
   /* main thread */
   SDL_Texture *cover_tex;
@@ -1917,8 +1919,8 @@ static void aud_view_frame(FmRect area) {
   else sub[0] = 0;
   bool fav = false, has_heart = np.idx >= 0 && heart_state(np.idx, &fav);
   FmRect act;
-  /* more, queue, heart, visualizer: room for each one drawn */
-  int nact = 3 + (has_heart ? 1 : 0);
+  /* more, queue, heart, visualizer, lyrics: room for each one drawn */
+  int nact = 4 + (has_heart ? 1 : 0);
   if (view_topbar(area, VIEW_BAR_THEME, 1.0f, np.live ? "Live radio" : "Now playing", sub, nact, &act)) {
     app_close_viewer();
     return;
@@ -1964,6 +1966,11 @@ static void aud_view_frame(FmRect area) {
                    P.viz_open)) {
     P.viz_open = !P.viz_open;
     P.show_list = false;
+  }
+  if (view_bar_btn(&act, ui_id("aud.lyrbtn"), IC_MIC, P.lyrics_open ? "Hide the lyrics" : "Lyrics (sing along)",
+                   VIEW_BAR_THEME, 1, P.lyrics_open)) {
+    P.lyrics_open = !P.lyrics_open;
+    if (P.lyrics_open) { P.viz_open = false; P.show_list = false; }
   }
   int mres = ui_menu_result(mid);
   switch (mres) {
@@ -2056,6 +2063,11 @@ static void aud_view_frame(FmRect area) {
     if (!viz_panel(rect_center(left, FM_MIN(left.w, DP(560)), left.h))) P.viz_open = false;
   } else if (list_left) {
     qui_queue_panel(left);
+  } else if (P.lyrics_open) {
+    /* the lyrics (LRCLIB), synced to the sound; a station's current title for radio */
+    const char *ti = np.live && np.icy[0] ? np.icy : np.title;
+    lyrics_want(np.live ? "" : np.artist, ti, np.live ? 0 : np.dur);
+    lyrics_draw(rect_inset2(left, DP(8), 0), np.pos, false);
   } else {
     float cs = FM_MIN(left.w, left.h);
     cs = FM_MIN(cs, DP(ring ? 480 : 420));

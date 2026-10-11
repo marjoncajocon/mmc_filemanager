@@ -154,7 +154,7 @@ static const char *kYtdlpSingle =
 /* ---- offline ---------------------------------------------------------------------- */
 
 static void vt_registry(void) {
-  static const char *const kKeys[] = { "youtube", "archive", "peertube", "dailymotion", "bilibili", "eporner", "web" };
+  static const char *const kKeys[] = { "youtube", "karaoke", "archive", "peertube", "dailymotion", "bilibili", "eporner", "web" };
   TEST_CHECK(vsrc_count() == FM_COUNT(kKeys));
   for (int i = 0; i < vsrc_count() && i < FM_COUNT(kKeys); i++) {
     const FmVsrc *s = vsrc_at(i);

@@ -23,6 +23,7 @@
 #define VSRC_CACHE_MAX   ((u64)1 << 30) /* online cache size kept after a resolve */
 
 extern const FmVsrc g_vsrc_youtube;
+extern const FmVsrc g_vsrc_karaoke;         /* YouTube's karaoke versions (fvsrc_karaoke.c) */
 extern const FmVsrc g_vsrc_archive;
 extern const FmVsrc g_vsrc_peertube;
 extern const FmVsrc g_vsrc_dailymotion;
