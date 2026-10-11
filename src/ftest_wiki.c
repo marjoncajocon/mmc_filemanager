@@ -466,4 +466,35 @@ static void dt_offline(void) {
   TEST_CHECK(!strcmp(t2, "--> is not an operator."));
   if (strcmp(t2, "--> is not an operator.")) printf("    got \"%s\"\n", t2);
   doc_free(&d);
+  /* a chess diagram: the board, its pieces laid over it, no a-h / 1-8 labels, the caption kept */
+  static const char kChess[] =
+    "<p>Before.</p><div class=\"chessboard thumb\"><div class=\"thumbinner\"><table><tr><td></td><td>a</td><td>b</td></tr>"
+    "<tr><td>8</td><td colspan=\"8\" rowspan=\"8\"><div class=\"chess-pieces notheme\" style=\"position:relative\">"
+    "<span><img src=\"//up/Chessboard480.svg.png\" width=\"208\" height=\"208\"></span>"
+    "<div style=\"top:0px;left:26px\"><span><img alt=\"b8 black knight\" src=\"//up/Chess_ndt45.png\" width=\"26\" height=\"26\"></span></div>"
+    "<div style=\"top:182px;left:104px\"><span><img alt=\"e1 white king\" src=\"//up/Chess_klt45.png\" width=\"26\" height=\"26\"></span></div>"
+    "</div></td><td>8</td></tr></table><div class=\"thumbcaption\">Position after 2.c4</div></div></div><p>After.</p>"
+    /* a map with a dot at 50% / 25%, 4 px back to centre it */
+    "<div style=\"position:relative\"><img src=\"//up/map.png\" width=\"200\" height=\"100\">"
+    "<div style=\"top:25%;left:50%\"><div style=\"top:-4px;left:-4px\"><img src=\"//up/dot.png\" width=\"8\" height=\"8\"></div></div></div>";
+  doc_parse(kChess, sizeof kChess - 1, "https://en.wikipedia.org/wiki/", DOC_WIKI, &d);
+  int boards = 0, pieces = 0, caps = 0;
+  bool labels = false, at = false, dot = false;
+  for (int i = 0; i < d.nb; i++) {
+    doc_block_text(&d, i, t2, sizeof t2);
+    if (d.b[i].kind == DB_IMG && d.imgs[d.b[i].img].has_layers) boards++;
+    if (d.b[i].kind == DB_CAPTION && !strcmp(t2, "Position after 2.c4")) caps++;
+    if (strstr(t2, "a") == t2 && strlen(t2) < 4) labels = true;
+    if (!strcmp(t2, "8") || !strcmp(t2, "a b")) labels = true;
+  }
+  for (int i = 0; i < d.nimgs; i++) {
+    const DocImage *im = &d.imgs[i];
+    if (im->layer_of >= 0 && strstr(im->src, "Chess_")) pieces++;
+    if (strstr(im->src, "klt45") && im->lx == 104 && im->ly == 182) at = true;
+    if (strstr(im->src, "dot.png") && im->layer_of >= 0 && im->lx == 96 && im->ly == 21) dot = true;
+  }
+  TEST_CHECK(boards == 2 && pieces == 2 && at && dot && caps == 1 && !labels);
+  if (!(boards == 2 && pieces == 2 && at && dot && caps == 1 && !labels))
+    printf("    chess: %d boards, %d pieces, at %d, dot %d, %d captions, labels %d\n", boards, pieces, at, dot, caps, labels);
+  doc_free(&d);
 }

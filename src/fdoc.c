@@ -50,6 +50,13 @@ typedef struct Par {
   int tdepth;                  /* table nesting */
   int tab, row, col, cell;     /* the outer table being built */
   bool caption;                /* text goes to the caption block */
+  int divs;                    /* open <div>s */
+  int chess_at, chess_cap_at;  /* div depth of a chess diagram and of its caption, 0 = none */
+  /* a picture container (style position:relative): pictures in divs placed
+  ** with top/left inside it are laid over its first picture */
+  int ov_at, ov_img;           /* its div depth (0 = none), its first picture (-1 = none yet) */
+  float ov_x[8], ov_y[8], ov_px[8], ov_py[8];   /* per div level inside it: left/top in px and in % */
+  bool ov_pos[8];
 } Par;
 
 static bool has_class(const char *cls, const char *tok) {
@@ -239,6 +246,7 @@ static void ensure_target(Par *p) {
 
 static void text(Par *p, const char *s, size_t n) {
   if (!n) return;
+  if (p->chess_at && !p->chess_cap_at) return;       /* a chess diagram's a-h / 1-8 labels */
   if (p->tdepth >= 1 && p->cell < 0 && !p->caption) return;
   char *buf = (char *)fm_alloc(n + 1);
   size_t m = decode(s, n, buf);
@@ -332,8 +340,37 @@ static void image(Par *p, const Attrs *a) {
     p->code--;
     return;
   }
-  if (!a->src[0] || (a->width > 0 && a->width < 40 && a->height > 0 && a->height < 40)) return;   /* icons, flags */
+  if (!a->src[0]) return;
   char src[1100];
+  /* inside a picture container, in a positioned div: a layer of its first picture */
+  if (p->ov_at && p->ov_img >= 0) {
+    float x = 0, y = 0, px = 0, py = 0;
+    bool pos = false;
+    for (int k = 1; k <= FM_MIN(p->divs - p->ov_at, 7); k++) {
+      if (!p->ov_pos[k]) continue;
+      pos = true;
+      x += p->ov_x[k];
+      y += p->ov_y[k];
+      px += p->ov_px[k];
+      py += p->ov_py[k];
+    }
+    if (pos) {
+      abs_url(p->base, a->src, src, sizeof src);
+      GROW(d->imgs, d->nimgs, d->cimgs, DocImage);
+      DocImage *base = &d->imgs[p->ov_img], *im = &d->imgs[d->nimgs++];
+      memset(im, 0, sizeof *im);
+      im->src = fm_strdup(src);
+      im->alt = dup_str(a->alt);
+      im->w = a->width;
+      im->h = a->height;
+      im->layer_of = p->ov_img;
+      im->lx = x + px / 100.0f * (float)base->w;
+      im->ly = y + py / 100.0f * (float)base->h;
+      base->has_layers = true;
+      return;
+    }
+  }
+  if (a->width > 0 && a->width < 40 && a->height > 0 && a->height < 40) return;   /* icons, flags */
   abs_url(p->base, a->src, src, sizeof src);
   GROW(d->imgs, d->nimgs, d->cimgs, DocImage);
   DocImage *im = &d->imgs[d->nimgs];
@@ -342,9 +379,11 @@ static void image(Par *p, const Attrs *a) {
   im->alt = dup_str(a->alt);
   im->w = a->width;
   im->h = a->height;
+  im->layer_of = -1;
   int link = p->nlinks ? p->links[p->nlinks - 1] : -1;
   if (link >= 0) im->href = fm_strdup(d->links[link]);
   int idx = d->nimgs++;
+  if (p->ov_at && p->ov_img < 0) p->ov_img = idx;
   if (p->tdepth >= 1) {
     if (in_cell(p) && d->cells[p->cell].img < 0) d->cells[p->cell].img = idx;
     return;
@@ -472,10 +511,66 @@ static int heading(const char *t) {
   return (t[0] == 'h' || t[0] == 'H') && t[1] >= '1' && t[1] <= '6' && !t[2] ? t[1] - '0' : 0;
 }
 
+/* "left:" / "top:" of an inline style, in px or %; false = not set. */
+static bool css_pos(const char *style, const char *prop, float *px, float *pct) {
+  size_t n = strlen(prop);
+  for (const char *s = style; (s = strstr(s, prop)) != NULL; s += n) {
+    if (s > style && s[-1] != ';' && s[-1] != ' ') continue;     /* not "margin-left:" */
+    const char *v = s + n;
+    while (*v == ' ') v++;
+    char *e;
+    double x = strtod(v, &e);
+    if (e == v) return false;
+    while (*e == ' ') e++;
+    if (*e == '%') *pct = (float)x;
+    else *px = (float)x;
+    return true;
+  }
+  return false;
+}
+
+/* <div> bookkeeping: chess diagrams and picture containers (layers). */
+static void div_open(Par *p, const Attrs *a) {
+  p->divs++;
+  if (!p->chess_at && has_class(a->cls, "chessboard")) p->chess_at = p->divs;
+  else if (p->chess_at && !p->chess_cap_at && has_class(a->cls, "thumbcaption")) p->chess_cap_at = p->divs;
+  if (!p->ov_at) {
+    if (strstr(a->style, "position:relative") || strstr(a->style, "position: relative")) {
+      p->ov_at = p->divs;
+      p->ov_img = -1;
+    }
+    return;
+  }
+  int k = p->divs - p->ov_at;
+  if (k < 1 || k > 7) return;
+  p->ov_x[k] = p->ov_y[k] = p->ov_px[k] = p->ov_py[k] = 0;
+  bool l = css_pos(a->style, "left:", &p->ov_x[k], &p->ov_px[k]);
+  bool t = css_pos(a->style, "top:", &p->ov_y[k], &p->ov_py[k]);
+  p->ov_pos[k] = l || t;
+}
+
+static void div_close(Par *p) {
+  if (!p->divs) return;
+  if (p->divs == p->chess_cap_at) p->chess_cap_at = 0;
+  if (p->divs == p->chess_at) p->chess_at = p->chess_cap_at = 0;
+  if (p->divs == p->ov_at) p->ov_at = 0;
+  p->divs--;
+}
+
+/* Inside a chess diagram the board's frame is a table of labels: left out. */
+static bool chess_table_tag(Par *p, const char *t) {
+  return p->chess_at && !p->chess_cap_at &&
+         (tag_is(t, "table") || tag_is(t, "tr") || tag_is(t, "td") || tag_is(t, "th") || tag_is(t, "tbody") ||
+          tag_is(t, "caption"));
+}
+
 static void start_tag(Par *p, const char *t, const Attrs *a) {
   FmDoc *d = p->d;
   if (a->id[0]) anchor(p, a->id);
   int h = heading(t);
+  if (tag_is(t, "div")) div_open(p, a);
+  if (h) p->chess_at = p->chess_cap_at = p->ov_at = 0;   /* never inside those: unbalanced HTML */
+  if (chess_table_tag(p, t)) return;
   if (tag_is(t, "br")) { newline(p); return; }
   if (tag_is(t, "img")) { image(p, a); return; }
   if (tag_is(t, "hr")) {
@@ -623,6 +718,8 @@ static void start_tag(Par *p, const char *t, const Attrs *a) {
 static void end_tag(Par *p, const char *t) {
   FmDoc *d = p->d;
   int h = heading(t);
+  if (chess_table_tag(p, t)) return;
+  if (tag_is(t, "div")) div_close(p);
   if (h) {
     if (in_cell(p)) { if (p->bold) p->bold--; cell_break(p); return; }
     if (!p->tdepth) end_block(p);
@@ -1191,6 +1288,20 @@ static void draw_frags(FmDoc *d, int f0, int nf, float ox, float oy, float fs, b
   }
 }
 
+/* A picture, then what is laid over it (chess pieces), at its scale. */
+static void draw_picture(FmDoc *d, int idx, FmRect r, DocThumbFn thumb) {
+  DocImage *im = &d->imgs[idx];
+  thumb(d, im, r);
+  if (!im->has_layers || im->w <= 0) return;
+  float k = r.w / (float)im->w;
+  for (int i = idx + 1; i < d->nimgs; i++) {
+    DocImage *l = &d->imgs[i];
+    if (l->layer_of != idx) continue;
+    float lw = (float)(l->w > 0 ? l->w : 16), lh = (float)(l->h > 0 ? l->h : lw);
+    thumb(d, l, FM_RECT(r.x + l->lx * k, r.y + l->ly * k, lw * k, lh * k));
+  }
+}
+
 DocHit doc_draw(FmDoc *d, float x, float y, FmRect clip, u32 id, DocThumbFn thumb) {
   DocHit hit = { -1, -1 };
   float fs = d->lay_fs, w = d->lay_w;
@@ -1206,7 +1317,7 @@ DocHit doc_draw(FmDoc *d, float x, float y, FmRect clip, u32 id, DocThumbFn thum
         float iw, ih;
         image_size(im, w, &iw, &ih);
         FmRect r = { x + (w - iw) * 0.5f, by + DP(4), iw, ih };
-        if (thumb) thumb(d, im, r);
+        if (thumb) draw_picture(d, b->img, r, thumb);
         int fl = ui_hit(ui_idn(id, 2000000u + (u32)b->img), r);
         if (fl & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
         if (fl & UI_CLICK) hit.img = b->img;
@@ -1239,7 +1350,7 @@ DocHit doc_draw(FmDoc *d, float x, float y, FmRect clip, u32 id, DocThumbFn thum
             float iw, ih;
             image_size(&d->imgs[cl->img], cl->w - pad * 2, &iw, &ih);
             FmRect ir = { r.x + (r.w - iw) * 0.5f, r.y + pad, iw, ih };
-            if (thumb) thumb(d, &d->imgs[cl->img], ir);
+            if (thumb) draw_picture(d, cl->img, ir, thumb);
             int fl = ui_hit(ui_idn(id, 2000000u + (u32)cl->img), ir);
             if (fl & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
             if (fl & UI_CLICK) hit.img = cl->img;

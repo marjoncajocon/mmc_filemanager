@@ -47,6 +47,11 @@ typedef struct DocImage {
   char *href;                  /* where it links (a file page, a bigger picture), may be NULL */
   char *alt;
   int w, h;                    /* as the page asks, 0 = unknown */
+  /* a picture laid over another one (a chess piece on its board, a dot on
+  ** a map): layer_of = that picture, lx/ly = where, in its page pixels */
+  int layer_of;                /* -1 = a picture of its own */
+  float lx, ly;
+  bool has_layers;             /* pictures are laid over this one */
 } DocImage;
 
 typedef struct DocAnchor { char *id; int block; } DocAnchor;

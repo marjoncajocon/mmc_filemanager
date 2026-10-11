@@ -1394,7 +1394,9 @@ static void doc_thumb(FmDoc *d, DocImage *im, FmRect r) {
   SDL_Texture *tex = othumb_get_ex(im->src, (int)FM_MAX(r.w, r.h) * 2, 0, strstr(im->src, "wikimedia.org") ? wk_headers() : NULL,
                                    &fade);
   int tw = 0, th = 0;
+  bool layer = im->layer_of >= 0;                    /* a chess piece on its board: no box while it loads */
   if (!tex || SDL_QueryTexture(tex, NULL, NULL, &tw, &th) != 0 || tw <= 0 || th <= 0) {
+    if (layer) return;
     gfx_rrect(r, DP(8), T.surface2);
     float is = FM_MIN(r.w, r.h) * 0.3f;
     icon_draw(IC_IMAGE, rect_center(r, is, is), T.text2);
@@ -1402,7 +1404,9 @@ static void doc_thumb(FmDoc *d, DocImage *im, FmRect r) {
   }
   doc_image_shape(d, im, (int)(r.w / ui.scale), (int)((float)(r.w / ui.scale) * th / tw));
   float k = FM_MIN(r.w / tw, r.h / th);
-  gfx_tex_rounded(tex, rect_center(r, tw * k, th * k), DP(6), FM_RGBA(255, 255, 255, (u8)(255 * fade)));
+  FmColor tint = FM_RGBA(255, 255, 255, (u8)(255 * fade));
+  if (layer) gfx_tex(tex, NULL, rect_center(r, tw * k, th * k), tint);
+  else gfx_tex_rounded(tex, rect_center(r, tw * k, th * k), DP(6), tint);
   if (fade < 1) ui_animate();
 }
 
