@@ -141,7 +141,18 @@ typedef struct AmcNet {
   pthread_mutex_t mx;
   /* windows of bytes read (see net_read_at), each with its own connection
   ** (opened on first use; w[0].ns == ns) */
-  struct { u8 *buf; i64 pos; size_t len; u64 used; FmNetStream *ns; i64 run; bool wide; } w[NET_WINS];
+  struct {
+    u8 *buf;
+    i64 pos;
+    size_t len;
+    u64 used;
+    FmNetStream *ns;
+    i64 run;
+    bool wide;
+    i64 pk_low;                        /* the lowest byte peeked from its read-ahead this round, -1 = none */
+    int pk_n;                          /* peeks this round (NET_FOLLOW_ROUND) */
+    bool hit_round;                    /* a read came from its window this round: someone reads there */
+  } w[NET_WINS];
   u64 tick;
 } AmcNet;
 
@@ -205,6 +216,8 @@ static void amc_close(void *p);
 #define NET_SIDE_RING (512u * 1024u)
 #define NET_BACK (64 * 1024)            /* a new window starts this far before the asked byte */
 #define NET_RUN (1024 * 1024)           /* read straight on this far: the data cursor, read ahead fully */
+#define NET_FOLLOW_BACK (512 * 1024)    /* a cursor following the reads stays this far behind the lowest */
+#define NET_FOLLOW_ROUND 128            /* peeks per round of watching where the reads are */
 
 /* MMCFM_AMC_TRACE=1 logs every extractor read (device debugging) */
 static bool amc_trace(void) {
@@ -234,15 +247,42 @@ static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
       i64 end = n->w[hit].pos + (i64)n->w[hit].len;
       size_t take = FM_MIN(size - done, (size_t)(end - p));
       memcpy((u8 *)buf + done, n->w[hit].buf + (p - n->w[hit].pos), take);
+      n->w[hit].hit_round = true;
       n->w[hit].used = ++n->tick;
       done += take;
       continue;
     }
     /* a peek far ahead (the next fragment's header) that a connection has
     ** already read ahead: served from its buffer, the cursor stays put */
+    /* HLS: reads that all land past a connection's cursor are where the data
+    ** is read now, not a glance ahead: Android's TS reader keeps a cursor per
+    ** track (~300 KB apart, all moving on), and after a swing ahead while
+    ** opening every read was a peek. A peek leaves the cursor, so the ring
+    ** never drained, filled (4 MB), stopped downloading, and the read past
+    ** it opened a new connection from byte 0 (measured on Dailymotion HLS
+    ** on Android: "Buffering" for 14-18 s after every ~75 s). So once the
+    ** lowest byte peeked is NET_RUN past the cursor, the cursor skips up to
+    ** NET_FOLLOW_BACK before it (inside the read-ahead: no request). */
     size_t pk = 0;
-    for (int i = 0; i < NET_WINS && !pk; i++)
-      if (n->w[i].ns) pk = ns_peek_at(n->w[i].ns, p, (u8 *)buf + done, size - done);
+    for (int i = 0; i < NET_WINS && !pk; i++) {
+      if (!n->w[i].ns || !(pk = ns_peek_at(n->w[i].ns, p, (u8 *)buf + done, size - done))) continue;
+      /* HLS only (MPEG-TS read with a cursor per track): an MP4 (YouTube) has
+      ** a cursor far behind that reads now and then, and following the others
+      ** dropped bytes it still wanted (measured: reconnects, "Buffering") */
+      if (!ns_is_hls(n->w[i].ns)) continue;
+      if (n->w[i].pk_low < 0 || p < n->w[i].pk_low) n->w[i].pk_low = p;
+      if (++n->w[i].pk_n < NET_FOLLOW_ROUND) continue;
+      /* a round's lowest read: every cursor of the reader is past it */
+      i64 cur = ns_tell(n->w[i].ns), to = n->w[i].pk_low - NET_FOLLOW_BACK;
+      if (!n->w[i].hit_round && n->w[i].pk_low - cur > NET_RUN && to > cur && ns_seek(n->w[i].ns, to)) {
+        if (amc_trace()) fm_log("amc: window %d follows the reads: %lld -> %lld", i, (long long)cur, (long long)to);
+        n->w[i].pos = to;                /* its old bytes are behind every reader now */
+        n->w[i].len = 0;
+      }
+      n->w[i].pk_low = -1;
+      n->w[i].pk_n = 0;
+      n->w[i].hit_round = false;
+    }
     if (pk) { done += pk; continue; }
     /* a window whose connection reads on to p */
     int k = -1;
@@ -336,7 +376,10 @@ static AMediaExtractor *net_extractor(const char *url, AmcNet **net, AMediaDataS
   if (!ns) { fm_log("video: %s", why); vid_note_net_error(why); return NULL; }
   AmcNet *n = (AmcNet *)fm_calloc(1, sizeof *n);
   n->ns = ns;
-  for (int i = 0; i < NET_WINS; i++) n->w[i].buf = (u8 *)fm_alloc(NET_WIN);
+  for (int i = 0; i < NET_WINS; i++) {
+    n->w[i].buf = (u8 *)fm_alloc(NET_WIN);
+    n->w[i].pk_low = -1;
+  }
   n->w[0].ns = ns;
   n->url = fm_strdup(url);
   pthread_mutex_init(&n->mx, NULL);

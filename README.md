@@ -446,6 +446,8 @@ The tests are offline by default. Network checks are opt-in through the variable
 | `MMCFM_MEGA_LINK=link[\|...]` | Opens and downloads MEGA public links. |
 | `MMCFM_MEGA_LOGIN=email\|password`, `MMCFM_MEGA_WRITE=1` | Live MEGA account test (with writes). |
 | `MMCFM_AMC_TRACE=1` | Android: logs every MediaCodec extractor read. |
+| `MMCFM_SEG_LOG=1` | HLS: one log line per segment (size, time on the network, Mbit/s against what the video needs, ring fill, time the reader starved), failed tries, stream opens, closes and seeks. |
+| `MMCFM_DEMO_QUERY=text` | The query for `--demo-online` (may hold spaces; Android test arguments split on them). |
 | `MMCFM_TEST_TAP=x,y,ms` | Queues a press and its release together at x,y (window pixels) ms after start: checks quick taps under a frame-rate cap. |
 | `MMCFM_IDLE_LOG=1` (or a window in ms, e.g. `1000`) | Every 5 s (or that window) logs the frames built, how many were presented and how many were the same picture (skipped), the loop's wakeups, and the source lines that asked for them (ui_animate / ui_redraw / app_wake, "busy" for loading animations): finds what keeps an idle screen drawing. |
 

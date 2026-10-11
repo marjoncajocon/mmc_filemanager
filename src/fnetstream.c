@@ -130,7 +130,16 @@ struct FmNetStream {
   char station[96];
   char title[256];
   Hls *hls;                    /* an HLS playlist, NULL = a plain resource */
+  /* MMCFM_SEG_LOG: where the time goes (ms, guarded by mx) */
+  u64 full_ms;                 /* the worker waiting for room (the ring full: the reader is behind) */
+  u64 empty_ms;                /* the reader waiting for data (the network is behind) */
 };
+
+static int seg_log_on(void) {
+  static int on = -1;
+  if (on < 0) on = getenv("MMCFM_SEG_LOG") != NULL;
+  return on;
+}
 
 /* ---- worker -------------------------------------------------------------------- */
 
@@ -193,7 +202,11 @@ static bool grow_ring(FmNetStream *s) {
 /* Appends audio bytes to the ring, waiting while it is full. */
 static bool put_audio(FmNetStream *s, const u8 *p, size_t n) {
   while (n > 0) {
-    while (s->fill == s->cap && !s->cancel && !grow_ring(s)) SDL_CondWaitTimeout(s->cv, s->mx, 500);
+    if (s->fill == s->cap) {
+      u64 w0 = SDL_GetTicks64();
+      while (s->fill == s->cap && !s->cancel && !grow_ring(s)) SDL_CondWaitTimeout(s->cv, s->mx, 500);
+      s->full_ms += SDL_GetTicks64() - w0;
+    }
     if (s->cancel) return false;
     size_t room = s->cap - s->fill;
     size_t run = FM_MIN(n, FM_MIN(room, s->cap - s->wr));
@@ -591,6 +604,9 @@ static int job_finish(FmNetStream *s, HlsJob *j, char *err, size_t errcap) {
     SDL_UnlockMutex(s->mx);
     if (bad) { fm_strlcpy(err, "A segment did not decrypt (wrong key?)", errcap); return -1; }
     if (ok) return 0;
+    if (seg_log_on())
+      fm_log("seg %d: try %d failed: status %d, %s, %lld of the segment's bytes in (%lld delivered)", j->item, attempt + 1, st,
+             j->error[0] ? j->error : fm_err_str(j->e), (long long)j->seen, (long long)h->got);
     if ((st == 404 || st == 410) && h->live) return 1; /* rolled off the live window */
     if (st >= 400 && st < 500) {
       fm_snprintf(err, errcap, "The server answered %d", st);
@@ -669,6 +685,8 @@ static int hls_worker(void *u) {
     h->strip = -1;
     h->seg_pos = h->wpos;
     if (!cur->init && !h->live && h->off[cur->item] < 0) h->off[cur->item] = h->wpos;
+    u64 seg_t0 = SDL_GetTicks64(), seg_full0 = s->full_ms, seg_empty0 = s->empty_ms;
+    bool seg_ahead = cur->thr != NULL;                 /* it was already connecting */
     SDL_CondBroadcast(s->cv);
     SDL_UnlockMutex(s->mx);
     if (!next) {                                       /* the one after starts connecting now */
@@ -683,6 +701,17 @@ static int hls_worker(void *u) {
     }
     int rc = job_finish(s, cur, err, sizeof err);
     SDL_LockMutex(s->mx);
+    if (seg_log_on() && rc == 0 && !cur->init) {
+      /* time on the network = the turn minus the waits for room in the ring */
+      u64 all = SDL_GetTicks64() - seg_t0, full = s->full_ms - seg_full0, net = all > full ? all - full : 1;
+      double dur = !h->live && cur->item >= 0 && cur->item < h->pl.n ? h->pl.seg[cur->item].dur : 0;
+      fm_log("seg %d: %lld KB of %.1f s in %llu ms (%llu net, %llu ring full) = %.2f Mbit/s, need %.2f; ring %zu/%zu KB; "
+             "reader starved %llu ms%s",
+             cur->item, (long long)(h->got / 1024), dur, (unsigned long long)all, (unsigned long long)net,
+             (unsigned long long)full, (double)h->got * 8.0 / 1000.0 / (double)net,
+             dur > 0 ? (double)h->got * 8.0 / 1e6 / dur : 0.0, s->fill / 1024, s->cap / 1024,
+             (unsigned long long)(s->empty_ms - seg_empty0), seg_ahead ? ", connected ahead" : "");
+    }
     h->turn = NULL;
     if (rc >= 0) {
       if (cur->init) {
@@ -712,6 +741,7 @@ static int hls_worker(void *u) {
   if (failed) {
     s->failed = true;
     fm_strlcpy(s->error, err, sizeof s->error);
+    if (seg_log_on()) fm_log("hls stream failed: %s", err);
   }
   s->head_in = true;                                   /* tell the opener (status 0 or the HTTP error) */
   if (done && !s->failed) s->size = h->wpos;           /* now the length is known */
@@ -899,6 +929,7 @@ static bool hls_behind(FmNetStream *s) {
 }
 
 FmNetStream *ns_open(const char *url, const char *headers, char *err, size_t errcap) {
+  if (seg_log_on()) fm_log("ns_open %.140s", url);
   if (err && errcap) err[0] = 0;
   if (!net_available()) {
     if (err) fm_strlcpy(err, net_backend(), errcap);
@@ -983,7 +1014,11 @@ size_t ns_read(FmNetStream *s, void *out, size_t n) {
   size_t got = 0;
   SDL_LockMutex(s->mx);
   while (got < n) {
-    while (!s->fill && !s->eof && !s->aborted) SDL_CondWaitTimeout(s->cv, s->mx, 500);
+    if (!s->fill && !s->eof && !s->aborted) {
+      u64 w0 = SDL_GetTicks64();
+      while (!s->fill && !s->eof && !s->aborted) SDL_CondWaitTimeout(s->cv, s->mx, 500);
+      s->empty_ms += SDL_GetTicks64() - w0;
+    }
     if (s->aborted) break;
     if (!s->fill && !got && resume(s)) continue;
     if (!s->fill) break;                 /* end or error */
@@ -1018,6 +1053,8 @@ bool ns_seek(FmNetStream *s, i64 pos) {
   }
   SDL_UnlockMutex(s->mx);
   if (pos == cur && s->pending < 0) return true;
+  if (seg_log_on()) fm_log("ns_seek %lld -> %lld (%+lld KB; %zu KB buffered ahead)", (long long)cur, (long long)pos,
+                           (long long)((pos - cur) / 1024), s->fill / 1024);
   /* live streams cannot seek; files can, lazily (see the top comment); live
   ** HLS can skip forward (by reading on) */
   if (s->hls && s->hls->live) {
@@ -1104,6 +1141,7 @@ void ns_abort(FmNetStream *s) {
 }
 
 void ns_close(FmNetStream *s) {
+  if (seg_log_on() && s) fm_log("ns_close at %lld", (long long)s->pos);
   if (!s) return;
   open_list(s, false);         /* stream */
   stop_worker(s);

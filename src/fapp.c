@@ -3175,6 +3175,7 @@ void app_init(void) {
     const char *q = NULL;
     for (int i = 1; i + 2 < app.argc; i++)
       if (!strcmp(app.argv[i], "--demo-online") && app.argv[i + 2][0] != '-') q = app.argv[i + 2];
+    if (getenv("MMCFM_DEMO_QUERY")) q = getenv("MMCFM_DEMO_QUERY");   /* a query with spaces (Android test args split on them) */
     online_demo(don, q, arg_value("--demo-online-state"));
   }
   /* photos: --demo-photos SOURCE [QUERY] [--demo-photos-state STATE] */
