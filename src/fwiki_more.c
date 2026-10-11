@@ -1107,3 +1107,500 @@ FmErr rd_so_question(const char *id, WkArticle *out, volatile int *cancel) {
   net_resp_free(&r);
   return e;
 }
+
+/* ---- Merriam-Webster (dictionaryapi.com, the user's free key) ------------------------------ */
+
+/* Merriam-Webster's text markup ({bc}, {it}..{/it}, {sx|word||}, {a_link|word} ...) as HTML;
+** the text itself is escaped. */
+void rd_mw_markup(const char *in, char *out, size_t cap) {
+  size_t o = 0;
+#define PUT(str) do { const char *z_ = (str); size_t n_ = strlen(z_); if (o + n_ + 1 < cap) { memcpy(out + o, z_, n_); o += n_; } } while (0)
+  for (const char *p = in; *p && o + 8 < cap;) {
+    if (*p == '{') {
+      const char *e = strchr(p, '}');
+      if (!e) break;
+      char tok[200];
+      size_t n = FM_MIN((size_t)(e - p - 1), sizeof tok - 1);
+      memcpy(tok, p + 1, n);
+      tok[n] = 0;
+      p = e + 1;
+      if (!strcmp(tok, "bc")) PUT("<b>:</b> ");
+      else if (!strcmp(tok, "b") || !strcmp(tok, "phrase") || !strcmp(tok, "parahw")) PUT("<b>");
+      else if (!strcmp(tok, "/b") || !strcmp(tok, "/phrase") || !strcmp(tok, "/parahw")) PUT("</b>");
+      else if (!strcmp(tok, "it") || !strcmp(tok, "wi") || !strcmp(tok, "qword")) PUT("<i>");
+      else if (!strcmp(tok, "/it") || !strcmp(tok, "/wi") || !strcmp(tok, "/qword")) PUT("</i>");
+      else if (!strcmp(tok, "inf")) PUT("<sub>");
+      else if (!strcmp(tok, "/inf")) PUT("</sub>");
+      else if (!strcmp(tok, "sup")) PUT("<sup>");
+      else if (!strcmp(tok, "/sup")) PUT("</sup>");
+      else if (!strcmp(tok, "ldquo")) PUT("\xE2\x80\x9C");
+      else if (!strcmp(tok, "rdquo")) PUT("\xE2\x80\x9D");
+      else if (!strcmp(tok, "dx") || !strcmp(tok, "dx_ety") || !strcmp(tok, "dx_def"))
+        PUT(o && out[o - 1] == ' ' ? "\xE2\x80\x94 " : " \xE2\x80\x94 ");   /* one space before the dash */
+      else if (strchr(tok, '|')) {                     /* {sx|word||1}, {a_link|word}, {d_link|word|id}: the word */
+        const char *w = strchr(tok, '|') + 1;
+        char word[160];
+        size_t k = strcspn(w, "|:");
+        k = FM_MIN(k, sizeof word - 1);
+        memcpy(word, w, k);
+        word[k] = 0;
+        for (char *c = word; *c; c++)
+          if (*c == '<' || *c == '>' || *c == '&') *c = ' ';
+        PUT(word);
+      }
+      /* anything else ({/dx}, {ma}, {sc} ...): left out */
+      continue;
+    }
+    if (*p == '<') PUT("&lt;");
+    else if (*p == '>') PUT("&gt;");
+    else if (*p == '&') PUT("&amp;");
+    else { char c[2] = { *p, 0 }; PUT(c); }
+    p++;
+  }
+#undef PUT
+  out[o] = 0;
+}
+
+/* The sound file's address from its name (dictionaryapi.com, "Pronunciation"). */
+static void mw_audio_url(const char *name, char *out, size_t cap) {
+  char sub[8];
+  if (!strncmp(name, "bix", 3)) fm_strlcpy(sub, "bix", sizeof sub);
+  else if (!strncmp(name, "gg", 2)) fm_strlcpy(sub, "gg", sizeof sub);
+  else if (!((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z'))) fm_strlcpy(sub, "number", sizeof sub);
+  else { sub[0] = name[0]; sub[1] = 0; }
+  fm_snprintf(out, cap, "https://media.merriam-webster.com/audio/prons/en/us/mp3/%s/%s.mp3", sub, name);
+}
+
+/* Example sentences ("vis") anywhere under a definition's sense sequence. */
+static void mw_examples(const FmJsonNode *n, Txt *h, int *left) {
+  if (!n || *left <= 0) return;
+  if (n->type == JSON_ARR && n->count == 2 && json_first(n)->type == JSON_STR && !strcmp(json_str(json_first(n), ""), "vis")) {
+    for (const FmJsonNode *v = json_first(json_next(json_first(n))); v && *left > 0; v = json_next(v)) {
+      char m[1200];
+      rd_mw_markup(json_str(json_get(v, "t"), ""), m, sizeof m);
+      if (!m[0]) continue;
+      tputs(h, "<li><i>");
+      tputs(h, m);
+      tputs(h, "</i></li>");
+      (*left)--;
+    }
+    return;
+  }
+  if (n->type == JSON_ARR || n->type == JSON_OBJ)
+    for (const FmJsonNode *c = json_first(n); c && *left > 0; c = json_next(c)) mw_examples(c, h, left);
+}
+
+FmErr rd_mw_parse(const char *json, size_t len, const char *word, WkArticle *out, WkMediaList *sounds) {
+  FmJson j;
+  if (json_parse(&j, json, len) != FM_OK) {
+    /* a wrong key comes back as plain text, not JSON */
+    if (len && fm_stristr(json, "key")) fm_strlcpy(out->error, "Merriam-Webster refused the key: check it (Collegiate Dictionary) "
+                                                            "in Merriam-Webster's home", sizeof out->error);
+    else fm_strlcpy(out->error, "Merriam-Webster sent a reply this app does not understand", sizeof out->error);
+    return FM_ERR_FORMAT;
+  }
+  const FmJsonNode *root = json_root(&j);
+  fm_strlcpy(out->title, word, sizeof out->title);
+  fm_strlcpy(out->id, word, sizeof out->id);
+  char we[300];
+  net_urlencode(word, we, sizeof we);
+  fm_snprintf(out->url, sizeof out->url, "https://www.merriam-webster.com/dictionary/%s", we);
+  Txt h = { 0 };
+  const FmJsonNode *first = json_first(root);
+  if (!first) {
+    json_free(&j);
+    fm_snprintf(out->error, sizeof out->error, "Merriam-Webster has no entry for \xE2\x80\x9C%s\xE2\x80\x9D", word);
+    return FM_ERR_NOT_FOUND;
+  }
+  if (first->type == JSON_STR) {                     /* not a word it knows: what it suggests */
+    tputs(&h, "<p>Merriam-Webster has no entry for <b>");
+    hput(&h, word);
+    tputs(&h, "</b>. Did you mean:</p><ul>");
+    for (const FmJsonNode *s = first; s; s = json_next(s)) {
+      const char *w = json_str(s, "");
+      if (!w[0]) continue;
+      char e2[300];
+      net_urlencode(w, e2, sizeof e2);
+      tputs(&h, "<li><a href=\"mw:");
+      tputs(&h, e2);
+      tputs(&h, "\">");
+      hput(&h, w);
+      tputs(&h, "</a></li>");
+    }
+    tputs(&h, "</ul>");
+    fm_strlcpy(out->desc, "Merriam-Webster \xC2\xB7 suggestions", sizeof out->desc);
+  } else {
+    int entries = 0;
+    for (const FmJsonNode *e = first; e && entries < 10; e = json_next(e)) {
+      if (e->type != JSON_OBJ) continue;
+      entries++;
+      const FmJsonNode *hwi = json_get(e, "hwi");
+      char hw[160];
+      fm_strlcpy(hw, json_str(json_get(hwi, "hw"), word), sizeof hw);
+      char clean[160];
+      size_t o = 0;
+      for (const char *c = hw; *c && o + 1 < sizeof clean; c++)
+        if (*c != '*') clean[o++] = *c;                /* hw marks syllables with * */
+      clean[o] = 0;
+      const char *fl = json_str(json_get(e, "fl"), "");
+      if (entries == 1) fm_snprintf(out->desc, sizeof out->desc, "Merriam-Webster \xC2\xB7 %s", fl);
+      tputs(&h, "<h2>");
+      hput(&h, clean);
+      if (fl[0]) { tputs(&h, " <small>"); hput(&h, fl); tputs(&h, "</small>"); }
+      tputs(&h, "</h2>");
+      /* pronunciation and its sound */
+      const FmJsonNode *pr = json_first(json_get(hwi, "prs"));
+      const char *mw = json_str(json_get(pr, "mw"), "");
+      if (mw[0]) { tputs(&h, "<p>\\"); hput(&h, mw); tputs(&h, "\\</p>"); }
+      const char *audio = json_str(json_path(pr, "sound.audio"), "");
+      if (audio[0] && sounds && sounds->n < 12) {
+        sounds->it = (WkMedia *)fm_realloc(sounds->it, sizeof *sounds->it * (size_t)(sounds->n + 1));
+        WkMedia *m = &sounds->it[sounds->n++];
+        memset(m, 0, sizeof *m);
+        m->type = WM_AUDIO;
+        mw_audio_url(audio, m->url, sizeof m->url);
+        fm_snprintf(m->file, sizeof m->file, "%s%s%s", clean, mw[0] ? " \\" : "", mw);
+        if (mw[0]) fm_strlcpy(m->file + strlen(m->file), "\\", sizeof m->file - strlen(m->file));
+        fm_snprintf(m->caption, sizeof m->caption, "%s (%s)", clean, fl);
+      }
+      /* the short definitions */
+      const FmJsonNode *sd = json_get(e, "shortdef");
+      if (sd && sd->count) {
+        tputs(&h, "<ol>");
+        for (const FmJsonNode *d = json_first(sd); d; d = json_next(d)) {
+          tputs(&h, "<li>");
+          hput(&h, json_str(d, ""));
+          tputs(&h, "</li>");
+        }
+        tputs(&h, "</ol>");
+      }
+      /* a few examples */
+      Txt ex = { 0 };
+      int left = 3;
+      mw_examples(json_get(e, "def"), &ex, &left);
+      if (ex.n) {
+        tputs(&h, "<p><b>Examples</b></p><ul>");
+        tput(&h, ex.s, ex.n);
+        tputs(&h, "</ul>");
+      }
+      fm_free(ex.s);
+      /* where it comes from, since when */
+      const FmJsonNode *et = json_first(json_first(json_get(e, "et")));
+      if (et && json_next(et)) {
+        char m[1500];
+        rd_mw_markup(json_str(json_next(et), ""), m, sizeof m);
+        if (m[0]) { tputs(&h, "<p><small><b>Etymology</b> "); tputs(&h, m); tputs(&h, "</small></p>"); }
+      }
+      const char *date = json_str(json_get(e, "date"), "");
+      if (date[0]) {
+        char m[300];
+        rd_mw_markup(date, m, sizeof m);
+        tputs(&h, "<p><small><b>First known use</b> ");
+        tputs(&h, m);
+        tputs(&h, "</small></p>");
+      }
+    }
+  }
+  tputs(&h, "<hr><p><small>From Merriam-Webster's Collegiate\xC2\xAE Dictionary (merriam-webster.com).</small></p>");
+  json_free(&j);
+  out->doc = (FmDoc *)fm_calloc(1, sizeof *out->doc);
+  doc_parse(h.s, h.n, "https://www.merriam-webster.com/", DOC_WEB, out->doc);
+  fm_free(h.s);
+  out->text = fm_strdup("");
+  return FM_OK;
+}
+
+FmErr rd_mw(const char *key, const char *word, WkArticle *out, WkMediaList *sounds, volatile int *cancel) {
+  memset(out, 0, sizeof *out);
+  if (sounds) memset(sounds, 0, sizeof *sounds);
+  if (!key || !key[0]) {
+    fm_strlcpy(out->error, "Add your free Merriam-Webster key first (Merriam-Webster's home)", sizeof out->error);
+    return FM_ERR_NOT_FOUND;
+  }
+  if (!word || !word[0]) { fm_strlcpy(out->error, "Type a word", sizeof out->error); return FM_ERR_NOT_FOUND; }
+  char we[400], ke[200], url[800];
+  net_urlencode(word, we, sizeof we);
+  net_urlencode(key, ke, sizeof ke);
+  fm_snprintf(url, sizeof url, "https://www.dictionaryapi.com/api/v3/references/collegiate/json/%s?key=%s", we, ke);
+  FmNetResp r;
+  FmErr e = get_body(url, "Merriam-Webster", &r, out->error, sizeof out->error, cancel);
+  if (e != FM_OK) return e;
+  e = rd_mw_parse((const char *)r.data, r.len, word, out, sounds);
+  net_resp_free(&r);
+  return e;
+}
+
+/* ---- the Bible (Free Use Bible API, bible.helloao.org: no key) --------------------------- */
+
+#define BIBLE_API "https://bible.helloao.org/api/"
+
+static bool bible_id_ok(const char *s, size_t max) {
+  if (!s[0] || strlen(s) > max) return false;
+  for (const char *c = s; *c; c++)
+    if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '-'))
+      return false;
+  return true;
+}
+
+FmErr rd_bible_books(const char *tr, WkList *out, volatile int *cancel) {
+  memset(out, 0, sizeof out[0]);
+  out->next = -1;
+  if (!bible_id_ok(tr, 40)) { fm_strlcpy(out->error, "Not a Bible translation", sizeof out->error); return FM_ERR_FORMAT; }
+  char url[200];
+  fm_snprintf(url, sizeof url, BIBLE_API "%s/books.json", tr);
+  FmJson j;
+  FmErr e = get_json(url, "The Bible API", &j, out->error, sizeof out->error, cancel);
+  if (e != FM_OK) return e;
+  for (const FmJsonNode *b = json_first(json_get(json_root(&j), "books")); b; b = json_next(b)) {
+    const char *id = json_str(json_get(b, "id"), "");
+    if (!bible_id_ok(id, 8)) continue;
+    WkPage *p = add(out);
+    int first = (int)json_num(json_get(b, "firstChapterNumber"), 1);
+    fm_snprintf(p->id, sizeof p->id, "%s/%s/%d", tr, id, first);
+    const char *nm = json_str(json_get(b, "name"), "");
+    fm_strlcpy(p->title, nm[0] ? nm : json_str(json_get(b, "commonName"), id), sizeof p->title);
+    int n = (int)json_num(json_get(b, "numberOfChapters"), 0);
+    fm_snprintf(p->desc, sizeof p->desc, "%d chapter%s", n, n == 1 ? "" : "s");
+  }
+  json_free(&j);
+  if (!out->n) fm_strlcpy(out->error, "This translation lists no books", sizeof out->error);
+  return FM_OK;
+}
+
+/* "/api/BSB/JHN/4.json" -> "BSB/JHN/4" */
+static void bible_link_id(const char *link, char *out, size_t cap) {
+  out[0] = 0;
+  if (!link || strncmp(link, "/api/", 5)) return;
+  fm_strlcpy(out, link + 5, cap);
+  char *dot = strstr(out, ".json");
+  if (dot) *dot = 0;
+}
+
+static bool is_word_char(unsigned char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0x80; }
+
+static void bible_put_content(Txt *h, const FmJsonNode *c) {
+  bool note = false;                                 /* a footnote mark was just left out */
+  for (const FmJsonNode *x = json_first(c); x; x = json_next(x)) {
+    const char *t = x->type == JSON_STR ? json_str(x, "") : x->type == JSON_OBJ ? json_str(json_get(x, "text"), "") : "";
+    if (t[0]) {
+      /* "only" {note} "Son": the mark stood between two words */
+      if (note && h->n && is_word_char((unsigned char)h->s[h->n - 1]) && is_word_char((unsigned char)t[0])) tputs(h, " ");
+      hput(h, t);
+      note = false;
+    } else if (x->type == JSON_OBJ && json_bool(json_get(x, "lineBreak"), false)) {
+      tputs(h, "<br>");
+    } else if (x->type == JSON_OBJ && json_get(x, "noteId")) {
+      note = true;                                   /* a footnote mark: left out */
+    }
+  }
+}
+
+FmErr rd_bible_parse_chapter(const char *json, size_t len, const char *id, WkArticle *out, WkMediaList *audio) {
+  FmJson j;
+  if (json_parse(&j, json, len) != FM_OK) {
+    fm_strlcpy(out->error, "The Bible API sent a reply this app does not understand", sizeof out->error);
+    return FM_ERR_FORMAT;
+  }
+  const FmJsonNode *root = json_root(&j), *tr = json_get(root, "translation"), *bk = json_get(root, "book"),
+                   *ch = json_get(root, "chapter");
+  if (!ch) {
+    json_free(&j);
+    fm_strlcpy(out->error, "No such chapter", sizeof out->error);
+    return FM_ERR_NOT_FOUND;
+  }
+  int num = (int)json_num(json_get(ch, "number"), 1);
+  const char *book = json_str(json_get(bk, "name"), json_str(json_get(bk, "commonName"), ""));
+  const char *tname = json_str(json_get(tr, "name"), json_str(json_get(tr, "englishName"), ""));
+  fm_snprintf(out->title, sizeof out->title, "%s %d", book, num);
+  fm_strlcpy(out->desc, tname, sizeof out->desc);
+  fm_strlcpy(out->id, id, sizeof out->id);
+  fm_strlcpy(out->url, json_str(json_get(tr, "website"), "https://bible.helloao.org/"), sizeof out->url);
+  const char *trid = json_str(json_get(tr, "id"), "");
+  const char *bkid = json_str(json_get(bk, "id"), "");
+  Txt h = { 0 };
+  /* the book's chapters, to jump */
+  int nch = (int)json_num(json_get(bk, "numberOfChapters"), 0);
+  if (nch > 1 && bible_id_ok(trid, 40) && bible_id_ok(bkid, 8)) {
+    tputs(&h, "<p><small>Chapters:</small> ");
+    for (int k = 1; k <= nch && k <= 200; k++) {
+      char a[160];
+      if (k == num) fm_snprintf(a, sizeof a, "<b>%d</b> ", k);
+      else fm_snprintf(a, sizeof a, "<a href=\"bible:%s/%s/%d\">%d</a> ", trid, bkid, k, k);
+      tputs(&h, a);
+    }
+    tputs(&h, "</p><hr>");
+  }
+  bool open = false;
+  for (const FmJsonNode *x = json_first(json_get(ch, "content")); x; x = json_next(x)) {
+    const char *type = json_str(json_get(x, "type"), "");
+    if (!strcmp(type, "heading")) {
+      if (open) { tputs(&h, "</p>"); open = false; }
+      tputs(&h, "<h3>");
+      bible_put_content(&h, json_get(x, "content"));
+      tputs(&h, "</h3>");
+    } else if (!strcmp(type, "line_break")) {
+      if (open) { tputs(&h, "</p>"); open = false; }
+    } else if (!strcmp(type, "verse")) {
+      if (!open) { tputs(&h, "<p>"); open = true; }
+      char v[80];
+      int vn = (int)json_num(json_get(x, "number"), 0);
+      fm_snprintf(v, sizeof v, "<span id=\"v%d\"></span><sup><b>%d</b></sup>\xC2\xA0", vn, vn);
+      tputs(&h, v);
+      bible_put_content(&h, json_get(x, "content"));
+      tputs(&h, " ");
+    }
+  }
+  if (open) tputs(&h, "</p>");
+  /* the chapters before and after */
+  char prev[80], next[80];
+  bible_link_id(json_str(json_get(root, "previousChapterApiLink"), ""), prev, sizeof prev);
+  bible_link_id(json_str(json_get(root, "nextChapterApiLink"), ""), next, sizeof next);
+  if (prev[0] || next[0]) {
+    tputs(&h, "<hr><p>");
+    if (prev[0]) { tputs(&h, "<a href=\"bible:"); tputs(&h, prev); tputs(&h, "\">\xC2\xAB Previous chapter</a>"); }
+    if (prev[0] && next[0]) tputs(&h, " \xC2\xB7 ");
+    if (next[0]) { tputs(&h, "<a href=\"bible:"); tputs(&h, next); tputs(&h, "\">Next chapter \xC2\xBB</a>"); }
+    tputs(&h, "</p>");
+  }
+  tputs(&h, "<p><small>");
+  hput(&h, tname);
+  tputs(&h, ", from the Free Use Bible API (bible.helloao.org).</small></p>");
+  /* someone reading the chapter aloud (some translations) */
+  if (audio) {
+    for (const FmJsonNode *a = json_first(json_get(root, "thisChapterAudioLinks")); a && audio->n < 8; a = json_next(a)) {
+      const char *u = json_str(a, "");
+      if (strncmp(u, "https://", 8)) continue;
+      audio->it = (WkMedia *)fm_realloc(audio->it, sizeof *audio->it * (size_t)(audio->n + 1));
+      WkMedia *m = &audio->it[audio->n++];
+      memset(m, 0, sizeof *m);
+      m->type = WM_AUDIO;
+      fm_strlcpy(m->url, u, sizeof m->url);
+      char who[64];
+      fm_strlcpy(who, a->key ? a->key : "", sizeof who);
+      if (who[0] >= 'a' && who[0] <= 'z') who[0] = (char)(who[0] - 'a' + 'A');
+      fm_snprintf(m->file, sizeof m->file, "%s read by %s", out->title, who);
+      fm_snprintf(m->caption, sizeof m->caption, "Read by %s", who);
+    }
+  }
+  json_free(&j);
+  out->doc = (FmDoc *)fm_calloc(1, sizeof *out->doc);
+  doc_parse(h.s, h.n, "https://bible.helloao.org/", DOC_WEB, out->doc);
+  fm_free(h.s);
+  out->text = fm_strdup("");
+  return FM_OK;
+}
+
+/* id: "translation/BOOK/chapter" (an optional "#verse" is the view's). */
+FmErr rd_bible_chapter(const char *id, WkArticle *out, WkMediaList *audio, volatile int *cancel) {
+  memset(out, 0, sizeof *out);
+  if (audio) memset(audio, 0, sizeof *audio);
+  char tr[48], bk[16], v[160];
+  int ch = 0;
+  fm_strlcpy(v, id, sizeof v);
+  v[strcspn(v, "#")] = 0;
+  char *s1 = strchr(v, '/'), *s2 = s1 ? strchr(s1 + 1, '/') : NULL;
+  if (!s1 || !s2) { fm_strlcpy(out->error, "Not a Bible chapter", sizeof out->error); return FM_ERR_FORMAT; }
+  *s1 = *s2 = 0;
+  fm_strlcpy(tr, v, sizeof tr);
+  fm_strlcpy(bk, s1 + 1, sizeof bk);
+  ch = atoi(s2 + 1);
+  if (!bible_id_ok(tr, 40) || !bible_id_ok(bk, 8) || ch < 1 || ch > 200) {
+    fm_strlcpy(out->error, "Not a Bible chapter", sizeof out->error);
+    return FM_ERR_FORMAT;
+  }
+  char url[300];
+  fm_snprintf(url, sizeof url, BIBLE_API "%s/%s/%d.json", tr, bk, ch);
+  FmNetResp r;
+  FmErr e = get_body(url, "The Bible API", &r, out->error, sizeof out->error, cancel);
+  if (e != FM_OK) return e;
+  char cid[64];
+  fm_snprintf(cid, sizeof cid, "%s/%s/%d", tr, bk, ch);
+  e = rd_bible_parse_chapter((const char *)r.data, r.len, cid, out, audio);
+  net_resp_free(&r);
+  return e;
+}
+
+/* Lower case, letters and digits only ("1 John" -> "1john"). */
+static void bible_fold(const char *s, char *out, size_t cap) {
+  size_t o = 0;
+  for (; *s && o + 1 < cap; s++) {
+    unsigned char c = (unsigned char)*s;
+    if (c >= 'A' && c <= 'Z') out[o++] = (char)(c - 'A' + 'a');
+    else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c >= 0x80) out[o++] = (char)c;
+  }
+  out[o] = 0;
+}
+
+/* "John 3:16", "juan 3", "1 Corinthians 13:4", "Genesis": the book, its chapter, the verse. */
+void rd_bible_ref(const char *q, char *book, size_t cap, int *chapter, int *verse) {
+  *chapter = *verse = 0;
+  char s[200];
+  fm_strlcpy(s, q, sizeof s);
+  size_t n = strlen(s);
+  while (n && s[n - 1] == ' ') s[--n] = 0;
+  /* the numbers at the end: "3:16", "3 16", "3.16" or "3" */
+  char *p = s + n;
+  while (p > s && ((p[-1] >= '0' && p[-1] <= '9') || p[-1] == ':' || p[-1] == '.')) p--;
+  if (p > s && p[-1] == ' ' && *p) {
+    *chapter = atoi(p);
+    const char *c = strpbrk(p, ":.");
+    if (c) *verse = atoi(c + 1);
+    p[-1] = 0;
+  }
+  fm_strlcpy(book, s, cap);
+}
+
+FmErr rd_bible_find(const char *tr, const char *query, WkList *out, volatile int *cancel) {
+  char book[200];
+  int ch = 0, vs = 0;
+  rd_bible_ref(query ? query : "", book, sizeof book, &ch, &vs);
+  FmErr e = rd_bible_books(tr, out, cancel);
+  if (e != FM_OK) return e;
+  char want[200];
+  bible_fold(book, want, sizeof want);
+  /* the books whose name (or id) starts with what was typed */
+  WkList all = *out;
+  memset(out, 0, sizeof *out);
+  out->next = -1;
+  for (int i = 0; i < all.n; i++) {
+    char name[256], bid[16];
+    bible_fold(all.it[i].title, name, sizeof name);
+    const char *s1 = strchr(all.it[i].id, '/');
+    fm_strlcpy(bid, s1 ? s1 + 1 : "", sizeof bid);
+    bid[strcspn(bid, "/")] = 0;
+    char bidf[16];
+    bible_fold(bid, bidf, sizeof bidf);
+    if (!want[0] || (strncmp(name, want, strlen(want)) && strcmp(bidf, want))) continue;
+    WkPage *p = add(out);
+    *p = all.it[i];
+    if (ch > 0) {
+      char trb[64];
+      fm_strlcpy(trb, all.it[i].id, sizeof trb);
+      char *last = strrchr(trb, '/');
+      if (last) *last = 0;
+      if (vs > 0) fm_snprintf(p->id, sizeof p->id, "%s/%d#%d", trb, ch, vs);
+      else fm_snprintf(p->id, sizeof p->id, "%s/%d", trb, ch);
+      if (vs > 0) fm_snprintf(p->title + strlen(p->title), sizeof p->title - strlen(p->title), " %d:%d", ch, vs);
+      else fm_snprintf(p->title + strlen(p->title), sizeof p->title - strlen(p->title), " %d", ch);
+    }
+  }
+  wk_list_free(&all);
+  /* the translation names its books in its own language ("Mga Awit"): the
+  ** English names (BSB's) find them too, by the book's id */
+  if (!out->n && strcmp(tr, "BSB") && want[0]) {
+    WkList en;
+    if (rd_bible_find("BSB", query, &en, cancel) == FM_OK) {
+      for (int i = 0; i < en.n; i++) {
+        WkPage *p = add(out);
+        *p = en.it[i];
+        const char *rest = strchr(en.it[i].id, '/');
+        fm_snprintf(p->id, sizeof p->id, "%s%s", tr, rest ? rest : "");
+      }
+      out->next = -1;
+    }
+    wk_list_free(&en);
+  }
+  if (!out->n)
+    fm_snprintf(out->error, sizeof out->error, "No book called \xE2\x80\x9C%s\xE2\x80\x9D in this translation: try e.g. John 3:16 or Genesis 1", book);
+  return FM_OK;
+}

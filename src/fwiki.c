@@ -46,7 +46,10 @@
 
 /* ---- sources -------------------------------------------------------------------- */
 
-enum { SK_WIKI, SK_GUTEN, SK_INAT, SK_FRUIT, SK_DICT, SK_DEVTO, SK_SO };
+enum { SK_WIKI, SK_GUTEN, SK_INAT, SK_FRUIT, SK_DICT, SK_DEVTO, SK_SO, SK_MW, SK_BIBLE };
+
+/* sources whose "media" are sounds: a word's pronunciation, a chapter read aloud */
+static bool sound_src(int kind) { return kind == SK_DICT || kind == SK_MW || kind == SK_BIBLE; }
 
 typedef struct Src {
   const char *key, *name, *about;
@@ -59,6 +62,8 @@ typedef struct Src {
 static const Src kSrc[] = {
   { "wikipedia", "Wikipedia", "The free encyclopedia", IC_TEXT, SK_WIKI, "%s.wikipedia.org", 1, 1, 1, 1, 1 },
   { "dictionary", "Dictionary", "English words: meanings, examples, pronunciation", IC_TEXT, SK_DICT, NULL, 0, 1, 0, 0, 0 },
+  { "merriam", "Merriam-Webster", "Merriam-Webster's Collegiate Dictionary: needs your free key", IC_TEXT, SK_MW, NULL, 0, 1, 0, 0, 0 },
+  { "bible", "Bible", "The Bible in 1,250 translations: English, Tagalog, Cebuano, Ilocano ...", IC_LIBRARY, SK_BIBLE, NULL, 0, 1, 0, 0, 0 },
   { "wiktionary", "Wiktionary", "Words in every language: meanings, translations", IC_TEXT, SK_WIKI, "%s.wiktionary.org", 1, 1, 0, 1, 0 },
   { "gutenberg", "Free books", "Project Gutenberg: 70,000+ public-domain books", IC_LIBRARY, SK_GUTEN, NULL, 0, 0, 0, 0, 0 },
   { "inaturalist", "Plants & animals", "iNaturalist: every species, photos, local names", IC_PICTURES, SK_INAT, NULL, 0, 1, 0, 0, 0 },
@@ -104,18 +109,24 @@ static const Group kSoTags[] = {
   { "Data structures", "data-structures" }, { "Linked lists", "linked-list" },
 };
 
+static const Group kBibleTr[] = {
+  { "BSB (English)", "BSB" }, { "KJV", "eng_kjv" }, { "WEB", "ENGWEBP" }, { "ASV", "eng_asv" },
+  { "Tagalog", "tgl_ulb" }, { "Cebuano", "ceb_ocb" }, { "Ilocano", "ilo_ulb" }, { "Hiligaynon", "hil_bib" },
+};
+
 static const Group *groups_of(int kind, int *n) {
   switch (kind) {
     case SK_INAT: *n = (int)FM_COUNT(kInatGroups); return kInatGroups;
     case SK_DEVTO: *n = (int)FM_COUNT(kDevTags); return kDevTags;
     case SK_SO: *n = (int)FM_COUNT(kSoTags); return kSoTags;
+    case SK_BIBLE: *n = (int)FM_COUNT(kBibleTr); return kBibleTr;
     default: *n = 0; return NULL;
   }
 }
 
 /* Sources whose home is a list of their own (books, species, fruits, articles, questions). */
 static bool has_browse(int kind) {
-  return kind == SK_GUTEN || kind == SK_INAT || kind == SK_FRUIT || kind == SK_DEVTO || kind == SK_SO;
+  return kind == SK_GUTEN || kind == SK_INAT || kind == SK_FRUIT || kind == SK_DEVTO || kind == SK_SO || kind == SK_BIBLE;
 }
 
 /* ---- requests ------------------------------------------------------------------- */
@@ -147,6 +158,7 @@ typedef struct WkTask {
 } WkTask;
 
 static WkTask *g_dropped[16];
+static char g_mw_key[80];      /* the user's Merriam-Webster key (wiki.txt "M"), read by the workers */
 
 static bool cache_path(const char *url, char *out, size_t cap) {
   char dir[FM_PATH_MAX], name[64];
@@ -184,6 +196,7 @@ static void search_task(WkTask *t) {
     case SK_FRUIT: t->err = rd_fruit_list(t->arg, &t->list, &t->cancel); break;
     case SK_DEVTO: t->err = rd_devto_list(t->arg, t->num, &t->list, &t->cancel); break;   /* a topic tag */
     case SK_SO: t->err = rd_so_search(t->arg, t->num, &t->list, &t->cancel); break;
+    case SK_BIBLE: t->err = rd_bible_find(t->id, t->arg, &t->list, &t->cancel); break;   /* id: the translation */
     default: t->err = FM_ERR_UNSUPPORTED; break;
   }
   fm_strlcpy(t->error, t->list.error, sizeof t->error);
@@ -198,6 +211,8 @@ static void article_task(WkTask *t) {
     case SK_DICT: t->err = rd_dict(t->arg, &t->art, &t->media, &t->cancel); break;
     case SK_DEVTO: t->err = rd_devto_article(t->id[0] ? t->id : t->arg, &t->art, &t->cancel); break;
     case SK_SO: t->err = rd_so_question(t->id[0] ? t->id : t->arg, &t->art, &t->cancel); break;
+    case SK_MW: t->err = rd_mw(g_mw_key, t->arg, &t->art, &t->media, &t->cancel); break;
+    case SK_BIBLE: t->err = rd_bible_chapter(t->id[0] ? t->id : t->arg, &t->art, &t->media, &t->cancel); break;
     default: t->err = FM_ERR_UNSUPPORTED; break;
   }
   fm_strlcpy(t->error, t->art.error, sizeof t->error);
@@ -215,6 +230,7 @@ static int task_main(void *u) {
       else if (kSrc[t->src].kind == SK_FRUIT) t->err = rd_fruit_list("", &t->list, &t->cancel);
       else if (kSrc[t->src].kind == SK_DEVTO) t->err = rd_devto_list(t->arg, t->num, &t->list, &t->cancel);
       else if (kSrc[t->src].kind == SK_SO) t->err = rd_so_list(t->arg, t->num, &t->list, &t->cancel);
+      else if (kSrc[t->src].kind == SK_BIBLE) t->err = rd_bible_books(t->arg, &t->list, &t->cancel);
       fm_strlcpy(t->error, t->list.error, sizeof t->error);
       break;
     case WT_ARTICLE: article_task(t); break;
@@ -375,6 +391,8 @@ static struct {
   int *find_blk;               /* plain text pages: the block of each match */
   float art_view_h;
   char contact[300];           /* for Wikimedia's rate limits (Api-User-Agent) */
+  char mw_field[80];           /* the Merriam-Webster key being typed */
+  char goto_anchor[24];        /* after an article loads: the place to show ("v16": a verse) */
   char contact_field[300];
   /* lists */
   WkRef *saved, *hist;
@@ -383,6 +401,7 @@ static struct {
 
 static void save_file(void);
 static void contact_card(float x, float *y, float col, bool page);
+static void mw_key_card(float x, float *y, float col);
 static void go_back(void);
 
 static const Src *cur(void) { return &kSrc[FM_CLAMP(S.src, 0, NSRC - 1)]; }
@@ -439,6 +458,7 @@ static void load_file(void) {
       if (n >= 2 && !strcmp(fld[0], "L") && wk_lang_ok(fld[1])) fm_strlcpy(S.lang, fld[1], sizeof S.lang);
       else if (n >= 2 && !strcmp(fld[0], "Z")) S.zoom = FM_CLAMP((float)atof(fld[1]), 0.8f, 1.6f);
       else if (n >= 2 && !strcmp(fld[0], "C")) fm_strlcpy(S.contact, fld[1], sizeof S.contact);
+      else if (n >= 2 && !strcmp(fld[0], "M")) fm_strlcpy(g_mw_key, fld[1], sizeof g_mw_key);
       else if (n >= 2 && !strcmp(fld[0], "R") && src_find(fld[1]) >= 0) S.src = src_find(fld[1]);
       else if (n >= 5 && (!strcmp(fld[0], "s") || !strcmp(fld[0], "h")) && src_find(fld[1]) >= 0 && fld[4][0]) {
         /* s|h  source  lang  id  title  desc  thumb */
@@ -460,6 +480,7 @@ static void load_file(void) {
   }
   wk_set_contact(S.contact);
   fm_strlcpy(S.contact_field, S.contact, sizeof S.contact_field);
+  fm_strlcpy(S.mw_field, g_mw_key, sizeof S.mw_field);
 }
 
 static void save_file(void) {
@@ -471,6 +492,7 @@ static void save_file(void) {
   fprintf(f, "# mmcfm Online reading: L language, Z text size, C Wikimedia contact, R source, s saved, h history\n");
   fprintf(f, "L\t%s\nZ\t%.2f\nR\t%s\n", S.lang, S.zoom, cur()->key);
   if (S.contact[0]) fprintf(f, "C\t%s\n", S.contact);
+  if (g_mw_key[0]) fprintf(f, "M\t%s\n", g_mw_key);
   for (int i = 0; i < S.nsaved; i++)
     fprintf(f, "s\t%s\t%s\t%s\t%s\t%s\t%s\n", S.saved[i].src, S.saved[i].lang, S.saved[i].id, S.saved[i].title,
             S.saved[i].desc, S.saved[i].thumb);
@@ -618,8 +640,8 @@ static void article_start(int src, const char *lang, const char *id, const char 
 
 static void search_start(const char *q, bool more) {
   if (!q || !q[0]) return;
-  if (cur()->kind == SK_DICT) {                      /* a word opens at once */
-    article_start(S.src, "en", q, q, true);
+  if (cur()->kind == SK_DICT || cur()->kind == SK_MW) {   /* a word opens at once */
+    article_start(S.src, "en", NULL, q, true);
     return;
   }
   if (!more) {
@@ -634,7 +656,13 @@ static void search_start(const char *q, bool more) {
   } else if (S.t_search || S.res.next < 0) {
     return;
   }
-  S.t_search = task_start(WT_SEARCH, S.res_src, S.lang, S.res_query, NULL, more ? S.res.next : kSrc[S.res_src].kind == SK_GUTEN ? 1 : 0);
+  const char *tr = NULL;                             /* the Bible: in which translation */
+  if (kSrc[S.res_src].kind == SK_BIBLE) {
+    int ng;
+    const Group *gs = groups_of(SK_BIBLE, &ng);
+    tr = gs[FM_CLAMP(S.group[S.res_src], 0, ng - 1)].arg;
+  }
+  S.t_search = task_start(WT_SEARCH, S.res_src, S.lang, S.res_query, tr, more ? S.res.next : kSrc[S.res_src].kind == SK_GUTEN ? 1 : 0);
 }
 
 /* Opens an article; push: the one on screen goes on the Back stack. */
@@ -823,6 +851,8 @@ void wiki_pump(void) {
       }
       S.scroll[WP_ARTICLE].y = S.restore_y;
       S.restore_y = 0;
+      const char *hash = strchr(t->id[0] ? t->id : t->arg, '#');   /* "BSB/JHN/3#16": verse 16 */
+      if (hash && hash[1]) fm_snprintf(S.goto_anchor, sizeof S.goto_anchor, "v%.12s", hash + 1);
       fm_free(S.find_blk);
       S.find_blk = NULL;
       S.find_n = 0;
@@ -1022,7 +1052,7 @@ static void more_menu(float x, float y) {
 
 static void open_wiki_of_art(void) {
   if (!S.art.wiki[0]) return;
-  article_start(0, kSrc[S.art_src].kind == SK_DICT ? "en" : S.art.lang, NULL, S.art.wiki, true);
+  article_start(0, sound_src(kSrc[S.art_src].kind) ? "en" : S.art.lang, NULL, S.art.wiki, true);
 }
 
 static void menu_results(void) {
@@ -1050,7 +1080,8 @@ static const char *page_name(void) {
   switch (S.page) {
     case WP_RESULTS: return "Search";
     case WP_ARTICLE: return S.art_ok && !S.t_art ? S.art.title : S.want_title;
-    case WP_MEDIA: return kSrc[S.art_src].kind == SK_DICT ? "Pronunciation" : "Pictures, videos and sounds";
+    case WP_MEDIA: return kSrc[S.art_src].kind == SK_BIBLE ? "Listen to this chapter"
+                          : sound_src(kSrc[S.art_src].kind) ? "Pronunciation" : "Pictures, videos and sounds";
     case WP_LANGS: return "Other languages";
     case WP_RELATED: return "Related pages and links";
     case WP_TOC: return "Contents";
@@ -1094,8 +1125,9 @@ static void draw_top(FmRect r, bool narrow) {
     if (media) {
       b = rect_center(rect_cut_right(&in, bs), bs, bs);
       title_nodrag(b);
-      if (ui_icon_btn(ui_idn(base, 4), b, s->kind == SK_DICT ? IC_VOLUME : IC_IMAGE, T.text2,
-                      s->kind == SK_DICT ? "Pronunciation" : "Pictures, videos and sounds"))
+      if (ui_icon_btn(ui_idn(base, 4), b, sound_src(s->kind) ? IC_VOLUME : IC_IMAGE, T.text2,
+                      s->kind == SK_BIBLE ? "Listen to this chapter"
+                      : sound_src(s->kind) ? "Pronunciation" : "Pictures, videos and sounds"))
         sub_start(WP_MEDIA);
     }
     b = rect_center(rect_cut_right(&in, bs), bs, bs);
@@ -1133,6 +1165,8 @@ static void search_field(FmRect r) {
     case SK_GUTEN: fm_strlcpy(hint, "Search free books: a title or an author", sizeof hint); break;
     case SK_INAT: fm_strlcpy(hint, "Search plants and animals (mango, eagle, rose...)", sizeof hint); break;
     case SK_FRUIT: fm_strlcpy(hint, "Search fruits", sizeof hint); break;
+    case SK_MW: fm_strlcpy(hint, "Look up a word in Merriam-Webster", sizeof hint); break;
+    case SK_BIBLE: fm_strlcpy(hint, "A book or a verse: John 3:16, Genesis 1, Psalm 23", sizeof hint); break;
     case SK_DEVTO: fm_strlcpy(hint, "A topic, one word: c, python, rust, beginners...", sizeof hint); break;
     case SK_SO: fm_strlcpy(hint, "Search questions (linked list in c, git undo commit...)", sizeof hint); break;
     default: fm_snprintf(hint, sizeof hint, "Search %s (%s)", s->name, s->langs ? lang_name(S.lang) : "English"); break;
@@ -1269,6 +1303,7 @@ static void home_browse(float x, float *py, float col, FmRect view) {
     case SK_INAT: label = "Most observed"; break;
     case SK_DEVTO: label = g == 0 ? "Most liked this week" : "Most liked this year"; break;
     case SK_SO: label = "Most voted questions"; break;
+    case SK_BIBLE: label = "Books"; break;
   }
   section_label(x, &y, label);
   if (!S.browse.n) {
@@ -1337,6 +1372,7 @@ static void page_home(FmRect r) {
   }
   const Src *s = cur();
   if (!S.contact[0] && s->kind == SK_WIKI) contact_card(x, &y, col, false);
+  if (s->kind == SK_MW) mw_key_card(x, &y, col);
   if (s->feed) {
     home_wikipedia(x, &y, col);
   } else if (has_browse(s->kind)) {
@@ -1472,6 +1508,14 @@ static bool open_site_link(const char *url) {
 static void open_doc_link(const char *href) {
   const Src *s = &kSrc[S.art_src];
   FmDoc *d = S.art.doc;
+  if (!strncmp(href, "mw:", 3) || !strncmp(href, "bible:", 6)) {   /* a suggestion, another chapter */
+    bool mw = href[0] == 'm';
+    char v[300];
+    doc_url_decode(href + (mw ? 3 : 6), v, sizeof v);
+    if (mw) article_start(src_find("merriam"), "en", NULL, v, true);
+    else article_start(src_find("bible"), S.art.lang, v, NULL, true);
+    return;
+  }
   if (href[0] == '#') {                              /* a place in this page */
     int b = d ? doc_anchor(d, href + 1) : -1;
     if (b >= 0) {
@@ -1738,6 +1782,15 @@ static void page_article(FmRect r) {
   if (desc_h > 0) font_draw_wrap(FONT_REGULAR, txt(), x, y, col, S.art.desc, T.text2, true);
   y += desc_h + DP(18);
   S.lay_top = y + sc->y - r.y;              /* where the first block starts, scroll 0 */
+  if (S.goto_anchor[0] && doc) {             /* a verse asked for: show it near the top */
+    int b = doc_anchor(doc, S.goto_anchor);
+    if (b >= 0) {
+      sc->y = FM_MAX(0.0f, S.lay_top + doc->b[b].y - DP(12));
+      sc->vel = 0;
+      ui_redraw();
+    }
+    S.goto_anchor[0] = 0;
+  }
   if (doc) {
     DocHit hit = doc_draw(doc, x, y, r, ui_id("wk.doc"), doc_thumb);
     y += doc->total;
@@ -1766,8 +1819,8 @@ static void page_article(FmRect r) {
   FmIcon icons[5];
   int act[5], n = 0;
   if (s->media && (s->kind == SK_WIKI || S.media.n)) {
-    labels[n] = s->kind == SK_DICT ? "Hear it" : "Pictures, videos, sounds";
-    icons[n] = s->kind == SK_DICT ? IC_VOLUME : IC_IMAGE;
+    labels[n] = s->kind == SK_BIBLE ? "Listen to this chapter" : sound_src(s->kind) ? "Hear it" : "Pictures, videos, sounds";
+    icons[n] = sound_src(s->kind) ? IC_VOLUME : IC_IMAGE;
     act[n++] = WP_MEDIA;
   }
   if (s->related) { labels[n] = "Related and links"; icons[n] = IC_LINK; act[n++] = WP_RELATED; }
@@ -2071,6 +2124,46 @@ static void contact_card(float x, float *y, float col, bool page) {
     ui_focus(0);
     ui_toast(S.contact[0] ? "Saved: Wikipedia now allows 200 requests a minute" : "Contact removed");
     if (page) go_back();
+  }
+  *y += c.h + DP(20);
+}
+
+/* Merriam-Webster: the user's own free key (dictionaryapi.com), on its home. */
+static void mw_key_card(float x, float *y, float col) {
+  static const char kHow[] =
+    "Merriam-Webster's dictionary needs a free key of your own: sign up at dictionaryapi.com (Register), choose "
+    "\"Collegiate Dictionary\" as a reference, then paste the key it shows here. Free for non-commercial use, "
+    "1,000 words a day.";
+  float th = font_draw_wrap(FONT_REGULAR, ui.m.font_small, 0, 0, col - DP(28), kHow, T.text2, false);
+  float fh = DP(ui.touch_mode ? 44 : 38);
+  FmRect c = { x, *y, col, DP(14) + font_line_h(ui.m.font) + DP(6) + th + DP(10) + fh + DP(14) };
+  gfx_rrect(c, DP(14), T.surface);
+  gfx_rrect_line(c, DP(14), DP(1), g_mw_key[0] ? T.border : T.accent);
+  float cy = c.y + DP(14);
+  font_draw(FONT_BOLD, ui.m.font, c.x + DP(14), cy, g_mw_key[0] ? "Your Merriam-Webster key" : "Add your Merriam-Webster key",
+            -1, T.text);
+  cy += font_line_h(ui.m.font) + DP(6);
+  font_draw_wrap(FONT_REGULAR, ui.m.font_small, c.x + DP(14), cy, col - DP(28), kHow, T.text2, true);
+  cy += th + DP(10);
+  float bw = DP(96);
+  FmRect tf = { c.x + DP(14), cy, col - DP(28) - bw - DP(8), fh };
+  gfx_rrect(tf, DP(8), T.surface2);
+  int res = ui_textfield(ui_id("wk.mwkey"), rect_inset2(tf, DP(8), DP(2)), S.mw_field, sizeof S.mw_field,
+                         "The key from dictionaryapi.com", 0);
+  bool save = ui_button(ui_id("wk.mwkey.save"), FM_RECT(tf.x + tf.w + DP(8), cy, bw, fh), IC_CHECK, "Save", UI_BTN_FILLED);
+  if (save || (res & UI_TF_SUBMIT)) {
+    char *t = S.mw_field;
+    while (*t == ' ') t++;
+    char k[80];
+    size_t o = 0;
+    for (; *t && o + 1 < sizeof k; t++)
+      if ((*t >= 'a' && *t <= 'z') || (*t >= 'A' && *t <= 'Z') || (*t >= '0' && *t <= '9') || *t == '-') k[o++] = *t;
+    k[o] = 0;
+    fm_strlcpy(g_mw_key, k, sizeof g_mw_key);
+    fm_strlcpy(S.mw_field, k, sizeof S.mw_field);
+    save_file();
+    ui_focus(0);
+    ui_toast(k[0] ? "Saved: look up a word" : "Key removed");
   }
   *y += c.h + DP(20);
 }

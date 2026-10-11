@@ -144,6 +144,21 @@ FmErr rd_so_list(const char *tag, int page, WkList *out, volatile int *cancel);
 FmErr rd_so_search(const char *query, int page, WkList *out, volatile int *cancel);
 FmErr rd_so_question(const char *id, WkArticle *out, volatile int *cancel);
 FmErr rd_so_parse(const char *json, size_t len, WkArticle *out);
+/* Merriam-Webster's Collegiate Dictionary (dictionaryapi.com, the user's free
+** key): a word's entries as HTML (definitions, examples, etymology), its
+** sounds; a word it does not know: its suggestions as "mw:word" links. */
+FmErr rd_mw(const char *key, const char *word, WkArticle *out, WkMediaList *sounds, volatile int *cancel);
+FmErr rd_mw_parse(const char *json, size_t len, const char *word, WkArticle *out, WkMediaList *sounds);
+void  rd_mw_markup(const char *in, char *out, size_t cap);
+/* The Bible (Free Use Bible API, bible.helloao.org, no key): a translation's
+** books (ids "translation/BOOK/1"); a chapter as HTML, with links
+** "bible:translation/BOOK/n" to the others and its narrations as sounds;
+** a reference ("John 3:16") to the matching chapter ("...#16": the verse). */
+FmErr rd_bible_books(const char *tr, WkList *out, volatile int *cancel);
+FmErr rd_bible_chapter(const char *id, WkArticle *out, WkMediaList *audio, volatile int *cancel);
+FmErr rd_bible_parse_chapter(const char *json, size_t len, const char *id, WkArticle *out, WkMediaList *audio);
+FmErr rd_bible_find(const char *tr, const char *query, WkList *out, volatile int *cancel);
+void  rd_bible_ref(const char *q, char *book, size_t cap, int *chapter, int *verse);
 /* Shared by the parsers: a block list over text built by the caller. */
 void  wk_blocks_from_lines(WkArticle *a);
 

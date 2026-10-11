@@ -415,9 +415,112 @@ static void lt_offline(void) {
   }
 }
 
+/* ---- the Bible and Merriam-Webster (fwiki_more.c) ------------------------------------------ */
+
+static const char kChapter[] =
+  "{\"translation\":{\"id\":\"BSB\",\"name\":\"Berean Standard Bible\",\"website\":\"https://berean.bible/\"},"
+  "\"book\":{\"id\":\"JHN\",\"name\":\"John\",\"numberOfChapters\":21},"
+  "\"chapter\":{\"number\":3,\"content\":[{\"type\":\"heading\",\"content\":[\"Jesus and Nicodemus\"]},"
+  "{\"type\":\"verse\",\"number\":1,\"content\":[\"Now there was a man.\"]},{\"type\":\"line_break\"},"
+  "{\"type\":\"verse\",\"number\":16,\"content\":[\"He gave His one and only\",{\"noteId\":17},\"Son.\",{\"noteId\":18},\"\u201d\"]}]},"
+  "\"previousChapterApiLink\":\"/api/BSB/JHN/2.json\",\"nextChapterApiLink\":\"/api/BSB/JHN/4.json\","
+  "\"thisChapterAudioLinks\":{\"david\":\"https://audio.example/david.mp3\",\"bad\":\"http://plain/x.mp3\"}}";
+
+static const char kMw[] =
+  "[{\"meta\":{\"id\":\"love:1\"},\"hwi\":{\"hw\":\"love\",\"prs\":[{\"mw\":\"\u02c8l\u0259v\",\"sound\":{\"audio\":\"love0001\"}}]},"
+  "\"fl\":\"noun\",\"def\":[{\"sseq\":[[[\"sense\",{\"dt\":[[\"text\",\"{bc}strong affection\"],"
+  "[\"vis\",[{\"t\":\"maternal {it}love{/it} for a child\"}]]]}]]]}],"
+  "\"et\":[[\"text\",\"Middle English, from Old English {it}lufu{/it}\"]],\"date\":\"before the 12th century{ds||1||}\","
+  "\"shortdef\":[\"strong affection for another\",\"warm attachment\"]},"
+  "{\"meta\":{\"id\":\"love:2\"},\"hwi\":{\"hw\":\"love\"},\"fl\":\"verb\",\"shortdef\":[\"to hold dear\"]}]";
+
+static void bt_offline(void) {
+  char book[80];
+  int ch, vs;
+  rd_bible_ref("1 Corinthians 13:4", book, sizeof book, &ch, &vs);
+  TEST_CHECK(!strcmp(book, "1 Corinthians") && ch == 13 && vs == 4);
+  rd_bible_ref("Psalm 23", book, sizeof book, &ch, &vs);
+  TEST_CHECK(!strcmp(book, "Psalm") && ch == 23 && vs == 0);
+  rd_bible_ref("Genesis", book, sizeof book, &ch, &vs);
+  TEST_CHECK(!strcmp(book, "Genesis") && ch == 0);
+  WkArticle a;
+  WkMediaList m;
+  memset(&a, 0, sizeof a);
+  memset(&m, 0, sizeof m);
+  TEST_CHECK(rd_bible_parse_chapter(kChapter, sizeof kChapter - 1, "BSB/JHN/3", &a, &m) == FM_OK && a.doc);
+  TEST_CHECK(!strcmp(a.title, "John 3") && !strcmp(a.desc, "Berean Standard Bible") && !strcmp(a.id, "BSB/JHN/3"));
+  if (a.doc) {
+    TEST_CHECK(strstr(a.doc->text, "one and only Son.\u201d") != NULL);             /* the notes' places: a space between words only */
+    TEST_CHECK(doc_anchor(a.doc, "v16") >= 0 && strstr(a.doc->text, "Jesus and Nicodemus"));
+    bool prev = false, next = false, ch21 = false;
+    for (int i = 0; i < a.doc->nlinks; i++) {
+      prev |= !strcmp(a.doc->links[i], "bible:BSB/JHN/2");
+      next |= !strcmp(a.doc->links[i], "bible:BSB/JHN/4");
+      ch21 |= !strcmp(a.doc->links[i], "bible:BSB/JHN/21");
+    }
+    TEST_CHECK(prev && next && ch21);
+  }
+  TEST_CHECK(m.n == 1 && !strcmp(m.it[0].url, "https://audio.example/david.mp3") && strstr(m.it[0].caption, "David"));
+  wk_article_free(&a);
+  wk_media_free(&m);
+  /* Merriam-Webster */
+  char mk[300];
+  rd_mw_markup("{bc}a {it}feeling{/it} of {sx|affection||} {ldquo}x{rdquo} {a_link|warmth} {dx}see {dxt|like||}{/dx} 1<2", mk, sizeof mk);
+  TEST_CHECK(!strcmp(mk, "<b>:</b> a <i>feeling</i> of affection \u201cx\u201d warmth \u2014 see like 1&lt;2"));
+  if (strcmp(mk, "<b>:</b> a <i>feeling</i> of affection \u201cx\u201d warmth \u2014 see like 1&lt;2")) printf("    markup: %s\n", mk);
+  memset(&a, 0, sizeof a);
+  memset(&m, 0, sizeof m);
+  TEST_CHECK(rd_mw_parse(kMw, sizeof kMw - 1, "love", &a, &m) == FM_OK && a.doc);
+  TEST_CHECK(m.n == 1 && !strcmp(m.it[0].url, "https://media.merriam-webster.com/audio/prons/en/us/mp3/l/love0001.mp3"));
+  if (a.doc) {
+    TEST_CHECK(strstr(a.doc->text, "strong affection for another") && strstr(a.doc->text, "to hold dear") &&
+               strstr(a.doc->text, "maternal love for a child") && strstr(a.doc->text, "Etymology") &&
+               strstr(a.doc->text, "before the 12th century") && strstr(a.doc->text, "Merriam-Webster"));
+  }
+  TEST_CHECK(strstr(a.desc, "noun") != NULL);
+  wk_article_free(&a);
+  wk_media_free(&m);
+  static const char kSugg[] = "[\"lover\",\"glove\"]";
+  memset(&a, 0, sizeof a);
+  TEST_CHECK(rd_mw_parse(kSugg, sizeof kSugg - 1, "lovr", &a, NULL) == FM_OK && a.doc && a.doc->nlinks == 2 &&
+             !strcmp(a.doc->links[0], "mw:lover"));
+  wk_article_free(&a);
+  memset(&a, 0, sizeof a);
+  static const char kBadKey[] = "Invalid API key. Not subscribed for this reference.";
+  TEST_CHECK(rd_mw_parse(kBadKey, sizeof kBadKey - 1, "love", &a, NULL) != FM_OK && strstr(a.error, "key"));
+  wk_article_free(&a);
+}
+
+/* MMCFM_READ_TEST=1: the Bible against its site (MMCFM_MW_KEY: Merriam-Webster too). */
+static void bt_live(void) {
+  if (!getenv("MMCFM_READ_TEST")) return;
+  WkList l;
+  FmErr e = rd_bible_find("tgl_ulb", "John 3:16", &l, NULL);
+  printf("  bible tgl \"John 3:16\": %s, %d: %s %s\n", fm_err_str(e), l.n, l.n ? l.it[0].id : "", l.error);
+  TEST_CHECK(e == FM_OK && l.n >= 1 && !strcmp(l.it[0].id, "tgl_ulb/JHN/3#16"));
+  wk_list_free(&l);
+  WkArticle a;
+  WkMediaList m;
+  e = rd_bible_chapter("BSB/JHN/3", &a, &m, NULL);
+  printf("  bible BSB/JHN/3: %s, \"%s\", %d blocks, %d narrations %s\n", fm_err_str(e), a.title, a.doc ? a.doc->nb : 0, m.n, a.error);
+  TEST_CHECK(e == FM_OK && a.doc && a.doc->nb > 5 && m.n > 0);
+  wk_article_free(&a);
+  wk_media_free(&m);
+  const char *key = getenv("MMCFM_MW_KEY");
+  if (key && *key) {
+    e = rd_mw(key, "love", &a, &m, NULL);
+    printf("  merriam-webster \"love\": %s, %d blocks, %d sounds %s\n", fm_err_str(e), a.doc ? a.doc->nb : 0, m.n, a.error);
+    TEST_CHECK(e == FM_OK && a.doc && m.n > 0);
+    wk_article_free(&a);
+    wk_media_free(&m);
+  }
+}
+
 int test_reading(const char *tmp) {
   FM_UNUSED(tmp);
   int before = g_test_fail;
+  bt_offline();
+  bt_live();
   lt_offline();
   rt_offline();
   dt_offline();
