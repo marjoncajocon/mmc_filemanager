@@ -154,7 +154,7 @@ Everything streams, with nothing downloaded before playback. Downloads are optio
 - Pages are drawn from their HTML (the wikis' pages, Gutenberg's HTML editions, dev.to articles, Stack Overflow posts) by a small built-in layout (`fdoc.c`): headings, paragraphs, bulleted and numbered lists, **code blocks** (monospace box), quotes, **pictures in the text** with captions (tap for full size), pictures laid over pictures (**chess diagrams** with their pieces, dots on location maps), **tables** (with the infobox, column widths from their content), **bold**, *italic*, `inline code` and **links** (a wiki link opens that page in the reader, a book's contents link jumps to the chapter, other links go to the browser). Plain text is the fallback.
 - **Find in page**: Ctrl+F (or ⋮ > Find in page): every match highlighted, "3 of 12", Enter / F3 for the next, Shift+F3 the previous.
 - Reader: bigger/smaller text (Ctrl +/-), Page Up/Down, contents; pictures open in the image viewer, videos in the video player (VP9/Opus WebM, up to 480p), sounds in the music player, all downloaded first with progress.
-- **Saved** (the star; also in the home screen's Favorites) and **history** across every source; **language**: English, Tagalog, Cebuano, Simple English, Ilokano, Waray, Kapampangan, Bikol and more.
+- **Saved** (the star; also in the home screen's Favorites) and **history** across every source (remove one with its ×, or **Clear all**, which asks for a second tap); **language**: English, Tagalog, Cebuano, Simple English, Ilokano, Waray, Kapampangan, Bikol and more.
 - Wikimedia allows an unidentified app only 10 requests a minute (thumbnails included); with a contact (an email or a web page, ⋮ > Wikimedia contact, sent only to Wikimedia in an `Api-User-Agent` header) it allows 200.
 - Not shown: page styling and colours, math formulas (their TeX source shows as code), interactive maps; tables inside tables are flattened into lines. Scripts the fonts lack (Ethiopic, some Indic) show as boxes. Gutenberg's catalog is slow (lists can take ~20 s); a long book is a 1-2 MB download.
 
@@ -448,7 +448,7 @@ The tests are offline by default. Network checks are opt-in through the variable
 | `MMCFM_AMC_TRACE=1` | Android: logs every MediaCodec extractor read. |
 | `MMCFM_SEG_LOG=1` | HLS: one log line per segment (size, time on the network, Mbit/s against what the video needs, ring fill, time the reader starved), failed tries, stream opens, closes and seeks. |
 | `MMCFM_DEMO_QUERY=text` | The query for `--demo-online` (may hold spaces; Android test arguments split on them). |
-| `MMCFM_TEST_TAP=x,y,ms` | Queues a press and its release together at x,y (window pixels) ms after start: checks quick taps under a frame-rate cap. |
+| `MMCFM_TEST_TAP=x,y,ms[;x,y,ms...]` | Queues a press and its release together at x,y (window pixels) ms after start, several in order: checks quick taps under a frame-rate cap, two-tap confirmations. |
 | `MMCFM_IDLE_LOG=1` (or a window in ms, e.g. `1000`) | Every 5 s (or that window) logs the frames built, how many were presented and how many were the same picture (skipped), the loop's wakeups, and the source lines that asked for them (ui_animate / ui_redraw / app_wake, "busy" for loading animations): finds what keeps an idle screen drawing. |
 
 SDL's own `SDL_RENDER_DRIVER` is honoured too. On Windows the default is Direct3D 11.

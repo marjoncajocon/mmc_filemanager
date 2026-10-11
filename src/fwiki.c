@@ -1987,13 +1987,32 @@ static void page_refs(FmRect r, int page) {
   }
   FmScroll *sc = &S.scroll[page];
   float col = FM_MIN(r.w - DP(16), DP(900)), x = r.x + (r.w - col) * 0.5f, rh = DP(ui.touch_mode ? 72 : 64);
-  float content = *n * rh + DP(70);
+  float head = saved ? 0 : DP(ui.touch_mode ? 52 : 46);      /* history: its count and Clear all */
+  float content = head + *n * rh + DP(70);
   ui_scroll(sc, ui_id(saved ? "wk.saved" : "wk.hist"), r, content);
   gfx_clip_push(r);
   u32 base = ui_id(saved ? "wk.saved.row" : "wk.hist.row");
   int remove = -1;
+  bool clear_all = false;
+  if (!saved) {
+    /* Clear all asks twice: the first tap arms it for 3 s */
+    static u64 armed_until;
+    FmRect hr = { x, r.y + DP(8) - sc->y, col, head };
+    char cnt[48];
+    fm_snprintf(cnt, sizeof cnt, "%d %s read", *n, *n == 1 ? "page" : "pages");
+    font_draw(FONT_REGULAR, ui.m.font_small, hr.x + DP(4), hr.y + (hr.h - font_line_h(ui.m.font_small)) * 0.5f, cnt, -1, T.text2);
+    bool armed = ui.now < armed_until;
+    const char *lab = armed ? "Tap again to clear" : "Clear all";
+    float bw = font_width(FONT_BOLD, ui.m.font, lab, -1) + DP(52), bh = DP(ui.touch_mode ? 40 : 34);
+    FmRect b = { hr.x + hr.w - bw, hr.y + (hr.h - bh) * 0.5f, bw, bh };
+    if (ui_button(ui_id("wk.hist.clear"), b, IC_DELETE, lab, armed ? UI_BTN_DANGER : UI_BTN_TEXT)) {
+      if (armed) { clear_all = true; armed_until = 0; }
+      else armed_until = ui.now + 3000;
+    }
+    if (armed) view_wake_in((u32)(armed_until - ui.now) + 20);   /* back to "Clear all" when it runs out */
+  }
   for (int i = 0; i < *n; i++) {
-    FmRect c = { x, r.y + DP(8) - sc->y + i * rh, col, rh };
+    FmRect c = { x, r.y + DP(8) + head - sc->y + i * rh, col, rh };
     if (!gfx_visible(c)) continue;
     FmRect del = { c.x + c.w - DP(44), c.y + (rh - DP(36)) * 0.5f, DP(36), DP(36) };
     FmRect body = c;
@@ -2008,7 +2027,12 @@ static void page_refs(FmRect r, int page) {
   }
   gfx_clip_pop();
   ui_scrollbar(sc, r, content);
-  if (remove >= 0) {
+  if (clear_all) {
+    *n = 0;
+    S.scroll[page].y = 0;
+    save_file();
+    ui_toast("History cleared");
+  } else if (remove >= 0) {
     ref_remove(v, n, remove);
     save_file();
   }
@@ -2193,6 +2217,12 @@ void wiki_demo_page(const char *page) {
     S.find_open = true;
     fm_strlcpy(S.find_q, page + 5, sizeof S.find_q);
     S.find_ran[0] = 1;
+    S.demo_page = -1;
+    return;
+  }
+  if (page && (!strcmp(page, "history") || !strcmp(page, "saved"))) {   /* the lists, at once */
+    S.back_page = WP_HOME;
+    S.page = !strcmp(page, "history") ? WP_HISTORY : WP_SAVED;
     S.demo_page = -1;
     return;
   }

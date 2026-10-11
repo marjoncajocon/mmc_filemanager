@@ -176,15 +176,23 @@ static double display_period(void) {
 ** out. Input still wakes the loop at once. */
 static u64 g_pace_until;
 
-/* MMCFM_TEST_TAP=x,y,ms: a press and its release queued together at x,y
-** (window pixels) ms after start, the worst case for a capped frame rate. */
+/* MMCFM_TEST_TAP=x,y,ms[;x,y,ms...]: a press and its release queued together
+** at x,y (window pixels) ms after start, the worst case for a capped frame
+** rate; several taps run in order. */
 static void test_tap(void) {
+  static const char *next;
   static int state = -1, tx, ty, at;
   if (state < 0) {
-    const char *v = getenv("MMCFM_TEST_TAP");
-    state = v && sscanf(v, "%d,%d,%d", &tx, &ty, &at) == 3 ? 0 : 1;
+    next = getenv("MMCFM_TEST_TAP");
+    state = 1;
   }
-  if (state || SDL_GetTicks64() < (u64)at) return;
+  if (state) {                                     /* parse the next tap */
+    if (!next || sscanf(next, "%d,%d,%d", &tx, &ty, &at) != 3) { next = NULL; return; }
+    next = strchr(next, ';');
+    if (next) next++;
+    state = 0;
+  }
+  if (SDL_GetTicks64() < (u64)at) return;
   state = 1;
   SDL_Event ev;
   memset(&ev, 0, sizeof ev);

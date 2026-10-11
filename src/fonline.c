@@ -1025,10 +1025,16 @@ static float draw_recents(FmRect r, bool draw) {
   float x = r.x, y = r.y;
   int rows = 1;
   u32 base = ui_id("on.recent");
+  float clear_w = chip_w(IC_DELETE, "Clear", DP(240));
   for (int i = 0; i <= n; i++) {
     bool clear = i == n;
     const char *l = clear ? "Clear" : orecent_at(i);
     float w = chip_w(clear ? IC_DELETE : IC_HISTORY, l, DP(240));
+    /* the last row keeps room for Clear: with many searches it was cut off */
+    if (!clear && rows == 2 && x + w + gap + clear_w > r.x + r.w) {
+      i = n - 1;
+      continue;
+    }
     if (x + w > r.x + r.w && x > r.x) {
       if (rows == 2) break;
       rows++;
