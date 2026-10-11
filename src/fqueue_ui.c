@@ -208,7 +208,7 @@ static void art_tile(FmRect r, const char *art_url, const char *path, bool file,
       }
       return;
     }
-    if (tex) ui_animate();
+    if (tex) ui_animate_busy(r);   /* waits out the fade-in, at the loading rate */
   } else if (file && path && path[0] && conf.thumbnails) {
     int k = lib_find(path);
     if (k >= 0) {

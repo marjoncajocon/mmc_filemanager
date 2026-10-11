@@ -342,7 +342,7 @@ static SDL_Texture *request(const char *url, int px, float aspect, const char *h
     if (e->state == TS_QUEUED && prio) e->seq = ++G.seq;
     if (e->state == TS_TEX) {
       tex = e->tex;
-      if (fade) *fade = FM_MIN(1.0f, (float)(ui.now - e->t_tex) / OT_FADE_MS);
+      if (fade) *fade = ui.busy_fps > 0 ? FM_MIN(1.0f, (float)(ui.now - e->t_tex) / OT_FADE_MS) : 1.0f;   /* still: no fade */
     } else if (e->state == TS_FAILED && !e->undecodable && SDL_GetTicks64() - e->t_fail > OT_RETRY_MS) {
       e->state = TS_QUEUED;
       e->seq = ++G.seq;

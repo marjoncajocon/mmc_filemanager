@@ -1269,7 +1269,7 @@ static void tray_thumb(FmRect r, const PhDl *d) {
     gfx_rrect(r, DP(8), d->item.color ? col_mix(T.surface2, FM_HEX(d->item.color), 0.8f) : T.surface2);
   if (tex) {
     gfx_tex_rounded(tex, r, DP(8), col_alpha(PH_WHITE, fade));
-    if (fade < 1) ui_animate();
+    if (fade < 1) ui_animate_busy(r);   /* the fade-in, at the loading rate */
   }
 }
 

@@ -11,6 +11,17 @@
 **     longer splits into separate draw calls for its background, icon and
 **     label. The software renderer keeps untextured triangles, which it
 **     fills faster than textured ones.
+**   - A frame is recorded, then compared: batches (texture, clip, vertices,
+**     indices) are copied into a record while a 64-bit fingerprint of them,
+**     the size and the clear colour is built; gfx_end sends the record to
+**     SDL and presents only when the fingerprint differs from the last
+**     presented one. A frame drawn again for nothing (the second frame of
+**     a redraw, a pointer move that changed no hover) costs no GPU work and
+**     no present. Pixels that change behind the same texture pointer
+**     (video frames, thumbnail pages, the glyph atlas) go through
+**     gfx_texture_changed, which sends the record at once and streams the
+**     rest of the frame: such a frame is always presented, and a texture
+**     is never destroyed while the record still points at it.
 */
 #define FGFX_IMPL
 #include "fgfx.h"
@@ -38,6 +49,17 @@ static float g_wu, g_wv;             /* its texture coordinates */
 static bool g_white_ok;              /* the renderer gains from it */
 static void (*g_upload_hook)(SDL_Texture *t);
 static int g_run;                    /* indices queued in SDL since its last flush */
+
+/* the frame record (see the top) */
+typedef struct RecBatch { SDL_Texture *tex; int v0, nv, i0, ni; SDL_Rect clip; bool clipped; } RecBatch;
+static SDL_Vertex *r_v;
+static int *r_i;
+static RecBatch *r_b;
+static int r_nv, r_cv, r_ni, r_ci, r_nb, r_cb;
+static bool g_in_frame, g_rec, g_replaying, g_force = true, g_skip_on = true, g_have_last;
+static FmColor g_clear;
+static u64 g_hash, g_last_hash;
+static u32 g_presented, g_skipped;
 static int g_calls;
 static int g_w, g_h;
 static FmRect g_clip[CLIP_DEPTH];
@@ -152,6 +174,9 @@ void gfx_init(SDL_Renderer *ren) {
 void gfx_shutdown(void) {
   fm_free(g_v); fm_free(g_i);
   g_v = NULL; g_i = NULL;
+  fm_free(r_v); fm_free(r_i); fm_free(r_b);
+  r_v = NULL; r_i = NULL; r_b = NULL;
+  r_nv = r_cv = r_ni = r_ci = r_nb = r_cb = 0;
   FM_VEC_FREE(g_texs);
   for (int i = 0; i < g_nvchunk; i++) fm_free(g_vchunk[i]);
   g_nvchunk = 0;
@@ -160,12 +185,116 @@ void gfx_shutdown(void) {
 
 void gfx_set_upload_hook(void (*fn)(SDL_Texture *t)) { g_upload_hook = fn; }
 
+/* ---- the frame record ------------------------------------------------------ */
+
+static void hmix(const void *p, size_t n) {
+  const u8 *b = (const u8 *)p;
+  u64 h = g_hash;
+  while (n >= 8) {
+    u64 w;
+    memcpy(&w, b, 8);
+    h = (h ^ w) * 0x100000001B3ull;
+    h ^= h >> 29;
+    b += 8;
+    n -= 8;
+  }
+  while (n--) h = (h ^ *b++) * 0x100000001B3ull;
+  g_hash = h;
+}
+
+static bool clip_rect(SDL_Rect *r) {
+  if (g_nclip == 0) return false;
+  FmRect c = g_clip[g_nclip - 1];
+  SDL_Rect q = { (int)floorf(c.x), (int)floorf(c.y), (int)ceilf(c.w), (int)ceilf(c.h) };
+  if (q.w <= 0 || q.h <= 0) { q.w = 1; q.h = 1; q.x = -10; q.y = -10; }
+  *r = q;
+  return true;
+}
+
+/* To SDL now, as before frames were recorded. */
+static void send(SDL_Texture *t, const SDL_Vertex *v, int nv, const int *idx, int ni) {
+  if (g_upload_hook && t) g_upload_hook(t);
+  if (g_run > 0 && g_run + ni > RUN_IDX) { SDL_RenderFlush(g_ren); g_run = 0; }
+  SDL_RenderGeometry(g_ren, t, v, nv, idx, ni);
+  g_run += ni;
+}
+
+static bool grow(void **arr, int *cap, int need, size_t elem) {
+  if (need <= *cap) return true;
+  int nc = FM_MAX(*cap * 2, need + 1024);
+  void *np = fm_realloc(*arr, elem * (size_t)nc);
+  if (!np) return false;
+  *arr = np;
+  *cap = nc;
+  return true;
+}
+
+static bool record(SDL_Texture *t, const SDL_Vertex *v, int nv, const int *idx, int ni, const SDL_Rect *c, bool cl) {
+  if (!grow((void **)&r_v, &r_cv, r_nv + nv, sizeof *r_v) || !grow((void **)&r_i, &r_ci, r_ni + ni, sizeof *r_i) ||
+      !grow((void **)&r_b, &r_cb, r_nb + 1, sizeof *r_b))
+    return false;
+  RecBatch *b = &r_b[r_nb++];
+  b->tex = t;
+  b->v0 = r_nv;
+  b->nv = nv;
+  b->i0 = r_ni;
+  b->ni = ni;
+  b->clipped = cl;
+  if (cl) b->clip = *c;
+  memcpy(r_v + r_nv, v, sizeof *v * (size_t)nv);
+  memcpy(r_i + r_ni, idx, sizeof *idx * (size_t)ni);
+  r_nv += nv;
+  r_ni += ni;
+  return true;
+}
+
+/* Sends the record: clear, then every batch with its clip. */
+static void replay(void) {
+  g_replaying = true;
+  SDL_RenderSetClipRect(g_ren, NULL);
+  SDL_SetRenderDrawColor(g_ren, g_clear.r, g_clear.g, g_clear.b, 255);
+  SDL_RenderClear(g_ren);
+  bool any = false, last_cl = false;
+  SDL_Rect last = { 0, 0, 0, 0 };
+  for (int i = 0; i < r_nb; i++) {
+    const RecBatch *b = &r_b[i];
+    if (!any || b->clipped != last_cl || (b->clipped && memcmp(&b->clip, &last, sizeof last))) {
+      SDL_RenderSetClipRect(g_ren, b->clipped ? &b->clip : NULL);
+      any = true;
+      last_cl = b->clipped;
+      if (b->clipped) last = b->clip;
+    }
+    send(b->tex, r_v + b->v0, b->nv, r_i + b->i0, b->ni);
+  }
+  SDL_Rect c;
+  bool cl = clip_rect(&c);
+  SDL_RenderSetClipRect(g_ren, cl ? &c : NULL);   /* where the frame goes on */
+  r_nv = r_ni = r_nb = 0;
+  g_replaying = false;
+}
+
+/* One batch: into the fingerprint, then recorded (or sent while streaming). */
+static void submit(SDL_Texture *t, const SDL_Vertex *v, int nv, const int *idx, int ni) {
+  SDL_Rect c;
+  bool cl = clip_rect(&c);
+  hmix(&t, sizeof t);
+  hmix(&nv, sizeof nv);
+  hmix(&ni, sizeof ni);
+  hmix(&cl, sizeof cl);
+  if (cl) hmix(&c, sizeof c);
+  hmix(v, sizeof *v * (size_t)nv);
+  hmix(idx, sizeof *idx * (size_t)ni);
+  if (g_rec && record(t, v, nv, idx, ni, &c, cl)) return;
+  if (g_rec) {                        /* out of memory: send what there is, stream the rest */
+    replay();
+    g_rec = false;
+  }
+  send(t, v, nv, idx, ni);
+}
+
 void gfx_flush(void) {
   if (g_ni > 0) {
-    if (g_upload_hook && g_tex) g_upload_hook(g_tex);
-    if (g_run > 0 && g_run + g_ni > RUN_IDX) { SDL_RenderFlush(g_ren); g_run = 0; }
-    SDL_RenderGeometry(g_ren, g_tex, g_v, g_nv, g_i, g_ni);
-    g_run += g_ni;
+    submit(g_tex, g_v, g_nv, g_i, g_ni);
     g_calls++;
     g_st.verts += g_nv;
     g_st.indices += g_ni;
@@ -173,12 +302,40 @@ void gfx_flush(void) {
   g_nv = g_ni = 0;
 }
 
+void gfx_geometry(SDL_Texture *t, const SDL_Vertex *v, int nv, const int *idx, int ni) {
+  gfx_flush();
+  if (nv <= 0 || ni <= 0) return;
+  submit(t, v, nv, idx, ni);
+  g_calls++;
+}
+
+void gfx_render_now(void) {
+  gfx_flush();
+  if (g_in_frame && g_rec) {
+    replay();
+    g_rec = false;
+  }
+  g_force = true;                     /* whoever presents this, the next frame is compared afresh */
+}
+
+void gfx_texture_changed(void) {
+  if (g_replaying) return;            /* the glyph atlas uploading while the record is sent */
+  if (!g_in_frame) { g_force = true; return; }
+  if (g_rec) gfx_render_now();        /* new pixels: this frame is presented, streamed from here */
+}
+
+void gfx_invalidate(void) { g_force = true; }
+void gfx_set_skip(bool on) { g_skip_on = on; g_force = true; }
+
+void gfx_present_counts(u32 *presented, u32 *skipped) {
+  if (presented) *presented = g_presented;
+  if (skipped) *skipped = g_skipped;
+}
+
 static void apply_clip(void) {
-  if (g_nclip == 0) { SDL_RenderSetClipRect(g_ren, NULL); return; }
-  FmRect c = g_clip[g_nclip - 1];
-  SDL_Rect r = { (int)floorf(c.x), (int)floorf(c.y), (int)ceilf(c.w), (int)ceilf(c.h) };
-  if (r.w <= 0 || r.h <= 0) { r.w = 1; r.h = 1; r.x = -10; r.y = -10; }
-  SDL_RenderSetClipRect(g_ren, &r);
+  if (g_rec) return;                  /* recorded with each batch */
+  SDL_Rect r;
+  SDL_RenderSetClipRect(g_ren, clip_rect(&r) ? &r : NULL);
 }
 
 void gfx_begin(int w, int h, FmColor clear) {
@@ -188,13 +345,31 @@ void gfx_begin(int w, int h, FmColor clear) {
   g_st.verts = g_st.indices = 0;
   g_st.flush_tex = g_st.flush_clip = g_st.flush_full = 0;
   g_tex = NULL;
-  SDL_RenderSetClipRect(g_ren, NULL);
-  SDL_SetRenderDrawColor(g_ren, clear.r, clear.g, clear.b, 255);
-  SDL_RenderClear(g_ren);
+  g_in_frame = true;
+  g_rec = g_skip_on;
+  r_nv = r_ni = r_nb = 0;
+  g_clear = clear;
+  g_hash = 1469598103934665603ull;
+  hmix(&w, sizeof w);
+  hmix(&h, sizeof h);
+  hmix(&clear, sizeof clear);
+  if (!g_rec) {
+    SDL_RenderSetClipRect(g_ren, NULL);
+    SDL_SetRenderDrawColor(g_ren, clear.r, clear.g, clear.b, 255);
+    SDL_RenderClear(g_ren);
+  }
 }
 
-void gfx_end(void) {
+bool gfx_end(void) {
   gfx_flush();
+  g_in_frame = false;
+  if (g_rec && !g_force && g_have_last && g_hash == g_last_hash) {
+    r_nv = r_ni = r_nb = 0;             /* the same picture as on screen: nothing to send */
+    g_skipped++;
+    g_st_last.skipped = g_skipped;
+    return false;
+  }
+  if (g_rec) replay();
   g_st.calls = g_calls;
   Uint64 t0 = SDL_GetPerformanceCounter();
   SDL_RenderPresent(g_ren);
@@ -202,7 +377,13 @@ void gfx_end(void) {
   g_st.present_ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 /
                     (double)SDL_GetPerformanceFrequency();
   g_st.frames++;
+  g_st.skipped = g_skipped;
   g_st_last = g_st;
+  g_last_hash = g_hash;
+  g_have_last = true;
+  g_force = false;
+  g_presented++;
+  return true;
 }
 
 int gfx_draw_calls(void) { return g_st_last.calls; }
@@ -254,6 +435,7 @@ static size_t tex_bytes(Uint32 fmt, int w, int h) {
 }
 
 SDL_Texture *gfx_texture_create(SDL_Renderer *ren, Uint32 format, int access, int w, int h) {
+  gfx_texture_changed();
   SDL_Texture *t = SDL_CreateTexture(ren, format, access, w, h);
   if (!t) return NULL;
   TexRec r;
@@ -322,8 +504,20 @@ int gfx_texture_query(SDL_Texture *t, Uint32 *format, int *access, int *w, int *
   return 0;
 }
 
+int gfx_texture_update(SDL_Texture *t, const SDL_Rect *r, const void *px, int pitch) {
+  gfx_texture_changed();
+  return SDL_UpdateTexture(t, r, px, pitch);
+}
+
+int gfx_texture_update_yuv(SDL_Texture *t, const SDL_Rect *r, const Uint8 *y, int yp, const Uint8 *u, int up,
+                           const Uint8 *v, int vp) {
+  gfx_texture_changed();
+  return SDL_UpdateYUVTexture(t, r, y, yp, u, up, v, vp);
+}
+
 void gfx_texture_destroy(SDL_Texture *t) {
   if (!t) return;
+  gfx_texture_changed();              /* the record may still point at it: sent first */
   if (as_view(t)) { gfx_view_free(t); return; }
   if (t == g_tex) { gfx_flush(); g_tex = NULL; }
   if (t == g_white) gfx_set_white(NULL, 0, 0);

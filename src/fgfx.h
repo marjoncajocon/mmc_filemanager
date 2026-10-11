@@ -44,8 +44,21 @@ extern SDL_Renderer *g_ren;
 void gfx_init(SDL_Renderer *ren);
 void gfx_shutdown(void);
 void gfx_begin(int w, int h, FmColor clear);
-void gfx_end(void);                 /* flush + present */
+bool gfx_end(void);                 /* flush + present; false = skipped, the same picture again */
 void gfx_flush(void);
+/* A frame is recorded, not sent: gfx_end compares its fingerprint (geometry,
+** textures, clips, size, colour) with the last presented frame and skips
+** all GPU work when they match. A texture created, updated or destroyed
+** during the frame (gfx_texture_changed, through the redirects below)
+** sends what is recorded at once and the rest of the frame streams, so a
+** frame with new pixels is always presented. */
+void gfx_texture_changed(void);
+void gfx_invalidate(void);          /* the next frame is presented (window exposed, device reset) */
+void gfx_render_now(void);          /* sends the frame so far now (screenshots read pixels next) */
+void gfx_set_skip(bool on);         /* off: every frame is presented (--perf timings) */
+/* Raw geometry (rotated pictures, the visualizer's mesh) in the frame's order. */
+void gfx_geometry(SDL_Texture *t, const SDL_Vertex *v, int nv, const int *idx, int ni);
+void gfx_present_counts(u32 *presented, u32 *skipped);
 int  gfx_draw_calls(void);          /* last frame, for the debug overlay */
 
 /* ---- shapes ------------------------------------------------------------- */
@@ -105,6 +118,7 @@ typedef struct GfxStats {
   int tex_live, tex_peak;
   size_t tex_bytes, tex_bytes_peak;
   u32 tex_created;
+  u32 skipped;                             /* frames not presented: the same picture again */
 } GfxStats;
 
 void gfx_get_stats(GfxStats *s);
@@ -116,13 +130,20 @@ void gfx_get_stats(GfxStats *s);
 SDL_Texture *gfx_texture_create(SDL_Renderer *ren, Uint32 format, int access, int w, int h);
 void gfx_texture_destroy(SDL_Texture *t);
 int  gfx_texture_query(SDL_Texture *t, Uint32 *format, int *access, int *w, int *h);
+int  gfx_texture_update(SDL_Texture *t, const SDL_Rect *r, const void *px, int pitch);
+int  gfx_texture_update_yuv(SDL_Texture *t, const SDL_Rect *r, const Uint8 *y, int yp, const Uint8 *u, int up,
+                            const Uint8 *v, int vp);
 #ifndef FGFX_IMPL
 #  undef SDL_CreateTexture
 #  undef SDL_DestroyTexture
 #  undef SDL_QueryTexture
+#  undef SDL_UpdateTexture
+#  undef SDL_UpdateYUVTexture
 #  define SDL_CreateTexture gfx_texture_create
 #  define SDL_DestroyTexture gfx_texture_destroy
 #  define SDL_QueryTexture gfx_texture_query
+#  define SDL_UpdateTexture gfx_texture_update
+#  define SDL_UpdateYUVTexture gfx_texture_update_yuv
 #endif
 
 /* Views: a w x h rectangle of `page` handed out as an SDL_Texture pointer,

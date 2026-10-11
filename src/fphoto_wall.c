@@ -235,7 +235,7 @@ static void relayout(PhWall *w, float W, float target, float gap, float pad) {
 /* ---- tiles --------------------------------------------------------------------------- */
 
 float ph_shimmer(int k) {
-  return 0.5f + 0.5f * sinf((float)(ui.now % 100000) / 1600.0f * 6.2831853f - (float)k * 0.45f);
+  return 0.5f + 0.5f * sinf((float)(ui_busy_now() % 100000) / 1600.0f * 6.2831853f - (float)k * 0.45f);
 }
 
 static FmColor placeholder(const PhItem *p) {
@@ -272,7 +272,7 @@ SDL_Texture *ph_tile_picture(FmRect r, PhItem *p, float rad, bool learn_aspect, 
       }
     }
     gfx_tex_rounded(tex, r, rad, col_alpha(PH_WHITE, fade));
-    if (fade < 1) ui_animate();
+    if (fade < 1) ui_animate_busy(r);   /* the fade-in, at the loading rate */
   }
   return tex;
 }
@@ -368,6 +368,7 @@ static void tile(TileCtx *c, FmRect r, int i) {
 
 static void skeleton_tile(FmRect r, float rad, int k) {
   float wv = ph_shimmer(k);
+  ui_animate_busy(r);                      /* the shimmer, at the loading animations' rate */
   gfx_rrect(r, rad, col_mix(T.surface2, T.text, (T.dark ? 0.05f : 0.04f) + 0.045f * wv));
 }
 
@@ -461,6 +462,5 @@ PhWallRes wall_draw(PhWall *w, FmRect view, const PhWallOpts *o) {
   }
   res.footer_y = view.y + content - o->footer - sy;
   res.near_end = w->n > 0 && sy + view.h * 2.5f >= content;
-  if (g_skel_n > 0) view_wake_in(33);       /* gentle shimmer at 30 fps, only while loading */
   return res;
 }

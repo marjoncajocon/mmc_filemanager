@@ -41,6 +41,7 @@ void conf_defaults(void) {
   conf.use_trash = true;
   conf.thumbnails = true;
   conf.online_thumbs = true;
+  conf.busy_fps = 30;
   conf.start_home = true;
   conf.sort[0] = conf.sort[1] = SORT_NAME;
   conf.view[0] = conf.view[1] = VIEW_LIST;
@@ -173,6 +174,10 @@ static void set_key(const char *k, const char *raw) {
   else if (!strcmp(k, "thumbnails")) conf.thumbnails = to_bool(v);
   else if (!strcmp(k, "online_thumbs")) conf.online_thumbs = to_bool(v);
   else if (!strcmp(k, "ui_font")) conf.ui_font = atoi(v) == 1 ? 1 : 0;
+  else if (!strcmp(k, "busy_fps")) {
+    int f = to_int(v, 0, 240, 30);
+    conf.busy_fps = f <= 0 ? 0 : f <= 22 ? 15 : f <= 45 ? 30 : 60;   /* the choices offered */
+  }
   else if (!strcmp(k, "start_home")) conf.start_home = to_bool(v);
   else if (!strcmp(k, "sort0")) conf.sort[0] = to_int(v, SORT_NAME, SORT_TYPE, SORT_NAME);
   else if (!strcmp(k, "sort1")) conf.sort[1] = to_int(v, SORT_NAME, SORT_TYPE, SORT_NAME);
@@ -319,6 +324,7 @@ void conf_save(void) {
   put_i(f, "thumbnails", conf.thumbnails);
   put_i(f, "online_thumbs", conf.online_thumbs);
   put_i(f, "ui_font", conf.ui_font);
+  put_i(f, "busy_fps", conf.busy_fps);
   put_i(f, "start_home", conf.start_home);
   put_i(f, "sort0", conf.sort[0]);
   put_i(f, "sort1", conf.sort[1]);

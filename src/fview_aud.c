@@ -206,7 +206,7 @@ static void tick(SDL_atomic_t *t, u32 ms) {
   if (SDL_AtomicCAS(t, 0, 1) && !SDL_AddTimer(ms ? ms : 1, tick_cb, t)) SDL_AtomicSet(t, 0);
 }
 
-static SDL_atomic_t g_tick_busy, g_tick_clock, g_tick_mini;
+static SDL_atomic_t g_tick_clock, g_tick_mini;
 
 static void lock(void) { SDL_LockMutex(g_mx); }
 static void unlock(void) { SDL_UnlockMutex(g_mx); }
@@ -1666,7 +1666,7 @@ static bool cover_art(FmRect r, int idx, float radius) {
   }
   if (fade < 1) {
     cover_fallback(r, idx, radius);
-    ui_animate();
+    ui_animate_busy(r);              /* the fade-in, at the loading rate */
   }
   if (e->live) {
     int tw = 1, th = 1;
@@ -1762,9 +1762,9 @@ static bool round_btn(u32 id, FmRect r, FmIcon ic, bool filled, bool on, const c
 static void busy_ring(FmRect b, FmColor c) {
   float s = FM_MIN(b.w, b.h);
   float cx = b.x + b.w * 0.5f, cy = b.y + b.h * 0.5f;
-  float a = (float)(ui.now % 1000) / 1000.0f * 6.2831853f;
+  float a = (float)(ui_busy_now() % 1000) / 1000.0f * 6.2831853f;
   gfx_arc(cx, cy, s * 0.5f + DP(4), DP(2.5f), a, a + 1.9f, c);
-  tick(&g_tick_busy, 33);
+  ui_animate_busy(b);
 }
 
 static void controls(FmRect r, bool playing, bool busy) {

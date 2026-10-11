@@ -498,8 +498,8 @@ static FmRect draw_photo(FmRect box, PhItem *p, bool current, float alpha, const
   if (!gfx_visible(d)) return d;
   float ff = 0;
   if (current && B.full) {
-    ff = FM_MIN(1.0f, (float)(SDL_GetTicks64() - B.t_full) / 200.0f);
-    if (ff < 1) ui_animate();
+    ff = ui.busy_fps > 0 ? FM_MIN(1.0f, (float)(SDL_GetTicks64() - B.t_full) / 200.0f) : 1.0f;   /* still: no fade */
+    if (ff < 1) ui_animate_busy(d);
   }
   if (ff < 1) {
     if (!th || fade < 1) {
@@ -508,7 +508,7 @@ static FmRect draw_photo(FmRect box, PhItem *p, bool current, float alpha, const
     }
     if (th) {
       gfx_tex(th, NULL, d, col_alpha(PH_WHITE, alpha * fade));
-      if (fade < 1) ui_animate();
+      if (fade < 1) ui_animate_busy(d);   /* the fade-in, at the loading rate */
     }
   }
   if (current && B.full) gfx_tex(B.full, NULL, d, col_alpha(PH_WHITE, alpha * ff));
@@ -527,9 +527,9 @@ static void loading_ring(FmRect d, float alpha) {
     gfx_arc(cx, cy, rr, DP(2.5f), -1.5707963f, -1.5707963f + 6.2831853f * FM_MAX(0.04f, fr), col_alpha(PH_WHITE, alpha));
     view_wake_in(100);
   } else {
-    float a0 = (float)(ui.now % 1000) / 1000.0f * 6.2831853f;
+    float a0 = (float)(ui_busy_now() % 1000) / 1000.0f * 6.2831853f;
     gfx_arc(cx, cy, rr, DP(2.5f), a0, a0 + 1.6f, col_alpha(PH_WHITE, alpha));
-    view_wake_in(33);
+    ui_animate_busy(FM_RECT(cx - s * 0.5f, cy - s * 0.5f, s, s));
   }
 }
 

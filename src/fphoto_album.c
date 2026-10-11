@@ -401,7 +401,7 @@ static void cover_art(FmRect r, int a, float rad) {
   }
   if (tex) {
     gfx_tex_rounded(tex, r, rad, col_alpha(PH_WHITE, fade));
-    if (fade < 1) ui_animate();
+    if (fade < 1) ui_animate_busy(r);   /* the fade-in, at the loading rate */
   }
 }
 

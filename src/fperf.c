@@ -675,7 +675,7 @@ static void shoot(int idx, const char *name) {
   ui_begin();
   app_frame();
   ui_end();
-  gfx_flush();
+  gfx_render_now();
   u8 *px = (u8 *)fm_alloc((size_t)w * h * 4);
   bool ok = SDL_RenderReadPixels(app.ren, NULL, SDL_PIXELFORMAT_ARGB8888, px, w * 4) == 0;
   SDL_RenderPresent(app.ren);
@@ -853,6 +853,7 @@ static void probe(void) {
 
 int perf_run(void (*frame_fn)(void)) {
   P_.frame = frame_fn;
+  gfx_set_skip(false);                /* timings: every forced frame is sent and presented */
   if (P_.probe) { probe(); return 0; }
   if (P_.out) P_.report = fm_fopen(P_.out, "w");
   if (P_.shots) plat_mkdirs(P_.shots);
@@ -903,13 +904,16 @@ int perf_run(void (*frame_fn)(void)) {
     print_row(r);
   }
 
-  /* idle: back on the panels, no forced redraws */
+  /* idle: back on the panels, no forced redraws, frames compared as in use */
+  gfx_set_skip(true);
   panels(VIEW_LIST, true);
   push_motion(-100, -100);
   double t0 = now_ms();
   while (now_ms() - t0 < 1500) P_.frame();      /* settle: thumbnails, fades */
   GfxStats g0, g1;
   gfx_get_stats(&g0);
+  u32 pr0, sk0, pr1, sk1;
+  gfx_present_counts(&pr0, &sk0);
   double c0 = proc_cpu_ms();
   int wakeups = 0, anim = 0;
   memset(g_ev, 0, sizeof g_ev);
@@ -923,12 +927,13 @@ int perf_run(void (*frame_fn)(void)) {
   SDL_DelEventWatch(count_event, NULL);
   double secs = (now_ms() - t0) / 1000.0;
   gfx_get_stats(&g1);
+  gfx_present_counts(&pr1, &sk1);
   double c1 = proc_cpu_ms();
   double priv, ws;
   proc_mem(&priv, &ws);
-  out("\nidle %.1f s: %u frames drawn, %d loop wakeups, %.0f ms CPU (%.2f%% of one core), "
+  out("\nidle %.1f s: %u frames presented, %u skipped (same picture), %d loop wakeups, %.0f ms CPU (%.2f%% of one core), "
       "heap %.1f MB, private %.1f MB, working set %.1f MB, %d textures (%.1f MB)\n",
-      secs, g1.frames - g0.frames, wakeups, c1 - c0, (c1 - c0) / (secs * 10.0),
+      secs, pr1 - pr0, sk1 - sk0, wakeups, c1 - c0, (c1 - c0) / (secs * 10.0),
       heap_mb(), priv, ws, g1.tex_live,
       (double)g1.tex_bytes / (1024.0 * 1024.0));
   out("idle events:");

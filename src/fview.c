@@ -7,9 +7,8 @@
 **     and FFmpeg-only audio goes to the system app when FFmpeg is missing.
 **   - Bars fade with ui_anim and hide on a timer (view_wake_in), so a
 **     paused viewer draws nothing until something happens.
-**   - Rotated textures are drawn with SDL_RenderGeometry directly (fgfx
-**     only has axis-aligned UVs); the gfx batch is flushed first so the
-**     draw order and clip stay right.
+**   - Rotated textures go as raw geometry (gfx_geometry: fgfx shapes only
+**     have axis-aligned UVs), in the frame's order and clip.
 */
 #include "fview_int.h"
 #include "fdec_img.h"
@@ -234,8 +233,7 @@ void view_tex_rot(SDL_Texture *t, FmRect d, int rot, FmColor c) {
     v[i].tex_coord.y = uv[i * 2 + 1];
   }
   static const int idx[6] = { 0, 1, 2, 0, 2, 3 };
-  gfx_flush();
-  SDL_RenderGeometry(g_ren, t, v, 4, idx, 6);
+  gfx_geometry(t, v, 4, idx, 6);
 }
 
 SDL_Texture *view_tex_rgba(const u8 *px, int w, int h) {

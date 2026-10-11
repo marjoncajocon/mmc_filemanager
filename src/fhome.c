@@ -332,7 +332,7 @@ static void fav_art(FmRect r, const HFav *f) {
     SDL_Texture *tex = othumb_get_ex(f->thumb, (int)r.w * 2, 1.0f, NULL, &fade);
     if (tex) {
       gfx_tex_rounded(tex, r, rad, FM_RGBA(255, 255, 255, (u8)(255 * fade)));
-      if (fade < 1) ui_animate();
+      if (fade < 1) ui_animate_busy(r);   /* the fade-in, at the loading rate */
       return;
     }
   } else if (f->kind == FK_FILE && conf.thumbnails) {

@@ -85,6 +85,7 @@ typedef struct FmUi {
   float zoom;            /* user zoom (settings), 1.0 default */
   float w, h;            /* window in px */
   bool touch_mode;       /* bigger rows, no hover */
+  int busy_fps;          /* loading animations: 0 = still, else frames a second (15, 30, 60) */
   bool portrait;
   FmMetrics m;
 
@@ -144,9 +145,17 @@ void ui_redraw_at(const char *file, int line);    /* draw at least one more fram
 ** 1 is enough for a clock or a progress line that only moves. */
 void ui_redraw_n_at(int frames, const char *file, int line);
 void ui_animate_at(const char *file, int line);   /* keep drawing (call every frame while moving) */
+/* A loading indicator drawn at r (spinner, shimmer, busy ring, fade-in)
+** wants its next frame: at ui.busy_fps on a steady cadence, never when
+** still (0), off screen, or under a dialog or menu. Motion must come from
+** ui_busy_now(), which stands still when the animations are off. */
+void ui_animate_busy(FmRect r);
+u64  ui_busy_now(void);
+bool ui_busy_frame(void);       /* the busy clock is due (MMCFM_IDLE_LOG) */
 #define ui_animate() ui_animate_at(__FILE__, __LINE__)
 /* MMCFM_IDLE_LOG: where the last ui_animate / ui_redraw of the frame came from */
 extern const char *g_ui_anim_file, *g_ui_redraw_file;
+extern u32 g_ui_redraw_seq;      /* ui_redraw calls so far (input sets ui.redraw without one) */
 extern int g_ui_anim_line, g_ui_redraw_line;
 
 u32  ui_id(const char *s);

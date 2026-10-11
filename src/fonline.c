@@ -501,7 +501,7 @@ static void thumb_box(FmRect r, const FmVsrcItem *it, float rad) {
   }
   if (tex) {
     gfx_tex_rounded(tex, r, rad, col_alpha(WHITE, fade));
-    if (fade < 1) ui_animate();
+    if (fade < 1) ui_animate_busy(r);   /* the fade-in, at the loading rate */
   }
 }
 
@@ -570,11 +570,12 @@ static Grid grid_layout(FmRect view) {
 }
 
 static float wave(int k) {
-  return 0.5f + 0.5f * sinf((float)(ui.now % 100000) / 1600.0f * 6.2831853f - (float)k * 0.45f);
+  return 0.5f + 0.5f * sinf((float)(ui_busy_now() % 100000) / 1600.0f * 6.2831853f - (float)k * 0.45f);
 }
 
 static void skeleton_card(FmRect c, const Grid *g, int k) {
   float w = wave(k);
+  ui_animate_busy(c);                      /* the shimmer, at the loading animations' rate */
   FmColor a = col_mix(T.surface2, T.text, (T.dark ? 0.05f : 0.04f) + 0.04f * w);
   FmColor b = col_mix(T.surface2, T.text, (T.dark ? 0.04f : 0.03f) + 0.03f * w);
   gfx_rrect(FM_RECT(c.x, c.y, c.w, g->th), DP(12), a);
@@ -666,7 +667,6 @@ static void draw_grid(FmRect view, bool loading_first) {
     if (S.items[i].thumb[0]) othumb_prefetch(S.items[i].thumb, (int)g.cw);
   /* infinite scroll: the next page once the end is a screen and a half away */
   if (!S.search && !S.more_err && S.next[0] && S.n > 0 && sy + view.h * 2.5f >= content) search_start(true);
-  if (skel > 0) view_wake_in(33);          /* gentle shimmer at 30 fps, only while loading */
 }
 
 /* ---- empty, error and first-run states ------------------------------------------------------------ */

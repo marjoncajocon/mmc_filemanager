@@ -108,10 +108,15 @@ static bool wait_event(SDL_Event *e, int ms) {
 ** who asked for them (ui_animate / ui_redraw / app_wake callers, counted),
 ** to find what keeps an idle screen drawing (battery). */
 static void idle_log(bool drawing) {
-  static int on = -1, frames, wakes, nwhy;
+  static int on = -1, frames, wakes, nwhy, window_ms = 5000;
+  static u32 seen_seq;
   static u64 t0;
   static struct { char s[120]; int n; } why[6];
-  if (on < 0) on = getenv("MMCFM_IDLE_LOG") != NULL;
+  if (on < 0) {
+    const char *v = getenv("MMCFM_IDLE_LOG");    /* 1, or the window in ms (e.g. 1000) */
+    on = v != NULL;
+    if (v && atoi(v) >= 200) window_ms = atoi(v);
+  }
   if (!on) return;
   u64 now = SDL_GetTicks64();
   if (!t0) t0 = now;
@@ -119,30 +124,64 @@ static void idle_log(bool drawing) {
   if (drawing) {
     char w[120];
     frames++;
-    if (ui.anim && g_ui_anim_file) fm_snprintf(w, sizeof w, "animate %s:%d", g_ui_anim_file, g_ui_anim_line);
-    else if (ui.redraw > 0 && g_ui_redraw_file) fm_snprintf(w, sizeof w, "redraw %s:%d", g_ui_redraw_file, g_ui_redraw_line);
-    else fm_strlcpy(w, ui.down || ui.nfingers ? "pointer down" : "input", sizeof w);
+    if (ui_busy_frame()) fm_strlcpy(w, "busy (loading animation)", sizeof w);
+    else if (ui.anim && g_ui_anim_file) fm_snprintf(w, sizeof w, "animate %s:%d", g_ui_anim_file, g_ui_anim_line);
+    else if (ui.redraw > 0 && g_ui_redraw_file && g_ui_redraw_seq != seen_seq)
+      fm_snprintf(w, sizeof w, "redraw %s:%d", g_ui_redraw_file, g_ui_redraw_line);
+    else if (ui.down || ui.nfingers) fm_strlcpy(w, "pointer down", sizeof w);
+    else fm_strlcpy(w, ui.focus ? "input or caret blink" : "input", sizeof w);
     int i = 0;
     while (i < nwhy && strcmp(why[i].s, w)) i++;
     if (i == nwhy && nwhy < (int)FM_COUNT(why)) fm_strlcpy(why[nwhy++].s, w, sizeof why[0].s);
     if (i < nwhy) why[i].n++;
+    seen_seq = g_ui_redraw_seq;
   }
-  if (now - t0 >= 5000) {
+  if (now - t0 >= (u64)window_ms) {
     char list[800] = "";
     size_t n = 0;
     for (int i = 0; i < nwhy && n < sizeof list; i++)
       n += (size_t)fm_snprintf(list + n, sizeof list - n, "%s%s x%d", i ? ", " : "", why[i].s, why[i].n);
-    fm_log("idle-log: %d frames, %d wakeups in %.1f s%s%s", frames, wakes, (now - t0) / 1000.0, nwhy ? "; " : "", list);
+    u32 pr, sk;
+    gfx_present_counts(&pr, &sk);
+    static u32 pr0, sk0;
+    fm_log("idle-log: %d frames (%u presented, %u the same picture), %d wakeups in %.1f s%s%s", frames, pr - pr0, sk - sk0,
+           wakes, (now - t0) / 1000.0, nwhy ? "; " : "", list);
+    pr0 = pr;
+    sk0 = sk;
     frames = wakes = nwhy = 0;
     memset(why, 0, sizeof why);
     t0 = now;
   }
 }
 
+/* The display's frame time in ms (60 Hz when unknown); looked up once a second. */
+static double display_period(void) {
+  static double period = 1000.0 / 60.0;
+  static u64 asked;
+  u64 now = SDL_GetTicks64();
+  if (!asked || now - asked > 1000) {
+    asked = now;
+    SDL_DisplayMode m;
+    int d = app.win ? SDL_GetWindowDisplayIndex(app.win) : 0;
+    if (SDL_GetCurrentDisplayMode(d < 0 ? 0 : d, &m) == 0 && m.refresh_rate >= 20 && m.refresh_rate <= 500)
+      period = 1000.0 / m.refresh_rate;
+  }
+  return period;
+}
+
+/* A frame not presented (the same picture) does not wait for vsync, and a
+** present may return early while the GPU queue has room: the next frame
+** waits until a display frame has passed since this one began, so whatever
+** keeps asking for frames runs at the display's rate at most, never flat
+** out. Input still wakes the loop at once. */
+static u64 g_pace_until;
+
 static void frame(void) {
   SDL_Event e;
   int wait = ui_wait_ms();
   bool got;
+  u64 tnow = SDL_GetTicks64();
+  if (wait == 0 && g_pace_until > tnow) wait = (int)(g_pace_until - tnow);
   /* A press and its release in one batch (a quick tap while a busy frame,
   ** such as a playing video, kept the loop away) would reach the widgets in
   ** the same frame, and press-then-release clicks were lost: the release
@@ -185,12 +224,24 @@ static void frame(void) {
         break;
       case SDL_APP_DIDENTERFOREGROUND:
         app.background = false;
+        gfx_invalidate();
         ui_redraw();
         break;
       case SDL_RENDER_TARGETS_RESET:
       case SDL_RENDER_DEVICE_RESET:
         app_render_reset();
+        gfx_invalidate();
         ui_redraw();
+        break;
+      case SDL_WINDOWEVENT:
+        /* the window's pixels may be gone or stale: the next frame is presented
+        ** even when it is the same picture */
+        if (e.window.event == SDL_WINDOWEVENT_EXPOSED || e.window.event == SDL_WINDOWEVENT_SHOWN ||
+            e.window.event == SDL_WINDOWEVENT_RESTORED || e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+            e.window.event == SDL_WINDOWEVENT_MAXIMIZED) {
+          gfx_invalidate();
+          ui_redraw();
+        }
         break;
       default:
         break;
@@ -210,11 +261,13 @@ static void frame(void) {
   int w, h;
   SDL_GetRendererOutputSize(app.ren, &w, &h);
   if ((float)w != ui.w || (float)h != ui.h) ui_update_scale();
+  u64 t0 = SDL_GetTicks64();
   gfx_begin(w, h, T.bg);
   ui_begin();
   app_frame();
   ui_end();
   gfx_end();
+  g_pace_until = t0 + (u64)(display_period() + 0.5);   /* presented or not: at most one frame per display frame */
 }
 
 #ifdef __EMSCRIPTEN__
@@ -240,7 +293,7 @@ static int take_shot(const char *path, int frames) {
   ui_begin();
   app_frame();
   ui_end();
-  gfx_flush();
+  gfx_render_now();                      /* recorded frames are sent now, to be read back */
   u8 *px = (u8 *)fm_alloc((size_t)w * h * 4);
   int ok = SDL_RenderReadPixels(app.ren, NULL, SDL_PIXELFORMAT_ARGB8888, px, w * 4) == 0;
   SDL_RenderPresent(app.ren);

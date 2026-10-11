@@ -929,7 +929,7 @@ static void thumb_box(FmRect r, const char *url, FmIcon icon, float aspect) {
                                      &fade);
     if (tex) {
       gfx_tex_rounded(tex, r, rad, FM_RGBA(255, 255, 255, (u8)(255 * fade)));
-      if (fade < 1) ui_animate();
+      if (fade < 1) ui_animate_busy(r);   /* the fade-in, at the loading rate */
       return;
     }
   }
@@ -964,7 +964,6 @@ static void message(FmRect r, const char *s, bool busy) {
   float y = r.y + DP(30);
   if (busy) {
     ui_spinner(FM_RECT(r.x + r.w * 0.5f - DP(14), y, DP(28), DP(28)), T.accent);
-    ui_animate();
     y += DP(40);
   }
   if (s && s[0]) {
@@ -1293,7 +1292,6 @@ static void home_browse(float x, float *py, float col, FmRect view) {
   if (S.browse.next > 0 && y < view.y + view.h + rh * 4) browse_start(true);
   if (S.t_browse) {
     ui_spinner(FM_RECT(x + col * 0.5f - DP(12), y, DP(24), DP(24)), T.accent);
-    ui_animate();
     y += DP(34);
   }
   *py = y + DP(16);
@@ -1381,7 +1379,6 @@ static void page_results(FmRect r) {
   list_page(r, WP_RESULTS, S.res.it, S.res.n, S.res_src, S.lang, ui_id("wk.res"), S.res.next >= 0);
   if (S.t_search) {
     ui_spinner(FM_RECT(r.x + r.w * 0.5f - DP(12), r.y + r.h - DP(36), DP(24), DP(24)), T.accent);
-    ui_animate();
   }
 }
 
@@ -1407,7 +1404,7 @@ static void doc_thumb(FmDoc *d, DocImage *im, FmRect r) {
   FmColor tint = FM_RGBA(255, 255, 255, (u8)(255 * fade));
   if (layer) gfx_tex(tex, NULL, rect_center(r, tw * k, th * k), tint);
   else gfx_tex_rounded(tex, rect_center(r, tw * k, th * k), DP(6), tint);
-  if (fade < 1) ui_animate();
+  if (fade < 1) ui_animate_busy(r);   /* the fade-in, at the loading rate */
 }
 
 /* A wiki page title from a link inside a wiki page ("/wiki/Mango",
@@ -2173,7 +2170,7 @@ void wiki_frame(FmRect area) {
     bar.w *= FM_CLAMP(pm / 1000.0f, 0.0f, 1.0f);
     if (bar.w > 0) gfx_rrect(bar, DP(2), T.accent);
   }
-  if ((S.t_image || S.t_play || S.t_random) && !ui_menu_is_open()) ui_animate();
+  /* the download card needs no polling: tasks wake the loop on progress and when done */
   if (ui_input_ok() && !ui_menu_is_open()) {
     if (ui_key(SDLK_ESCAPE, 0) || ui_key(SDLK_AC_BACK, 0) || ui_key(SDLK_BACKSPACE, KMOD_ALT)) {
       if (S.find_open && S.page == WP_ARTICLE) find_close();

@@ -311,6 +311,31 @@ static int g_dialog_prev_layer[8];
 static int g_dialog_depth;
 static u32 g_dialog_last_id, g_dialog_this_frame;
 
+/* ---- the loading animations' clock ---------------------------------------
+** One cadence for every loading indicator: frames are due every 1000/fps ms
+** from the last one due (not from when it was drawn), so 15/30/60 hold on a
+** vsynced loop; the request lapses unless an indicator asks again in the
+** frame drawn. Motion is computed from the time, so speed never depends on
+** the rate. */
+static u64 g_busy_due;        /* next busy frame (0 = none wanted) */
+static double g_busy_next;    /* the cadence, ms */
+static int g_blink_drawn = -1;   /* caret phase in the last frame drawn (-1 = no caret) */
+
+bool ui_busy_frame(void) { return g_busy_due && SDL_GetTicks64() >= g_busy_due; }
+
+u64 ui_busy_now(void) { return ui.busy_fps > 0 ? ui.now : 715; }   /* still: a pose that reads well */
+
+void ui_animate_busy(FmRect r) {
+  if (ui.busy_fps <= 0 || ui.layer < ui.top_layer || !gfx_visible(r)) return;
+  double period = 1000.0 / ui.busy_fps, now = (double)ui.now;
+  if (g_busy_next <= now - period || g_busy_next > now + period) g_busy_next = now;   /* (re)start */
+  while (g_busy_next <= now) g_busy_next += period;
+  u64 due = (u64)ceil(g_busy_next);   /* up: truncating made the frame at 133 due again at once (133.3) */
+  if (!g_busy_due || due < g_busy_due) g_busy_due = due;
+}
+
+static int blink_phase(u64 now) { return (int)(((now - g_te.blink0) / 530) % 2); }
+
 void ui_begin(void) {
   u64 now = SDL_GetTicks64();
   ui.dt = g_last_frame ? (float)(now - g_last_frame) / 1000.0f : 1.0f / 60.0f;
@@ -319,6 +344,8 @@ void ui_begin(void) {
   ui.now = now;
   g_frame++;
   ui.anim = false;
+  if (g_busy_due && now >= g_busy_due) g_busy_due = 0;   /* this frame is it; indicators ask again */
+  g_blink_drawn = ui.focus ? blink_phase(now) : -1;
   ui.hot = 0;
   ui.layer = UI_LAYER_BASE;
   ui.top_layer = ui.next_top;
@@ -370,8 +397,12 @@ void ui_end(void) {
   }
 }
 
+
 bool ui_needs_frame(void) {
-  return ui.redraw > 0 || ui.anim || ui.down || ui.nfingers > 0;
+  if (ui.redraw > 0 || ui.anim || ui.down || ui.nfingers > 0) return true;
+  u64 now = SDL_GetTicks64();
+  if (g_busy_due && now >= g_busy_due) return true;
+  return ui.focus && blink_phase(now) != g_blink_drawn;   /* the caret turns on or off */
 }
 
 int ui_wait_ms(void) {
@@ -390,13 +421,21 @@ int ui_wait_ms(void) {
     int t = (int)(g_tip_since + 650 > now ? g_tip_since + 650 - now : 0);
     if (w < 0 || t < w) w = t;
   }
+  if (g_busy_due) {
+    int t = g_busy_due > now ? (int)(g_busy_due - now) : 0;
+    if (w < 0 || t < w) w = t;
+  }
   return w;
 }
 
+
+
 const char *g_ui_redraw_file;
 int g_ui_redraw_line;
+u32 g_ui_redraw_seq;
 void ui_redraw_n_at(int frames, const char *file, int line) {
   if (ui.redraw < frames) ui.redraw = frames;
+  g_ui_redraw_seq++;
   g_ui_redraw_file = file;
   g_ui_redraw_line = line;
 }
@@ -737,13 +776,13 @@ void ui_progress(FmRect r, float t) {
   float rad = r.h * 0.5f;
   gfx_rrect(r, rad, T.surface3);
   if (t < 0) {
-    float ph = fmodf((float)ui.now / 1100.0f, 1.0f);
+    float ph = fmodf((float)ui_busy_now() / 1100.0f, 1.0f);
     float w = r.w * 0.3f;
     float x = r.x - w + (r.w + w) * ph;
     gfx_clip_push(r);
     gfx_rrect(FM_RECT(x, r.y, w, r.h), rad, T.accent);
     gfx_clip_pop();
-    ui_animate();
+    ui_animate_busy(r);
   } else {
     t = FM_CLAMP(t, 0.0f, 1.0f);
     if (t > 0) gfx_rrect(FM_RECT(r.x, r.y, FM_MAX(r.w * t, r.h), r.h), rad, T.accent);
@@ -752,10 +791,11 @@ void ui_progress(FmRect r, float t) {
 
 void ui_spinner(FmRect r, FmColor c) {
   float s = FM_MIN(r.w, r.h);
-  float a = (float)(ui.now % 1000) / 1000.0f * 6.2831853f;
-  float span = 1.6f + 0.9f * sinf((float)ui.now / 350.0f);
+  u64 t = ui_busy_now();
+  float a = (float)(t % 1000) / 1000.0f * 6.2831853f;
+  float span = 1.6f + 0.9f * sinf((float)t / 350.0f);
   gfx_arc(r.x + r.w * 0.5f, r.y + r.h * 0.5f, s * 0.38f, FM_MAX(s * 0.11f, DP(2)), a, a + span, c);
-  ui_animate();
+  ui_animate_busy(r);
 }
 
 void ui_divider(float x0, float x1, float y) {

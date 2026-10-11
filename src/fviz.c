@@ -19,8 +19,8 @@
 **     wrap the cover in the player and draw their own centre elsewhere.
 **   - Smooth curves (spectrum fill, scope, neon, pulse blob) need
 **     per-vertex colours and seamless strips, which fgfx shapes cannot do;
-**     they go through a tiny local mesh and SDL_RenderGeometry after a
-**     gfx_flush, like the rotated textures in fview.c. Edges get a 1 px
+**     they go through a tiny local mesh and gfx_geometry, like the
+**     rotated textures in fview.c. Edges get a 1 px
 **     feather so they stay anti-aliased.
 **   - Colours derive from the theme (T.accent; the "auto" second colour is
 **     the accent turned 60 degrees round the hue wheel), so all 20 themes
@@ -406,8 +406,7 @@ static FmColor col_at(const FmVizConf *v, float t, float lv) { return fade(col_r
 
 static void mesh_flush(void) {
   if (g_nmi > 0) {
-    gfx_flush();
-    SDL_RenderGeometry(g_ren, NULL, g_mv, g_nmv, g_mi, g_nmi);
+    gfx_geometry(NULL, g_mv, g_nmv, g_mi, g_nmi);
   }
   g_nmv = g_nmi = 0;
 }

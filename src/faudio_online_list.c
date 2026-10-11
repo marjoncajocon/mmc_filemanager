@@ -53,10 +53,10 @@ void ao_tick(SDL_atomic_t *t, u32 ms) {
   if (SDL_AtomicCAS(t, 0, 1) && !SDL_AddTimer(ms ? ms : 1, tick_cb, t)) SDL_AtomicSet(t, 0);
 }
 
-static SDL_atomic_t g_tick_bars, g_tick_spin, g_tick_shimmer;
+static SDL_atomic_t g_tick_bars;
 
 float ao_shimmer(int k) {
-  return 0.5f + 0.5f * sinf((float)(ui.now % 100000) / 1600.0f * 6.2831853f - (float)k * 0.45f);
+  return 0.5f + 0.5f * sinf((float)(ui_busy_now() % 100000) / 1600.0f * 6.2831853f - (float)k * 0.45f);
 }
 
 static u32 name_hash(const char *s) {
@@ -117,7 +117,7 @@ void ao_art(FmRect r, const FmAsrcItem *it, float rad) {
   } else {
     gfx_tex_rounded(tex, r, rad, tint);
   }
-  if (fade < 1) ui_animate();
+  if (fade < 1) ui_animate_busy(r);   /* the fade-in, at the loading rate */
 }
 
 void ao_bars(FmRect r, FmColor c, bool moving) {
@@ -136,9 +136,9 @@ void ao_bars(FmRect r, FmColor c, bool moving) {
 
 /* A turning arc: a stream is connecting or buffering. */
 static void spinner_arc(float cx, float cy, float rad, FmColor c) {
-  float a = (float)(ui.now % 1000) / 1000.0f * 6.2831853f;
+  float a = (float)(ui_busy_now() % 1000) / 1000.0f * 6.2831853f;
   gfx_arc(cx, cy, rad, DP(2.2f), a, a + 1.9f, c);
-  ao_tick(&g_tick_spin, 40);
+  ui_animate_busy(FM_RECT(cx - rad, cy - rad, rad * 2, rad * 2));
 }
 
 /* The playing mark over artwork: a scrim with bars, or a spinner. */
@@ -261,6 +261,7 @@ static float rows_h(const Geo *g, int n) {
 
 static void skeleton(FmRect c, const Geo *g, int k) {
   float w = ao_shimmer(k);
+  ui_animate_busy(c);                      /* the shimmer, at the loading animations' rate */
   FmColor a = col_mix(T.surface2, T.text, (T.dark ? 0.05f : 0.04f) + 0.04f * w);
   FmColor b = col_mix(T.surface2, T.text, (T.dark ? 0.04f : 0.03f) + 0.03f * w);
   float bh = DP(11);
@@ -521,7 +522,6 @@ AoListRes ao_list_draw(AoList *l, FmRect view, const AoListOpts *o) {
   }
   gfx_clip_pop();
   if (!o->fixed) ui_scrollbar(&l->scroll, view, content);
-  if (o->skeleton > 0) ao_tick(&g_tick_shimmer, 33);            /* the shimmer, only while loading */
   res.near_end = !o->fixed && l->n > 0 && content - sy - view.h < view.h * 1.5f;
   return res;
 }

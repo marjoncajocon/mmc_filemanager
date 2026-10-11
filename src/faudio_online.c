@@ -89,7 +89,6 @@ static struct {
 } S;
 
 static u32 ID_MENU;
-static SDL_atomic_t g_tick_cats;
 static FmAsrcItem g_menu_item;
 static bool g_menu_live;
 
@@ -1011,8 +1010,8 @@ static void source_page(FmRect body, const FmAsrc *s) {
         FmRect c = { cr.x + (float)k * DP(110), cr.y + (cr.h - DP(8) - ch) * 0.5f, cw, ch };
         if (c.x + c.w > cr.x + cr.w) break;
         gfx_rrect(c, ch * 0.5f, col_mix(T.surface2, T.text, 0.04f + 0.03f * w));
+        ui_animate_busy(c);
       }
-      ao_tick(&g_tick_cats, 33);
     }
   }
   ui_divider(body.x + DP(12), body.x + body.w - DP(12), body.y);

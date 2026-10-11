@@ -56,6 +56,7 @@ Version: 0.1.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party c
   Extraction refuses absolute paths and `..` ("zip slip"). Wrong passwords are asked again.
 - **20 built-in themes** (24 palettes): Graphite, Daylight, Tonal, Nord, Dracula Neon, Solarized Warm, OLED Contrast, Commander, Gallery, Finder Split, X-plore Tree, Frost Layers, Pastel Soft, Phosphor, Brutal Blocks, Aurora Hero, Mono Red, Bento Board, Thumb Zone, Fold Duo. Graphite, Tonal, Solarized and Mono have both dark and light variants. There are 8 accent colours plus each theme's own, and a UI zoom from 0.75x to 2x.
 - **Font**: Hack (monospace, the default) or Poppins for the interface (Settings > Appearance > Font, switches at once); code and plain text are always in Hack.
+- **Battery**: nothing is drawn while nothing changes, and a frame is sent to the GPU only when its picture differs from the one on screen (a pointer move that changes nothing costs no GPU work). **Loading animations** (spinners, loading bars, placeholder shimmer, busy rings, picture fade-ins) run at Off / 15 / **30** (default) / 60 frames a second (Settings > Appearance); they move by the clock, so a lower rate is less smooth but never slower, and they stop asking for frames when off screen or under a dialog.
 - **Custom title bar** (desktop): a borderless window with its own minimize/maximize/close buttons. On macOS they are traffic lights on the left. It supports Aero Snap, double-click to maximize and resize edges. On Windows the corners are rounded. "System title bar" in Settings brings back the OS frame.
 - **Touch mode**: automatic, on or off. It gives larger targets, long-press menus and swipe gestures. Dialogs move above the on-screen keyboard on Android.
 - **System tray** (Windows only): a tray icon with show/hide, play/pause, next and quit. Settings > "Icon in the system tray" (on), "Minimize to the tray" (on: minimizing removes the taskbar button) and "Close button hides to the tray" (off; Quit is in the icon's menu). Music, background video and downloads keep running while hidden, and the app draws nothing (no CPU).
@@ -380,6 +381,7 @@ Demo flags put a screen into a given state for screenshots and visual checks:
 |---|---|
 | `--demo-dialog NAME` | a dialog (for example `settings`, or `settings:480` scrolled 480 dp down) |
 | `--ui-font hack\|poppins` | the interface font |
+| `--busy-fps 0\|15\|30\|60` | the loading animations' frame rate |
 | `--demo-select`, `--demo-job` | a selection, a running job card |
 | `--demo-library SECTION` | the media library on the `--left` folder |
 | `--demo-audio FILE [--demo-viz N] [--demo-viz-panel] [--demo-viz-overlay] [--demo-eq N]` | the music player, visualizer and equalizer |
@@ -443,7 +445,7 @@ The tests are offline by default. Network checks are opt-in through the variable
 | `MMCFM_MEGA_LINK=link[\|...]` | Opens and downloads MEGA public links. |
 | `MMCFM_MEGA_LOGIN=email\|password`, `MMCFM_MEGA_WRITE=1` | Live MEGA account test (with writes). |
 | `MMCFM_AMC_TRACE=1` | Android: logs every MediaCodec extractor read. |
-| `MMCFM_IDLE_LOG=1` | Every 5 s logs the frames drawn and the loop's wakeups, with the source lines that asked for them (ui_animate / ui_redraw / app_wake): finds what keeps an idle screen drawing. |
+| `MMCFM_IDLE_LOG=1` (or a window in ms, e.g. `1000`) | Every 5 s (or that window) logs the frames built, how many were presented and how many were the same picture (skipped), the loop's wakeups, and the source lines that asked for them (ui_animate / ui_redraw / app_wake, "busy" for loading animations): finds what keeps an idle screen drawing. |
 
 SDL's own `SDL_RENDER_DRIVER` is honoured too. On Windows the default is Direct3D 11.
 
