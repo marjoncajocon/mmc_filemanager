@@ -86,6 +86,7 @@ typedef struct FmUi {
   float w, h;            /* window in px */
   bool touch_mode;       /* bigger rows, no hover */
   int busy_fps;          /* loading animations: 0 = still, else frames a second (15, 30, 60) */
+  int max_fps;           /* every frame at most this often (15, 30, 60); 0 = the screen's rate */
   bool portrait;
   FmMetrics m;
 

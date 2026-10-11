@@ -327,7 +327,8 @@ u64 ui_busy_now(void) { return ui.busy_fps > 0 ? ui.now : 715; }   /* still: a p
 
 void ui_animate_busy(FmRect r) {
   if (ui.busy_fps <= 0 || ui.layer < ui.top_layer || !gfx_visible(r)) return;
-  double period = 1000.0 / ui.busy_fps, now = (double)ui.now;
+  int fps = ui.max_fps > 0 ? FM_MIN(ui.busy_fps, ui.max_fps) : ui.busy_fps;   /* never above the cap */
+  double period = 1000.0 / fps, now = (double)ui.now;
   if (g_busy_next <= now - period || g_busy_next > now + period) g_busy_next = now;   /* (re)start */
   while (g_busy_next <= now) g_busy_next += period;
   u64 due = (u64)ceil(g_busy_next);   /* up: truncating made the frame at 133 due again at once (133.3) */

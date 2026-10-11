@@ -176,8 +176,40 @@ static double display_period(void) {
 ** out. Input still wakes the loop at once. */
 static u64 g_pace_until;
 
+/* MMCFM_TEST_TAP=x,y,ms: a press and its release queued together at x,y
+** (window pixels) ms after start, the worst case for a capped frame rate. */
+static void test_tap(void) {
+  static int state = -1, tx, ty, at;
+  if (state < 0) {
+    const char *v = getenv("MMCFM_TEST_TAP");
+    state = v && sscanf(v, "%d,%d,%d", &tx, &ty, &at) == 3 ? 0 : 1;
+  }
+  if (state || SDL_GetTicks64() < (u64)at) return;
+  state = 1;
+  SDL_Event ev;
+  memset(&ev, 0, sizeof ev);
+  ev.type = SDL_MOUSEMOTION;
+  ev.motion.windowID = SDL_GetWindowID(app.win);
+  ev.motion.x = tx;
+  ev.motion.y = ty;
+  SDL_PushEvent(&ev);
+  for (int k = 0; k < 2; k++) {
+    memset(&ev, 0, sizeof ev);
+    ev.type = k ? SDL_MOUSEBUTTONUP : SDL_MOUSEBUTTONDOWN;
+    ev.button.windowID = SDL_GetWindowID(app.win);
+    ev.button.button = SDL_BUTTON_LEFT;
+    ev.button.state = k ? SDL_RELEASED : SDL_PRESSED;
+    ev.button.clicks = 1;
+    ev.button.x = tx;
+    ev.button.y = ty;
+    SDL_PushEvent(&ev);
+  }
+  fm_log("test tap at %d,%d", tx, ty);
+}
+
 static void frame(void) {
   SDL_Event e;
+  test_tap();
   int wait = ui_wait_ms();
   bool got;
   u64 tnow = SDL_GetTicks64();
@@ -188,8 +220,9 @@ static void frame(void) {
   ** waits for the next frame, which comes at once. */
   static SDL_Event held_up;
   static bool have_held;
-  bool pressed_now = false;
+  static bool pressed_now;               /* a press not drawn yet (frames can wait for the cap) */
   if (have_held) {
+    if (pressed_now && g_pace_until > tnow) SDL_Delay((Uint32)FM_MIN(g_pace_until - tnow, 100));
     have_held = false;
     e = held_up;
     got = true;
@@ -256,6 +289,9 @@ static void frame(void) {
     media_bg_pump();
     return;
   }
+  /* the maximum frame rate holds for input too: a frame due early waits for
+  ** its turn while events keep arriving (they all reach the widgets) */
+  if (ui_needs_frame() && g_pace_until > SDL_GetTicks64()) return;
   idle_log(ui_needs_frame());
   if (!ui_needs_frame()) return;
   int w, h;
@@ -267,7 +303,11 @@ static void frame(void) {
   app_frame();
   ui_end();
   gfx_end();
-  g_pace_until = t0 + (u64)(display_period() + 0.5);   /* presented or not: at most one frame per display frame */
+  pressed_now = false;
+  /* presented or not: at most one frame per display frame, and per the maximum frame rate */
+  double period = display_period();
+  if (ui.max_fps > 0) period = FM_MAX(period, 1000.0 / ui.max_fps);
+  g_pace_until = t0 + (u64)(period + 0.5);
 }
 
 #ifdef __EMSCRIPTEN__

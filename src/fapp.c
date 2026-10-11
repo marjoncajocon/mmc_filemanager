@@ -2039,9 +2039,10 @@ static void dlg_settings(void) {
   float rh = DP(ui.touch_mode ? 50 : 42), sl = font_line_h(ui.m.font_small) + DP(14);
   float seg_h = DP(ui.touch_mode ? 40 : 34);
   float grid_h = theme_grid_h(c.w - DP(6));
-  /* labels: theme, appearance, font, loading animations, ui size, layout, files, about; segmented
-  ** rows: dark/light, font, loading animations, the ui size slider, layout, touch */
-  float content = sl * 8 + grid_h + DP(10) + (seg_h + DP(10)) * 6 + DP(46) + rh * 3 + rh * 7 +
+  /* labels: theme, appearance, font, maximum frame rate, loading animations, ui size, layout, files,
+  ** about; segmented rows: dark/light, font, frame rate, loading animations, the ui size slider,
+  ** layout, touch */
+  float content = sl * 9 + grid_h + DP(10) + (seg_h + DP(10)) * 7 + DP(46) + rh * 3 + rh * 7 +
                   DP(50) + DP(90) + font_line_h(ui.m.font_small) + DP(6) +   /* about: the credit */
                   (tray_available() ? rh * (conf.tray ? 3 : 1) : 0);   /* tray */
   float online_h = online_settings_h(c.w - DP(6));   /* online: its section */
@@ -2117,6 +2118,20 @@ static void dlg_settings(void) {
     if (ui_segmented(ui_idn(base, 210), rect_cut_top(&r, seg_h), kFont, 2, &f)) {
       conf.ui_font = f ? FONT_UI_POPPINS : FONT_UI_HACK;
       font_set_ui(conf.ui_font);
+      ui_redraw();
+      conf_dirty();
+    }
+    rect_cut_top(&r, DP(10));
+  }
+  {
+    /* every frame (scrolling, menus, the visualizer, video): at most this many a second;
+    ** fewer saves battery, most on 90/120 Hz screens */
+    small_label(&r, "MAXIMUM FRAME RATE");
+    static const char *const kMax[] = { "15 fps", "30 fps", "60 fps", "Screen max" };
+    static const int kMaxVal[] = { 15, 30, 60, 0 };
+    int f = conf.max_fps <= 0 ? 3 : conf.max_fps <= 15 ? 0 : conf.max_fps <= 30 ? 1 : 2;
+    if (ui_segmented(ui_idn(base, 212), rect_cut_top(&r, seg_h), kMax, 4, &f)) {
+      conf.max_fps = ui.max_fps = kMaxVal[FM_CLAMP(f, 0, 3)];
       ui_redraw();
       conf_dirty();
     }
@@ -2899,7 +2914,7 @@ static bool arg_flag(const char *name) {
 
 /* A plain path argument ("mmcfm ~/Downloads", "Open with"): opens in the left panel. */
 static const char *arg_positional(void) {
-  static const char *const kVal[] = { "--shot", "--size", "--frames", "--left", "--right", "--ui-font", "--busy-fps",
+  static const char *const kVal[] = { "--shot", "--size", "--frames", "--left", "--right", "--ui-font", "--busy-fps", "--max-fps",
                                       "--demo-dialog", "--layout", "--demo-library",
                                       "--demo-online", "--demo-online-state",
                                       "--demo-photos", "--demo-photos-state" /* photos */,
@@ -3101,6 +3116,9 @@ void app_init(void) {
   ui.busy_fps = conf.busy_fps;
   const char *bf = arg_value("--busy-fps");          /* --busy-fps 0|15|30|60 (tests) */
   if (bf) ui.busy_fps = conf.busy_fps = atoi(bf);
+  ui.max_fps = conf.max_fps;
+  const char *mf = arg_value("--max-fps");           /* --max-fps 0|15|30|60 (tests) */
+  if (mf) ui.max_fps = conf.max_fps = atoi(mf);
   apply_touch();
   thumb_init();
   lib_init(g_shot);                    /* flib: --shot runs never save */
