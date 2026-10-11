@@ -23,6 +23,7 @@
 **     main thread, and a woken frame is the only cost while idle.
 */
 #include "fcloud_app.h"
+#include "fnet.h"                    /* NET_GROUP_* (data usage) */
 #include "fapp.h"
 
 /* ---- locations ----------------------------------------------------------- */
@@ -201,6 +202,7 @@ static void task_free(FmCloudTask *t) {
 }
 
 static void task_run(FmCloudTask *t) {
+  fm_set_thread_tag(NET_GROUP_CLOUD);                  /* data usage: cloud */
   const FmCloud *c = cloud_find(t->acct.provider);
   FmCloudAcct *a = &t->acct;
   char *m = t->msg;

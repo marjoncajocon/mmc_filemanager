@@ -456,11 +456,14 @@ PhWallRes wall_draw(PhWall *w, FmRect view, const PhWallOpts *o) {
     for (int k = 0; k < row->count; k++) {
       PhItem *p = &w->items[row->first + k];
       float tw = item_ar(w, row->first + k) * row->h;
+      /* the size the tile will ask for (whole pixels, like ph_tile_picture) */
       if (p->it.thumb[0])
-        othumb_prefetch_ex(p->it.thumb, (int)FM_MAX(tw, row->h), 0, psrc_item_headers(&p->it));
+        othumb_prefetch_ex(p->it.thumb, (int)FM_MAX(floorf(tw + 0.5f), floorf(row->h + 0.5f)), 0, psrc_item_headers(&p->it));
     }
   }
   res.footer_y = view.y + content - o->footer - sy;
-  res.near_end = w->n > 0 && sy + view.h * 2.5f >= content;
+  /* the next page once the end is a screen away (2.5 screens queued pages 2
+  ** and 3 at once: 60-90 thumbnails competing with the visible ones) */
+  res.near_end = w->n > 0 && sy + view.h * 2.0f >= content;
   return res;
 }

@@ -17,6 +17,7 @@
 **     User-Agent the API calls send Api-User-Agent.
 */
 #include "fpsrc_int.h"
+#include "fwiki_int.h"                      /* wk_headers: the user's Wikimedia contact */
 
 #define WM_HEADERS "Api-User-Agent: mmcfm/0.1 (open-source file manager; photo gallery)\r\n"
 
@@ -153,6 +154,16 @@ FmErr psrc_wikimedia_parse(const char *json, size_t len, FmPsrcPage *out) {
   return FM_OK;
 }
 
+/* With the user's contact (Online reading's, loaded at start) Wikimedia
+** allows 200 requests a minute instead of 10: thumbnails count too, so
+** they carry the same header (the buffer is what img_headers points at). */
+static char g_img_hdr[512];
+
+static const char *wm_headers(void) {
+  const char *h = wk_headers();
+  return h ? h : WM_HEADERS;
+}
+
 static FmErr wm_search(const FmPsrcConf *c, const char *query, const char *token, FmPsrcPage *out,
                        volatile int *cancel) {
   FM_UNUSED(c);
@@ -165,7 +176,8 @@ static FmErr wm_search(const FmPsrcConf *c, const char *query, const char *token
   char url[1600];
   psrc_wikimedia_url(query, offset, url, sizeof url);
   FmNetResp r;
-  FmErr e = psrc_http_get(url, WM_HEADERS, &r, out->error, sizeof out->error, cancel);
+  fm_strlcpy(g_img_hdr, wm_headers(), sizeof g_img_hdr);
+  FmErr e = psrc_http_get(url, wm_headers(), &r, out->error, sizeof out->error, cancel);
   if (e != FM_OK) return e;
   if (r.status != 200) {
     e = psrc_http_error("Wikimedia Commons", r.status, false, out->error, sizeof out->error);
@@ -182,5 +194,5 @@ static FmErr wm_search(const FmPsrcConf *c, const char *query, const char *token
 const FmPsrc g_psrc_wikimedia = {
   "wikimedia", "Wikimedia Commons", IC_NETWORK, PSRC_SEARCH, wm_search, NULL,
   "Free photos behind Wikipedia \xC2\xB7 no key needed",
-  NULL, NULL,
+  g_img_hdr, NULL,
 };

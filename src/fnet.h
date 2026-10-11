@@ -33,6 +33,15 @@ typedef bool (*FmNetProgress)(void *user, u64 done, u64 total);
 bool  net_available(void);
 const char *net_backend(void);        /* "WinHTTP", "libcurl 8.5.0", or why not */
 
+/* Data used: every byte received or sent (bodies; headers and TLS add a few
+** percent the system's own counter sees), counted under the tag of the
+** thread that moves it (fm_thread_tag: the view or player that asked). */
+enum { NET_GROUP_OTHER, NET_GROUP_VIDEOS, NET_GROUP_AUDIO, NET_GROUP_PHOTOS, NET_GROUP_READING, NET_GROUP_CLOUD,
+       NET_GROUPS };
+void net_traffic(u64 out[NET_GROUPS]);   /* since the program started */
+/* Closes the kept connections (WinHTTP's session); at exit. */
+void net_shutdown(void);
+
 /* GET into memory. headers: extra "Key: value\r\n" lines or NULL. */
 FmErr net_get(const char *url, const char *headers, size_t max_bytes, FmNetResp *out, volatile int *cancel);
 /* GET into a file (written as path.part, renamed when complete). */

@@ -66,6 +66,7 @@
 **     restored online track is resolved only when it is wanted).
 */
 #include "fview_int.h"
+#include "fnet.h"                    /* NET_GROUP_* (data usage) */
 #include "flib.h"
 #include "fplat.h"
 #include "fconf.h"
@@ -924,7 +925,10 @@ static bool engine_start(void) {
   if (!P.thr) {
     P.ctx = (DecCtx *)fm_calloc(1, sizeof *P.ctx);
     P.ctx->tgen = g_tgen;
+    int tag = fm_thread_tag();
+    fm_set_thread_tag(NET_GROUP_AUDIO);                /* the player's streams are online audio */
     P.thr = fm_thread_create(decoder, "audio", P.ctx);
+    fm_set_thread_tag(tag);
     if (!P.thr) {
       fm_free(P.ctx);
       P.ctx = NULL;

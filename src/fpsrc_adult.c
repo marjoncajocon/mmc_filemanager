@@ -65,8 +65,10 @@ FmErr psrc_redgifs_parse(const char *json, size_t len, int page, FmPsrcPage *out
     const FmJsonNode *u = json_get(g, "urls");
     const char *hd = json_str(json_get(u, "hd"), "");
     if (!*hd) hd = json_str(json_get(u, "sd"), "");
+    /* the grid takes a thumbnail, never the hd picture (MBs per tile) */
     const char *th = json_str(json_get(u, "thumbnail"), "");
-    if (!*th) th = json_str(json_get(u, "sd"), hd);
+    if (!*th) th = json_str(json_get(u, "sd"), "");
+    if (!*th) th = json_str(json_get(u, "poster"), "");
     if (!psrc_id_ok(id, "", 90) || !psrc_url_viewable(hd)) continue;   /* images only, never the clips */
     FmPsrcItem *it = psrc_page_add(out);
     fm_strlcpy(it->source, "redgifs", sizeof it->source);

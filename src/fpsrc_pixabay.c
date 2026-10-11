@@ -54,6 +54,11 @@ FmErr psrc_pixabay_parse(const char *json, size_t len, int page, FmPsrcPage *out
     char thumb[512], full[1024], pg[512];
     if (idn <= 0 || idn > 1e15) continue;
     if (!psrc_url_copy(json_str(json_get(h, "webformatURL"), ""), thumb, sizeof thumb)) continue;
+#ifdef FM_ANDROID
+    /* phone tiles are ~330 px: the 340 px rendition (Pixabay names them _180, _340, _640, _960) */
+    char *v = strstr(thumb, "_640.");
+    if (v) memcpy(v, "_340.", 5);
+#endif
     if (!psrc_url_copy(json_str(json_get(h, "largeImageURL"), ""), full, sizeof full))
       fm_strlcpy(full, thumb, sizeof full);
     FmPsrcItem *it = psrc_page_add(out);

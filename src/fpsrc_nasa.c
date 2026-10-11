@@ -113,7 +113,7 @@ FmErr psrc_nasa_parse(const char *json, size_t len, int page, FmPsrcPage *out) {
     size_t al = strlen(it->author);
     while (al && it->author[al - 1] == ' ') it->author[--al] = 0;
     fm_strlcpy(it->license, NASA_LICENSE, sizeof it->license);
-    fm_strlcpy(it->thumb, thumb[0] ? thumb : full, sizeof it->thumb);
+    fm_strlcpy(it->thumb, thumb, sizeof it->thumb);   /* a tile is never the full picture (a colour block instead) */
     fm_strlcpy(it->full, full, sizeof it->full);
     if (best > 0 && orig[0] && strcmp(orig, full)) fm_strlcpy(it->original, orig, sizeof it->original);
     char ide[300];

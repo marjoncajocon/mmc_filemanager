@@ -155,6 +155,9 @@ FM_SDL_FX(SDL_Thread *, SDL_CreateThread, (SDL_ThreadFunction, const char *, voi
 #endif
 FM_SDL_FN(void, SDL_WaitThread, (SDL_Thread *, int *))
 FM_SDL_FN(void, SDL_DetachThread, (SDL_Thread *))
+FM_SDL_FN(SDL_TLSID, SDL_TLSCreate, (void))
+FM_SDL_FN(void *, SDL_TLSGet, (SDL_TLSID))
+FM_SDL_FN(int, SDL_TLSSet, (SDL_TLSID, const void *, void (SDLCALL *)(void *)))
 FM_SDL_FN(int, SDL_SetThreadPriority, (SDL_ThreadPriority))
 FM_SDL_FN(SDL_mutex *, SDL_CreateMutex, (void))
 FM_SDL_FN(void, SDL_DestroyMutex, (SDL_mutex *))

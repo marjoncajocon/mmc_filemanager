@@ -14,6 +14,26 @@
 #include "fsdl.h"
 
 #define NET_UA "mmcfm/0.1"
+
+/* ---- data used -------------------------------------------------------------- */
+
+static SDL_SpinLock g_traffic_lk;
+static u64 g_traffic[NET_GROUPS];
+
+static void net_count(size_t n) {
+  if (!n) return;
+  int g = fm_thread_tag();
+  if (g < 0 || g >= NET_GROUPS) g = NET_GROUP_OTHER;
+  SDL_AtomicLock(&g_traffic_lk);
+  g_traffic[g] += n;
+  SDL_AtomicUnlock(&g_traffic_lk);
+}
+
+void net_traffic(u64 out[NET_GROUPS]) {
+  SDL_AtomicLock(&g_traffic_lk);
+  memcpy(out, g_traffic, sizeof g_traffic);
+  SDL_AtomicUnlock(&g_traffic_lk);
+}
 #define NET_UA_W L"mmcfm/0.1"
 
 void net_urlencode(const char *s, char *out, size_t cap) {
@@ -83,6 +103,7 @@ typedef struct Body {
 } Body;
 
 static bool body_put(Body *b, const void *p, size_t n) {
+  net_count(n);                                /* every backend's bytes pass here */
   if (b->sink) return b->sink(b->su, (const u8 *)p, n);
   if (b->f) return fwrite(p, 1, n, b->f) == n;
   if (b->len + n > b->max) { b->over = true; return false; }
@@ -188,6 +209,40 @@ static bool split_url(const char *url, bool *tls, char *host, size_t hcap, int *
   return *port > 0 && *port < 65536;
 }
 
+/* One session for the whole program: WinHTTP pools connections per session,
+** so later requests to a host skip DNS, TCP and TLS (a screen of photo
+** thumbnails was 30-60 fresh handshakes). Session handles are thread-safe. */
+static HINET g_wh_ses;
+static SDL_SpinLock g_wh_lk;
+
+static HINET wh_session(void) {
+  SDL_AtomicLock(&g_wh_lk);
+  if (!g_wh_ses) {
+    HINET ses = wh.open(NET_UA_W, WH_ACCESS_AUTOMATIC, NULL, NULL, 0);
+    if (!ses) ses = wh.open(NET_UA_W, WH_ACCESS_DEFAULT, NULL, NULL, 0);   /* before Windows 8.1 */
+    if (ses) {
+      DWORD protos = WH_TLS12 | WH_TLS13;
+      if (!wh.setopt(ses, WH_OPT_SECURE_PROTOCOLS, &protos, sizeof protos)) {
+        protos = WH_TLS11 | WH_TLS12;                             /* systems that refuse TLS 1.3 */
+        wh.setopt(ses, WH_OPT_SECURE_PROTOCOLS, &protos, sizeof protos);
+      }
+      DWORD decomp = WH_DECOMP_ALL;
+      wh.setopt(ses, WH_OPT_DECOMPRESSION, &decomp, sizeof decomp);   /* Windows 8.1+, ignored before */
+    }
+    g_wh_ses = ses;
+  }
+  HINET ses = g_wh_ses;
+  SDL_AtomicUnlock(&g_wh_lk);
+  return ses;
+}
+
+void net_shutdown(void) {
+  SDL_AtomicLock(&g_wh_lk);
+  if (g_wh_ses && wh.close) wh.close(g_wh_ses);
+  g_wh_ses = NULL;
+  SDL_AtomicUnlock(&g_wh_lk);
+}
+
 static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProgress cb, void *user,
                         FmNetResp *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
@@ -201,19 +256,10 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
     return FM_ERR_FORMAT;
   }
   FmErr err = FM_ERR_IO;
-  HINET ses = wh.open(NET_UA_W, WH_ACCESS_AUTOMATIC, NULL, NULL, 0);
-  if (!ses) ses = wh.open(NET_UA_W, WH_ACCESS_DEFAULT, NULL, NULL, 0);   /* before Windows 8.1 */
+  HINET ses = wh_session();
   HINET con = NULL, req = NULL;
   wchar_t *whost = to_w(host), *wpath = to_w(path), *whdr = headers && *headers ? to_w(headers) : NULL;
   if (!ses) goto done;
-  DWORD protos = WH_TLS12 | WH_TLS13;
-  if (!wh.setopt(ses, WH_OPT_SECURE_PROTOCOLS, &protos, sizeof protos)) {
-    protos = WH_TLS11 | WH_TLS12;                                 /* systems that refuse TLS 1.3 */
-    wh.setopt(ses, WH_OPT_SECURE_PROTOCOLS, &protos, sizeof protos);
-  }
-  DWORD decomp = WH_DECOMP_ALL;
-  wh.setopt(ses, WH_OPT_DECOMPRESSION, &decomp, sizeof decomp);   /* Windows 8.1+, ignored before */
-  wh.timeouts(ses, 10000, 10000, 15000, 30000);
   con = wh.connect(ses, whost, (WORD)port, 0);
   if (!con) goto done;
   {
@@ -222,6 +268,7 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
     fm_free(wm);
   }
   if (!req) goto done;
+  wh.timeouts(req, 10000, 10000, 15000, 30000);
   DWORD redir = b->no_redirect ? WH_REDIRECT_NEVER : WH_REDIRECT_ALWAYS_SAFE;
   wh.setopt(req, WH_OPT_REDIRECT_POLICY, &redir, sizeof redir);
   if (whdr) wh.addhdr(req, whdr, (DWORD)-1, WH_ADDREQ_ADD);
@@ -340,8 +387,7 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
   err = FM_OK;
 done:
   if (req) wh.close(req);
-  if (con) wh.close(con);
-  if (ses) wh.close(ses);
+  if (con) wh.close(con);                                        /* the session keeps the connection */
   fm_free(whost);
   fm_free(wpath);
   fm_free(whdr);
@@ -385,6 +431,7 @@ static struct {
   const char *(*version)(void);
   const char *(*strerror)(int);
   int (*global_init)(long);
+  void (*reset)(CURL *);                       /* NULL on very old curl: a handle per request then */
 } cu;
 static SDL_SpinLock g_cu_lock;
 
@@ -404,7 +451,7 @@ static bool cu_load(void) {
     CU(init, "curl_easy_init"); CU(setopt, "curl_easy_setopt"); CU(perform, "curl_easy_perform");
     CU(getinfo, "curl_easy_getinfo"); CU(cleanup, "curl_easy_cleanup"); CU(slist_append, "curl_slist_append");
     CU(slist_free, "curl_slist_free_all"); CU(version, "curl_version"); CU(strerror, "curl_easy_strerror");
-    CU(global_init, "curl_global_init");
+    CU(global_init, "curl_global_init"); CU(reset, "curl_easy_reset");
 #undef CU
     cu.state = (cu.init && cu.setopt && cu.perform && cu.getinfo && cu.cleanup && cu.slist_append &&
                 cu.slist_free && cu.global_init) ? 1 : -1;
@@ -502,11 +549,41 @@ static size_t cu_read(char *buf, size_t sz, size_t n, void *u) {
   return fread(buf, 1, sz * n, c->b->upf);
 }
 
+/* One easy handle per thread, kept for the thread's life: curl keeps a
+** handle's connections open, so later requests to a host skip DNS, TCP
+** and TLS. Freed when the thread ends (SDL's thread-local destructor). */
+static SDL_TLSID g_cu_tls;
+static SDL_SpinLock g_cu_lk;
+
+static void SDLCALL cu_free_handle(void *h) {
+  if (h && cu.cleanup) cu.cleanup((CURL *)h);
+}
+
+static CURL *cu_handle(void) {
+  if (!cu.reset) return cu.init();
+  if (!g_cu_tls) {
+    SDL_AtomicLock(&g_cu_lk);
+    if (!g_cu_tls) g_cu_tls = SDL_TLSCreate();
+    SDL_AtomicUnlock(&g_cu_lk);
+  }
+  CURL *h = g_cu_tls ? (CURL *)SDL_TLSGet(g_cu_tls) : NULL;
+  if (h) {
+    cu.reset(h);                               /* every option back to its default; the connections stay */
+    return h;
+  }
+  h = cu.init();
+  if (h && g_cu_tls && SDL_TLSSet(g_cu_tls, h, cu_free_handle) != 0) {
+    cu.cleanup(h);
+    return NULL;
+  }
+  return h;
+}
+
 static FmErr cu_request(const char *url, const char *headers, Body *b, FmNetProgress cb, void *user,
                         FmNetResp *out, volatile int *cancel) {
   memset(out, 0, sizeof *out);
   if (!cu_load()) { fm_strlcpy(out->error, "libcurl is not installed", sizeof out->error); return FM_ERR_UNSUPPORTED; }
-  CURL *h = cu.init();
+  CURL *h = cu_handle();
   if (!h) return FM_ERR_NOMEM;
   CuCtx ctx;
   memset(&ctx, 0, sizeof ctx);
@@ -573,9 +650,12 @@ static FmErr cu_request(const char *url, const char *headers, Body *b, FmNetProg
     }
   }
   if (hl) cu.slist_free(hl);
-  cu.cleanup(h);
+  if (!cu.reset) cu.cleanup(h);                          /* not kept without curl_easy_reset (very old curl) */
+  else cu.setopt(h, CURLOPT_HTTPHEADER_, (void *)NULL); /* the list is gone: nothing may point at it */
   return err;
 }
+
+void net_shutdown(void) {}
 
 #define REQUEST cu_request
 
@@ -662,6 +742,7 @@ static JNIEnv *jn_load(void) {
 }
 
 bool net_available(void) { return jn_load() != NULL; }
+void net_shutdown(void) {}                        /* HttpURLConnection pools by itself */
 const char *net_backend(void) { return jn_load() ? "HttpURLConnection" : "the Java network helper is missing"; }
 
 /* a String field or header of the connection into out ("" when null) */
@@ -783,6 +864,7 @@ static FmErr jn_request(const char *url, const char *headers, Body *b, FmNetProg
 #else
 
 bool net_available(void) { return false; }
+void net_shutdown(void) {}
 const char *net_backend(void) { return "networking is not available on this platform yet"; }
 
 static FmErr no_request(const char *url, const char *headers, Body *b, FmNetProgress cb, void *user,
@@ -819,6 +901,7 @@ FmErr net_post(const char *url, const char *headers, const void *body, size_t le
   b.post = body ? body : "";
   b.post_len = body ? len : 0;
   FmErr err = REQUEST(url, headers, &b, NULL, NULL, out, cancel);
+  if (out->status) net_count(b.post_len);      /* sent (a reply came) */
   if (err == FM_OK && !b.data) b.data = (u8 *)fm_calloc(1, 1);
   if (err != FM_OK) { fm_free(b.data); b.data = NULL; b.len = 0; }
   out->data = b.data;
@@ -859,6 +942,7 @@ FmErr net_request(const char *url, const FmNetReq *rq, FmNetResp *out, volatile 
     }
   }
   FmErr err = REQUEST(url, rq->headers, &b, rq->progress, rq->user, out, cancel);
+  if (out->status) net_count(b.post_len + (size_t)FM_MAX(0, b.up_len));   /* sent (a reply came) */
   if (b.upf) fclose(b.upf);
   if (b.f && fclose(b.f) != 0 && err == FM_OK) err = FM_ERR_IO;
   if (!b.f) {

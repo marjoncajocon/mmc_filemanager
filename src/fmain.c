@@ -15,6 +15,8 @@
 #include "fsdl.h"
 #include "ftest.h"
 #include "fperf.h"
+#include "fdatause.h"
+#include "fnet.h"
 
 #ifdef __EMSCRIPTEN__
 #  include <emscripten.h>
@@ -292,6 +294,7 @@ static void frame(void) {
     got = SDL_PollEvent(&e) != 0;
   }
   tray_pump();                           /* the tray icon's clicks, also while hidden */
+  datause_pump();                        /* the data usage meter, also while hidden (music) */
   media_pump();                          /* the notification's buttons (Android) */
   if (app.background) {                  /* nothing is drawn while hidden; music goes on */
     media_bg_pump();
@@ -481,6 +484,7 @@ int main(int argc, char **argv) {
 #endif
 
   app_shutdown();
+  net_shutdown();                        /* the kept connections */
   wait_shutdown();
   ui_shutdown();
   font_shutdown();

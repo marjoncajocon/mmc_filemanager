@@ -27,6 +27,8 @@ void wiki_shutdown(void);
 void wiki_demo_page(const char *page);
 /* --demo-wiki-src: the source on screen ("wikipedia", "gutenberg", "inaturalist", ...). */
 void wiki_demo_source(const char *key);
+/* Loads wiki.txt now (the Wikimedia contact: Online photos uses it too). */
+void wiki_preload(void);
 
 /* Saved pages, newest first (the home screen's Favorites strip). key is
 ** "source|lang|id|title"; desc names the source. */

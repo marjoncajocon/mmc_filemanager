@@ -28,8 +28,13 @@
 #  include "gen_sdl_redef.h"
 #endif
 
-/* Use instead of SDL_CreateThread (which is a macro on Windows). */
+/* Use instead of SDL_CreateThread (which is a macro on Windows). The new
+** thread starts with the creator's tag (below). */
 SDL_Thread *fm_thread_create(SDL_ThreadFunction fn, const char *name, void *data);
+/* A small number kept per thread and handed down to the threads it creates
+** (fnet counts the data each one receives under it: NET_GROUP_*). 0 = none. */
+int  fm_thread_tag(void);
+void fm_set_thread_tag(int tag);
 
 /* Loads SDL2 (dynamic builds); always true for static builds. On failure
 ** `err` holds a message for the user. */

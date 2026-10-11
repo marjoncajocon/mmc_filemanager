@@ -30,6 +30,7 @@
 #include "faudio_online.h"             /* audio */
 #include "fcloud_app.h"                /* cloud */
 #include "fqueue.h"                    /* music queue, playlists */
+#include "fdatause.h"                  /* data usage */
 
 /* ---- state -------------------------------------------------------------- */
 
@@ -3141,6 +3142,8 @@ void app_init(void) {
   pl_init(g_shot);                     /* playlists: loaded when first shown */
   audio_queue_init(g_shot);            /* the queue as it was, paused (after the online hooks) */
   cloud_init(g_shot);                  /* cloud: --shot runs never load or save accounts */
+  if (!g_shot) datause_init();         /* the data usage meter (home screen) */
+  if (!g_shot) wiki_preload();         /* the Wikimedia contact, for Online photos too */
   {
     FmCloudHooks ch = { app_panel_activate, open_settings, active_panel, dlg_close };
     cloud_ui_bind(g_p, &ch);
@@ -3184,6 +3187,7 @@ void app_init(void) {
     const char *q = NULL;
     for (int i = 1; i + 2 < app.argc; i++)
       if (!strcmp(app.argv[i], "--demo-photos") && app.argv[i + 2][0] != '-') q = app.argv[i + 2];
+    if (getenv("MMCFM_DEMO_QUERY")) q = getenv("MMCFM_DEMO_QUERY");
     photo_demo(dph, q, arg_value("--demo-photos-state"));
   }
   /* audio: --demo-audio-online SOURCE [QUERY] [--demo-audio-online-state STATE] */
@@ -3213,6 +3217,7 @@ void app_init(void) {
 }
 
 void app_shutdown(void) {
+  datause_shutdown();
   audio_queue_save_now();              /* the queue, the track and where it was */
   app_close_viewer();
   video_bg_stop();                     /* a video playing in the background */
@@ -3302,6 +3307,9 @@ void app_event(const SDL_Event *e) {
 /* ---- frame -------------------------------------------------------------- */
 
 void app_frame(void) {
+  /* data usage: what starts while a view runs (its tasks, streams,
+  ** thumbnails) counts under that view's group (fnet, fdatause) */
+  fm_set_thread_tag(NET_GROUP_OTHER);
   video_bg_pump();                     /* a video playing in the background */
   thumb_pump();
   cloud_pump();                        /* cloud: finished listings and sign-ins, saving */
@@ -3321,6 +3329,8 @@ void app_frame(void) {
     FmRect full = { 0, 0, ui.w, ui.h };
     int prev = ui_push_layer(UI_LAYER_SHEET);
     title_bar(FM_RECT(0, 0, 0, 0));    /* viewers own the top edge: no drag area */
+    fm_set_thread_tag(app.viewer == &g_view_video ? NET_GROUP_VIDEOS
+                      : app.viewer == &g_view_audio ? NET_GROUP_AUDIO : NET_GROUP_OTHER);
     app.viewer->frame(full);
     if (app.viewer && (ui_key(SDLK_ESCAPE, 0) || ui_key(SDLK_AC_BACK, 0))) app_close_viewer();
     ui_pop_layer(prev);
@@ -3336,6 +3346,7 @@ void app_frame(void) {
   }
   /* online: the online videos view, also under the viewers */
   if (online_is_open()) {
+    fm_set_thread_tag(NET_GROUP_VIDEOS);
     online_frame(FM_RECT(0, 0, ui.w, ui.h));
     draw_dialogs();
     title_outline();
@@ -3343,6 +3354,7 @@ void app_frame(void) {
   }
   /* photos: the online photos view, also under the viewers */
   if (photo_is_open()) {
+    fm_set_thread_tag(NET_GROUP_PHOTOS);
     photo_frame(FM_RECT(0, 0, ui.w, ui.h));
     draw_dialogs();
     title_outline();
@@ -3350,6 +3362,7 @@ void app_frame(void) {
   }
   /* audio: the online audio view, also under the viewers */
   if (aonline_is_open()) {
+    fm_set_thread_tag(NET_GROUP_AUDIO);
     aonline_frame(FM_RECT(0, 0, ui.w, ui.h));
     draw_dialogs();
     title_outline();
@@ -3357,6 +3370,7 @@ void app_frame(void) {
   }
   /* wiki: Wikipedia, also under the viewers */
   if (wiki_is_open()) {
+    fm_set_thread_tag(NET_GROUP_READING);
     wiki_frame(FM_RECT(0, 0, ui.w, ui.h));
     draw_dialogs();
     title_outline();

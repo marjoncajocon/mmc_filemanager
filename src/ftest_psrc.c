@@ -355,7 +355,9 @@ static void pt_openverse(void) {
                b->width == 0);
     TEST_CHECK(!strcmp(b->title, "Le chat \xC3\xA9t\xC3\xA9"));
     TEST_CHECK(!strcmp(c->id, "0000-pd") && !strcmp(c->license, "Public domain mark") && c->title[0] == 0);
-    TEST_CHECK(!strcmp(c->thumb, "https://example.org/x.jpg") && strstr(c->page, "openverse.org/image/0000-pd"));
+    /* no thumbnail given: the tile takes Openverse's proxy, never the original */
+    TEST_CHECK(!strcmp(c->thumb, "https://api.openverse.org/v1/images/0000-pd/thumb/") &&
+               strstr(c->page, "openverse.org/image/0000-pd"));
     TEST_CHECK(!strcmp(d->license, "CC0 1.0"));
   }
   psrc_page_free(&p);

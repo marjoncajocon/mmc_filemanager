@@ -16,6 +16,11 @@
 **     one opened from here or opened as a file anywhere (home_fav_touch).
 **     Entries whose favourite was removed leave the log, so adding it again
 **     brings it to the top again.
+**   - Data usage: a button in the greeting says what the network moved
+**     today and this month; it opens a card with every group (online
+**     videos, audio, photos, reading, cloud, other) for today, this month
+**     and since the last clear, and Clear usage (asked twice). The numbers
+**     come from fdatause.c.
 */
 #include "fhome.h"
 #include "fapp.h"
@@ -33,6 +38,8 @@
 #include "fphoto.h"
 #include "faudio_online.h"
 #include "fwiki.h"
+#include "fdatause.h"
+#include "fview_int.h"                /* view_wake_in */
 #include <time.h>
 
 typedef struct Tile {
@@ -416,6 +423,115 @@ static int draw_top(FmRect r) {
   return act;
 }
 
+/* ---- data usage ---------------------------------------------------------------- */
+
+static bool g_du_open;
+static u64 g_du_armed;                 /* Clear usage was tapped once: until then, a second tap clears */
+
+static u64 du_sum(const u64 *v) {
+  u64 t = 0;
+  for (int g = 0; g < NET_GROUPS; g++) t += v[g];
+  return t;
+}
+
+static float du_row_h(void) { return DP(ui.touch_mode ? 34 : 28); }
+static float du_card_h(void) { return DP(56) + du_row_h() * (NET_GROUPS + 2) + DP(ui.touch_mode ? 64 : 56); }
+
+/* The greeting's button: today and this month; true when clicked. */
+static bool du_button(u32 id, FmRect r, const FmDataUse *u) {
+  char a[24], b[24], t[80];
+  fm_snprintf(t, sizeof t, "Today %s \xC2\xB7 this month %s", fm_fmt_size(du_sum(u->today), a, sizeof a),
+              fm_fmt_size(du_sum(u->month), b, sizeof b));
+  int f = ui_hit(id, r);
+  gfx_rrect(r, r.h * 0.5f, (f & UI_HOVER) || g_du_open ? T.surface3 : T.surface2);
+  FmRect ic = rect_center(FM_RECT(r.x + DP(6), r.y, r.h, r.h), DP(18), DP(18));
+  icon_draw(IC_DOWNLOAD, ic, T.accent);
+  font_draw_ellipsis(FONT_REGULAR, ui.m.font_small, r.x + r.h + DP(6), r.y + (r.h - font_line_h(ui.m.font_small)) * 0.5f, t,
+                     r.w - r.h - DP(14), T.text);
+  if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
+  return (f & UI_CLICK) != 0;
+}
+
+static float du_button_w(const FmDataUse *u) {
+  char a[24], b[24], t[80];
+  fm_snprintf(t, sizeof t, "Today %s \xC2\xB7 this month %s", fm_fmt_size(du_sum(u->today), a, sizeof a),
+              fm_fmt_size(du_sum(u->month), b, sizeof b));
+  return font_width(FONT_REGULAR, ui.m.font_small, t, -1) + DP(ui.touch_mode ? 40 : 34) + DP(22);
+}
+
+/* The card: a row per group with today, this month and the total, a bar for
+** each group's share of the total, and Clear usage. */
+static void du_card(FmRect c, const FmDataUse *u) {
+  gfx_shadow(c, DP(16), DP(10), col_alpha(T.shadow, 0.6f));
+  gfx_rrect(c, DP(16), T.surface);
+  gfx_rrect_line(c, DP(16), DP(1), T.border);
+  FmRect in = rect_inset2(c, DP(18), DP(14));
+  float tl = font_line_h(ui.m.font_title);
+  font_draw(FONT_BOLD, ui.m.font_title, in.x, in.y, "Data usage", -1, T.text);
+  char since[64];
+  fm_snprintf(since, sizeof since, "since %s", u->since);
+  font_draw(FONT_REGULAR, ui.m.font_small, in.x, in.y + tl, since, -1, T.text2);
+  float y = in.y + DP(42);
+  float rh = du_row_h(), name_w = FM_MIN(in.w * 0.36f, DP(220)), col = (in.w - name_w) / 3.0f;
+  static const char *const kHead[3] = { "Today", "This month", "Total" };
+  for (int k = 0; k < 3; k++)
+    font_draw(FONT_BOLD, ui.m.font_small, in.x + name_w + col * k, y + (rh - font_line_h(ui.m.font_small)) * 0.5f, kHead[k],
+              -1, T.text2);
+  y += rh;
+  ui_divider(in.x, in.x + in.w, y);
+  u64 all = du_sum(u->all);
+  /* the groups in a fixed order: the busiest stand out by their bars */
+  static const int kOrder[NET_GROUPS] = { NET_GROUP_VIDEOS, NET_GROUP_AUDIO, NET_GROUP_PHOTOS, NET_GROUP_READING,
+                                          NET_GROUP_CLOUD, NET_GROUP_OTHER };
+  for (int i = 0; i < NET_GROUPS; i++) {
+    int g = kOrder[i];
+    float ty = y + (rh - font_line_h(ui.m.font_small)) * 0.5f;
+    if (all) {
+      float share = (float)((double)u->all[g] / (double)all);
+      FmRect bar = { in.x, y + rh - DP(5), FM_MAX(DP(2), (name_w - DP(16)) * share), DP(3) };
+      if (u->all[g]) gfx_rrect(bar, DP(1.5f), col_alpha(T.accent, 0.8f));
+    }
+    font_draw_ellipsis(FONT_REGULAR, ui.m.font_small, in.x, ty, datause_group_name(g), name_w - DP(12), T.text);
+    const u64 *v[3] = { u->today, u->month, u->all };
+    for (int k = 0; k < 3; k++) {
+      char b[24];
+      font_draw(FONT_REGULAR, ui.m.font_small, in.x + name_w + col * k, ty, v[k][g] ? fm_fmt_size(v[k][g], b, sizeof b) : "\xE2\x80\x94",
+                -1, v[k][g] ? T.text : T.text3);
+    }
+    y += rh;
+  }
+  ui_divider(in.x, in.x + in.w, y);
+  {
+    float ty = y + (rh - font_line_h(ui.m.font_small)) * 0.5f;
+    font_draw(FONT_BOLD, ui.m.font_small, in.x, ty, "All", -1, T.text);
+    const u64 *v[3] = { u->today, u->month, u->all };
+    for (int k = 0; k < 3; k++) {
+      char b[24];
+      font_draw(FONT_BOLD, ui.m.font_small, in.x + name_w + col * k, ty, fm_fmt_size(du_sum(v[k]), b, sizeof b), -1, T.text);
+    }
+    y += rh;
+  }
+  /* Clear usage, asked twice: the first tap arms it for 3 s */
+  float bh = DP(ui.touch_mode ? 40 : 34);
+  bool armed = ui.now < g_du_armed;
+  const char *lab = armed ? "Tap again to clear" : "Clear usage";
+  float bw = font_width(FONT_BOLD, ui.m.font, lab, -1) + DP(52);
+  FmRect b = { in.x + in.w - bw, y + DP(10), bw, bh };
+  font_draw_ellipsis(FONT_REGULAR, ui.m.font_small, in.x, b.y + (bh - font_line_h(ui.m.font_small)) * 0.5f,
+                     "What this app downloads and uploads (yt-dlp's own downloads are not counted)", in.w - bw - DP(16),
+                     T.text3);
+  if (ui_button(ui_id("home.du.clear"), b, IC_DELETE, lab, armed ? UI_BTN_DANGER : UI_BTN_TEXT)) {
+    if (armed) {
+      datause_clear();
+      g_du_armed = 0;
+      ui_toast("Data usage cleared");
+    } else {
+      g_du_armed = ui.now + 3000;
+    }
+  }
+  if (armed) view_wake_in((u32)(g_du_armed - ui.now) + 20);
+}
+
 /* One card; true when clicked. */
 static bool tile(u32 id, FmRect r, const Tile *t, bool compact) {
   int f = ui_hit(id, r);
@@ -475,30 +591,44 @@ int home_frame(FmRect area) {
                     : FM_CLAMP(tw * 0.62f, DP(compact ? 150 : 170), DP(230));
   int rows = (n + cols - 1) / cols;
   float head = DP(compact ? 64 : 84);
+  FmDataUse du;
+  datause_get(&du);
+  float dbw = FM_MIN(du_button_w(&du), grid.w), dbh = DP(ui.touch_mode ? 36 : 32);
+  float greet_w = font_width(FONT_BOLD, ui.m.font_title * 1.3f, "What would you like to open?", -1);
+  bool du_below = grid.w - greet_w < dbw + DP(24);     /* no room beside the greeting: a line of its own */
+  if (du_below) head += dbh + DP(10);
+  float duh = g_du_open ? du_card_h() + DP(18) : 0;
   int fcols = wdp >= 900 ? 3 : wdp >= 560 ? 2 : 1;
   float fh = DP(ui.touch_mode ? 72 : 64), fgap = DP(10);
   float fhead = DP(compact ? 56 : 64);
   int frows = H.nfav ? (H.nfav + fcols - 1) / fcols : 0;
   float fbody = H.nfav ? frows * fh + (frows - 1) * fgap : DP(48);
-  float content = head + rows * th + (rows - 1) * gap + fhead + fbody + pad;
+  float content = head + duh + rows * th + (rows - 1) * gap + fhead + fbody + pad;
 
   ui_scroll(&g_scroll, ui_id("home.scroll"), view, content);
   gfx_clip_push(view);
   float y0 = view.y - g_scroll.y;
   /* greeting */
-  float gy = y0 + (head - font_line_h(ui.m.font_title * 1.3f) - font_line_h(ui.m.font_small)) * 0.5f;
+  float ghead = du_below ? head - dbh - DP(10) : head;
+  float gy = y0 + (ghead - font_line_h(ui.m.font_title * 1.3f) - font_line_h(ui.m.font_small)) * 0.5f;
   font_draw(FONT_BOLD, ui.m.font_title * 1.3f, grid.x, gy, "What would you like to open?", -1, T.text);
   font_draw(FONT_REGULAR, ui.m.font_small, grid.x, gy + font_line_h(ui.m.font_title * 1.3f),
             "Developed by MMC Solo Dev (Marjon Cajocon)", -1, T.text2);
   int act = HOME_NONE;
+  {
+    FmRect db = du_below ? FM_RECT(grid.x, y0 + ghead, dbw, dbh)
+                         : FM_RECT(grid.x + grid.w - dbw, y0 + (head - dbh) * 0.5f, dbw, dbh);
+    if (du_button(ui_id("home.du"), db, &du)) { g_du_open = !g_du_open; g_du_armed = 0; }
+    if (g_du_open) du_card(FM_RECT(grid.x, y0 + head, grid.w, du_card_h()), &du);
+  }
   u32 base = ui_id("home.tile");
   for (int i = 0; i < n; i++) {
-    FmRect c = { grid.x + (i % cols) * (tw + gap), y0 + head + (i / cols) * (th + gap), tw, th };
+    FmRect c = { grid.x + (i % cols) * (tw + gap), y0 + head + duh + (i / cols) * (th + gap), tw, th };
     if (!gfx_visible(c)) continue;
     if (tile(ui_idn(base, (u32)i), c, &kTiles[i], compact)) act = kTiles[i].act;
   }
   /* favourites: newest first */
-  float fy = y0 + head + rows * th + (rows - 1) * gap;
+  float fy = y0 + head + duh + rows * th + (rows - 1) * gap;
   float hy = fy + fhead - font_line_h(ui.m.font_title) - DP(8);
   float hx = font_draw(FONT_BOLD, ui.m.font_title, grid.x, hy, "Favorites", -1, T.text);
   font_draw(FONT_REGULAR, ui.m.font_small, hx + DP(10), hy + font_line_h(ui.m.font_title) - font_line_h(ui.m.font_small),

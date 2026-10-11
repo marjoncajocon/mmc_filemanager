@@ -60,15 +60,56 @@ void fm_log(const char *fmt, ...) {
 #  include <process.h>
 #endif
 
+/* The thread tag: SDL's thread-local storage (compiler TLS is not there in
+** tcc), the value stored as a pointer-sized integer. */
+static SDL_TLSID g_tag_id;
+static SDL_SpinLock g_tag_lk;
+
+static SDL_TLSID tag_id(void) {
+  if (!g_tag_id) {
+    SDL_AtomicLock(&g_tag_lk);
+    if (!g_tag_id) g_tag_id = SDL_TLSCreate();
+    SDL_AtomicUnlock(&g_tag_lk);
+  }
+  return g_tag_id;
+}
+
+int fm_thread_tag(void) {
+  SDL_TLSID id = tag_id();
+  return id ? (int)(intptr_t)SDL_TLSGet(id) : 0;
+}
+
+void fm_set_thread_tag(int tag) {
+  SDL_TLSID id = tag_id();
+  if (id) SDL_TLSSet(id, (const void *)(intptr_t)tag, NULL);
+}
+
+typedef struct Start { SDL_ThreadFunction fn; void *data; int tag; } Start;
+
+static int SDLCALL start_thread(void *u) {
+  Start st = *(Start *)u;
+  free(u);
+  fm_set_thread_tag(st.tag);
+  return st.fn(st.data);
+}
+
 SDL_Thread *fm_thread_create(SDL_ThreadFunction fn, const char *name, void *data) {
+  Start *st = (Start *)malloc(sizeof *st);
+  if (!st) return NULL;
+  st->fn = fn;
+  st->data = data;
+  st->tag = fm_thread_tag();                 /* inherited */
+  SDL_Thread *t;
 #if defined(FM_SDL_DYNAMIC) && defined(FM_WIN)
-  return fmsdl_SDL_CreateThread(fn, name, data, (pfnSDL_CurrentBeginThread)_beginthreadex,
-                                (pfnSDL_CurrentEndThread)_endthreadex);
+  t = fmsdl_SDL_CreateThread(start_thread, name, st, (pfnSDL_CurrentBeginThread)_beginthreadex,
+                             (pfnSDL_CurrentEndThread)_endthreadex);
 #elif defined(FM_SDL_DYNAMIC)
-  return fmsdl_SDL_CreateThread(fn, name, data);
+  t = fmsdl_SDL_CreateThread(start_thread, name, st);
 #else
-  return SDL_CreateThread(fn, name, data);
+  t = SDL_CreateThread(start_thread, name, st);
 #endif
+  if (!t) free(st);
+  return t;
 }
 
 #ifndef FM_SDL_DYNAMIC

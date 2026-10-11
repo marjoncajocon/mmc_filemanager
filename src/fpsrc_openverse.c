@@ -110,7 +110,9 @@ FmErr psrc_openverse_parse(const char *json, size_t len, int page, FmPsrcPage *o
                sizeof it->license);
     char fl[512];
     if (full_ok && psrc_flickr_thumb(full, fl, sizeof fl)) fm_strlcpy(it->thumb, fl, sizeof it->thumb);
-    else fm_strlcpy(it->thumb, th_ok ? thumb : full, sizeof it->thumb);
+    else if (th_ok) fm_strlcpy(it->thumb, thumb, sizeof it->thumb);
+    /* no thumbnail given: Openverse's resizing proxy, never the original (MBs per tile) */
+    else fm_snprintf(it->thumb, sizeof it->thumb, "https://api.openverse.org/v1/images/%s/thumb/", id);
     if (full_ok && psrc_url_viewable(full)) {
       fm_strlcpy(it->full, full, sizeof it->full);
     } else {

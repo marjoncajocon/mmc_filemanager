@@ -130,6 +130,8 @@ void  othumb_prefetch_ex(const char *url, int px, float aspect, const char *head
 void  othumb_forget_queue(void);           /* new results: nothing queued is wanted */
 void  othumb_reset(void);                   /* renderer reset: drop textures */
 size_t othumb_bytes(void);
+/* Thumbnails drawn lately that are still queued or downloading. */
+int othumb_visible_waiting(void);
 
 /* ---- shared helpers (fonline.c) ------------------------------------------------- */
 

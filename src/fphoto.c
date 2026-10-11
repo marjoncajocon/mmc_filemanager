@@ -893,7 +893,8 @@ static void draw_wall(PhWall *w, FmRect view, bool results) {
   if (loading_first) return;
   if (results) {
     results_footer(view, &wr);
-    if (wr.near_end) ph_need_more(&S.res);
+    /* and only once what is on screen has come in: a new page never competes with it */
+    if (wr.near_end && othumb_visible_waiting() == 0) ph_need_more(&S.res);
   }
   if (wr.open >= 0) box_open(w, wr.open);
   else if (wr.menu >= 0) open_menu(wr.menu, wr.menu_x, wr.menu_y);

@@ -2230,6 +2230,8 @@ void wiki_demo_page(const char *page) {
               : !strcmp(page, "langs") ? WP_LANGS : !strcmp(page, "related") ? WP_RELATED : -1;
 }
 
+void wiki_preload(void) { load_file(); }
+
 void wiki_demo_source(const char *key) {
   load_file();
   int i = key ? src_find(key) : -1;

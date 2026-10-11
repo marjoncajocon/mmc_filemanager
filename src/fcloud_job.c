@@ -24,6 +24,7 @@
 **     sessions back at the end.
 */
 #include "fcloud_app.h"
+#include "fnet.h"                    /* NET_GROUP_* (data usage) */
 #include "fapp.h"
 
 #define MAX_DEPTH 64
@@ -636,6 +637,7 @@ static void run_open(CJob *c) {
 }
 
 static void job_run(FmJob *j, void *data) {
+  fm_set_thread_tag(NET_GROUP_CLOUD);                  /* data usage: cloud */
   CJob *c = (CJob *)data;
   c->j = j;
   c->cancel = ops_job_cancel_flag(j);

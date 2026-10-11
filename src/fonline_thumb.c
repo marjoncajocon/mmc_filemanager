@@ -2,10 +2,18 @@
 **
 ** Design decisions:
 **   - A fixed table of entries keyed by a hash of the URL and the width
-**     asked for; no allocation per thumbnail apart from the pixels. Four
+**     asked for; no allocation per thumbnail apart from the pixels. Six
 **     worker threads sleep on a condition variable, so nothing runs while
-**     the gallery is idle; four, because a fetch is mostly waiting on the
-**     network and a photo wall shows twenty pictures or more at once.
+**     the gallery is idle; six, because a fetch is mostly waiting on the
+**     network and a photo wall shows twenty pictures or more at once
+**     (measured on Android: a first screen in 1.5-2 s instead of 2.3-4 s
+**     with four). Connections are kept between requests (fnet.c).
+**   - Sizes come in coarse buckets (128 ... 1280), and while a size loads
+**     the same picture at another size is drawn: a re-layout, a resize or
+**     the selection inset no longer decodes the picture again or blanks it.
+**   - A failure retries after 20 s, then 40, 80 ... up to 5 min; a picture
+**     that is too large (over 2 MB) or answered 4xx (not 429) is not asked
+**     for again. At most 8 textures are made per frame.
 **   - Workers take the most recently requested entry first (visible cards
 **     before the prefetch of the next screen), fetch it with net_get (capped
 **     at 2 MB), decode it at the width it is shown (img_load_mem fits the
@@ -20,7 +28,8 @@
 **   - Requests are renewed every frame by the cards that need them. One not
 **     renewed for a few frames was scrolled far away: a queued one is
 **     dropped and a running download is cancelled. Textures are an LRU
-**     capped by count and bytes (about 120 cards, under 24 MB); the ones
+**     capped by count and bytes (200 and 48 MB on a desktop, 120 and 24 MB
+**     on a phone); the ones
 **     drawn in the last two frames are never evicted.
 **   - The raw downloaded files are kept in PLACE_CACHE/online-thumbs (they
 **     are small JPEGs), trimmed to 40 MB when the folder passes 50 MB, so
@@ -32,19 +41,28 @@
 #include "fdec_img.h"
 
 #define OT_ENTRIES 192
-#define OT_WORKERS 4
-#define OT_MAX_TEX 120
-#define OT_BUDGET (24u * 1024u * 1024u)
+#define OT_WORKERS 6
+/* textures kept: a phone's memory is tighter; on a desktop at 2x, 24 MB was
+** about 30 photo tiles and scrolling back decoded them again */
+#ifdef FM_ANDROID
+#  define OT_MAX_TEX 120
+#  define OT_BUDGET (24u * 1024u * 1024u)
+#else
+#  define OT_MAX_TEX 200
+#  define OT_BUDGET (48u * 1024u * 1024u)
+#endif
 #define OT_MAX_FILE (2u * 1024u * 1024u)
 #define OT_DISK_MAX (50ull * 1024 * 1024)
 #define OT_DISK_KEEP (40ull * 1024 * 1024)
 #define OT_FADE_MS 220
+#define OT_UPLOADS 8                      /* textures made per frame at most */
 #define OT_RETRY_MS 20000
 
 enum { TS_FREE = 0, TS_QUEUED, TS_WORKING, TS_READY, TS_TEX, TS_FAILED };
 
 typedef struct ThE {
   u64 key;
+  u64 uh;                    /* the URL's hash alone: any size of the same picture */
   int state;
   int prio;                  /* 1 visible, 0 prefetch */
   int px;
@@ -57,8 +75,10 @@ typedef struct ThE {
   u32 used;                  /* frame of the last request */
   u64 seq;                   /* request order, for LIFO */
   u64 t_tex, t_fail;
-  bool undecodable;          /* the bytes came but are no picture stb reads (WebP): never again */
+  bool undecodable;          /* never again: no picture stb reads (WebP), too large, or a 4xx answer */
+  int fails;                 /* failures in a row: the retry waits 20 s, 40 s, 80 s ... up to 5 min */
   bool skipped;              /* not downloaded: "Online thumbnails" was off */
+  int group;                 /* data usage: the view that asked (fm_thread_tag) */
   volatile int cancel;
 } ThE;
 
@@ -77,6 +97,39 @@ static struct {
   bool dir_ok;
   bool trimmed;
 } G;
+
+/* ---- MMCFM_PHOTO_LOG: how a screen of thumbnails loads ----------------------------- */
+
+static struct {
+  int on;                    /* -1 = not asked yet */
+  u64 t0;                    /* the first request since the last search */
+  u64 first_ms, settled_ms;  /* the first texture; nothing visible waiting any more */
+  int net, disk, failed, s429, dup;
+  u64 bytes;
+  u64 seen[512];             /* URLs decoded this round (repeated decodes) */
+  int nseen;
+  u64 logged;
+} ST;
+
+static bool st_on(void) {
+  if (ST.on < 0) ST.on = getenv("MMCFM_PHOTO_LOG") ? 1 : 0;
+  return ST.on == 1;
+}
+
+static void st_reset(void) {
+  int on = ST.on;
+  memset(&ST, 0, sizeof ST);
+  ST.on = on;
+}
+
+/* a decode of url (worker, mx held) */
+static void st_decoded(const char *url) {
+  u64 h = 14695981039346656037ull;
+  for (const char *c = url; *c; c++) { h ^= (u8)*c; h *= 1099511628211ull; }
+  for (int i = 0; i < ST.nseen; i++)
+    if (ST.seen[i] == h) { ST.dup++; return; }
+  if (ST.nseen < (int)FM_COUNT(ST.seen)) ST.seen[ST.nseen++] = h;
+}
 
 /* ---- disk cache ------------------------------------------------------------------ */
 
@@ -211,12 +264,14 @@ static int worker(void *u) {
     int px = e->px;
     float aspect = e->aspect;
     const char *headers = e->headers;
+    fm_set_thread_tag(e->group);           /* its bytes count for the view that asked */
     fm_strlcpy(url, e->url, sizeof url);
     SDL_UnlockMutex(G.mx);
 
     FmImage im;
     memset(&im, 0, sizeof im);
     FmErr err = FM_ERR_IO;
+    bool hopeless = false;                 /* asking again would not help */
     size_t n = 0;
     u8 *data = disk_read(url, &n);
     bool from_disk = data != NULL;
@@ -225,14 +280,32 @@ static int worker(void *u) {
       memset(&r, 0, sizeof r);
       char jpg[160];
       const char *get = webp_to_jpeg(url, jpg, sizeof jpg) ? jpg : url;
-      if (net_get(get, headers, OT_MAX_FILE, &r, &e->cancel) == FM_OK && r.status == 200 && r.data && r.len > 8) {
+      FmErr ne = net_get(get, headers, OT_MAX_FILE, &r, &e->cancel);
+      if (ne == FM_OK && r.status == 200 && r.data && r.len > 8) {
         data = r.data;
         n = r.len;
         r.data = NULL;
       }
+      /* too large (over 2 MB: it was downloaded again every 20 s) or a 4xx
+      ** other than 429 (gone, forbidden): never again this session */
+      hopeless = !data && (ne == FM_ERR_FULL || (r.status >= 400 && r.status < 500 && r.status != 429));
+      if (st_on()) {
+        SDL_LockMutex(G.mx);
+        if (data) { ST.net++; ST.bytes += n; }
+        else if (!e->cancel) { ST.failed++; if (r.status == 429) ST.s429++; }
+        SDL_UnlockMutex(G.mx);
+        if (!data && !e->cancel)
+          fm_log("photo-log: thumb failed: status %d %s: %.120s", r.status, r.error[0] ? r.error : "", get);
+      }
       net_resp_free(&r);
     }
     bool fetched = data != NULL;
+    if (st_on() && data) {
+      SDL_LockMutex(G.mx);
+      if (from_disk) ST.disk++;
+      st_decoded(url);
+      SDL_UnlockMutex(G.mx);
+    }
     if (data) {
       /* the long edge is what img_load_mem fits: a 4:3 picture px wide is
       ** px * 3/4 high, which still covers a px-wide 16:9 crop */
@@ -253,7 +326,8 @@ static int worker(void *u) {
       } else {
         e->state = TS_FAILED;
         e->t_fail = SDL_GetTicks64();
-        e->undecodable = fetched;
+        e->undecodable = fetched || hopeless;
+        e->fails++;
         e->skipped = !fetched && !conf.online_thumbs;
       }
     }
@@ -280,7 +354,10 @@ static void lazy_init(void) {
 
 /* ---- main thread ---------------------------------------------------------------------- */
 
-void othumb_init(void) { memset(&G, 0, sizeof G); }
+void othumb_init(void) {
+  memset(&G, 0, sizeof G);
+  ST.on = -1;
+}
 
 static void drop_tex(ThE *e) {
   if (e->tex) {
@@ -328,9 +405,17 @@ static SDL_Texture *request(const char *url, int px, float aspect, const char *h
   if (!url || !url[0] || px <= 0) return NULL;
   lazy_init();
   if (!G.mx) return NULL;
-  px = FM_CLAMP((px + 63) / 64 * 64, 64, 1280);   /* small resizes reuse the texture */
+  /* coarse sizes: a re-layout (an aspect learned), a resize or a selection
+  ** inset changed the size by a few pixels, which was a new key and the same
+  ** picture decoded again; a slightly bigger texture is drawn scaled down */
+  static const int kBucket[] = { 128, 192, 256, 384, 512, 768, 1024, 1280 };
+  int b = 0;
+  while (b + 1 < (int)FM_COUNT(kBucket) && kBucket[b] < px) b++;
+  px = kBucket[b];
+  if (st_on() && !ST.t0) ST.t0 = SDL_GetTicks64();
   if (aspect < 0) aspect = 0;
-  u64 key = hash_str(url) ^ ((u64)px * 0x9E3779B97F4A7C15ull) ^ ((u64)(aspect * 1000.0f + 0.5f) << 40);
+  u64 uh = hash_str(url);
+  u64 key = uh ^ ((u64)px * 0x9E3779B97F4A7C15ull) ^ ((u64)(aspect * 1000.0f + 0.5f) << 40);
   SDL_LockMutex(G.mx);
   ThE *e = NULL;
   for (int i = 0; i < OT_ENTRIES; i++)
@@ -343,7 +428,8 @@ static SDL_Texture *request(const char *url, int px, float aspect, const char *h
     if (e->state == TS_TEX) {
       tex = e->tex;
       if (fade) *fade = ui.busy_fps > 0 ? FM_MIN(1.0f, (float)(ui.now - e->t_tex) / OT_FADE_MS) : 1.0f;   /* still: no fade */
-    } else if (e->state == TS_FAILED && !e->undecodable && SDL_GetTicks64() - e->t_fail > OT_RETRY_MS) {
+    } else if (e->state == TS_FAILED && !e->undecodable &&
+               SDL_GetTicks64() - e->t_fail > FM_MIN((u64)OT_RETRY_MS << FM_MIN(e->fails > 0 ? e->fails - 1 : 0, 4), 300000ull)) {
       e->state = TS_QUEUED;
       e->seq = ++G.seq;
       SDL_CondSignal(G.cv);
@@ -356,9 +442,11 @@ static SDL_Texture *request(const char *url, int px, float aspect, const char *h
       img_free(&e->img);
       memset(e, 0, sizeof *e);
       e->key = key;
+      e->uh = uh;
       e->px = px;
       e->aspect = aspect;
       e->headers = headers;
+      e->group = fm_thread_tag();
       e->prio = prio;
       fm_strlcpy(e->url, url, sizeof e->url);
       e->used = G.frame;
@@ -367,6 +455,18 @@ static SDL_Texture *request(const char *url, int px, float aspect, const char *h
       SDL_CondSignal(G.cv);
     }
   }
+  /* not there at this size yet: the same picture at another size meanwhile,
+  ** so a tile never blanks while a new size loads */
+  if (!tex)
+    for (int i = 0; i < OT_ENTRIES; i++) {
+      ThE *o = &G.e[i];
+      if (o->state == TS_TEX && o->uh == uh && o->aspect == aspect) {
+        o->used = G.frame;
+        tex = o->tex;
+        if (fade) *fade = 1;
+        break;
+      }
+    }
   SDL_UnlockMutex(G.mx);
   return tex;
 }
@@ -389,15 +489,20 @@ void othumb_pump(void) {
   if (!G.init || !G.mx) return;
   G.frame++;
   SDL_LockMutex(G.mx);
+  int uploads = 0;                        /* a few a frame: many arriving at once hitched one */
   for (int i = 0; i < OT_ENTRIES; i++) {
     ThE *e = &G.e[i];
-    if (e->state == TS_READY) {
+    if (e->state == TS_READY && uploads >= OT_UPLOADS) {
+      ui_redraw();                        /* the rest next frame */
+    } else if (e->state == TS_READY) {
+      uploads++;
       e->tex = view_tex_rgba(e->img.px, e->img.w, e->img.h);
       e->bytes = (size_t)e->img.w * e->img.h * 4;
       img_free(&e->img);
       if (e->tex) {
         e->state = TS_TEX;
         e->t_tex = SDL_GetTicks64();
+        if (st_on() && ST.t0 && !ST.first_ms) ST.first_ms = e->t_tex - ST.t0;
         G.ntex++;
         G.tex_bytes += e->bytes;
         ui_redraw();
@@ -410,6 +515,32 @@ void othumb_pump(void) {
       e->state = TS_FREE;                 /* scrolled away before it started */
     } else if (e->state == TS_WORKING && e->used + 30 < G.frame) {
       e->cancel = 1;                      /* far away: stop the download */
+    }
+  }
+  if (st_on() && ST.t0) {
+    int vis_wait = 0, waiting = 0, tex = 0;
+    for (int i = 0; i < OT_ENTRIES; i++) {
+      const ThE *e = &G.e[i];
+      if (e->state == TS_QUEUED || e->state == TS_WORKING) {
+        waiting++;
+        if (e->prio && e->used + 2 >= G.frame) vis_wait++;
+      }
+      if (e->state == TS_TEX) tex++;
+    }
+    u64 now = SDL_GetTicks64();
+    if (!ST.settled_ms && ST.first_ms && !vis_wait) {
+      ST.settled_ms = now - ST.t0;
+      fm_log("photo-log: screen filled in %llu ms (first tile %llu ms): %d downloaded (%llu KB), %d from disk, "
+             "%d failed (%d were 429), %d decoded again",
+             (unsigned long long)ST.settled_ms, (unsigned long long)ST.first_ms, ST.net,
+             (unsigned long long)(ST.bytes / 1024), ST.disk, ST.failed, ST.s429, ST.dup);
+    }
+    if (waiting && now - ST.logged >= 2000) {
+      ST.logged = now;
+      fm_log("photo-log: %.1f s: %d visible waiting, %d queued or loading, %d textures; %d downloaded (%llu KB), "
+             "%d from disk, %d failed (%d 429), %d decoded again",
+             (now - ST.t0) / 1000.0, vis_wait, waiting, tex, ST.net, (unsigned long long)(ST.bytes / 1024), ST.disk,
+             ST.failed, ST.s429, ST.dup);
     }
   }
   /* LRU: over the count or byte budget, drop textures not drawn lately */
@@ -430,6 +561,7 @@ void othumb_pump(void) {
 void othumb_forget_queue(void) {
   if (!G.init || !G.mx) return;
   SDL_LockMutex(G.mx);
+  if (st_on()) st_reset();                /* a new search: a new round of measuring */
   for (int i = 0; i < OT_ENTRIES; i++)
     if (G.e[i].state == TS_QUEUED) G.e[i].state = TS_FREE;
   SDL_UnlockMutex(G.mx);
@@ -458,3 +590,15 @@ void othumb_retry_skipped(void) {
 }
 
 size_t othumb_bytes(void) { return G.tex_bytes; }
+
+int othumb_visible_waiting(void) {
+  if (!G.init || !G.mx) return 0;
+  int n = 0;
+  SDL_LockMutex(G.mx);
+  for (int i = 0; i < OT_ENTRIES; i++) {
+    const ThE *e = &G.e[i];
+    if ((e->state == TS_QUEUED || e->state == TS_WORKING) && e->prio && e->used + 2 >= G.frame) n++;
+  }
+  SDL_UnlockMutex(G.mx);
+  return n;
+}
