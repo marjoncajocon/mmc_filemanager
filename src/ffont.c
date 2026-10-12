@@ -207,7 +207,11 @@ static void mark_dirty(int x, int y, int w, int h) {
 
 /* Drops every glyph and the atlas; the next glyph makes a new one. */
 static void drop_cache(void) {
-  gfx_flush();                /* uploads what the queued text still needs */
+  /* the frame being recorded still draws from this atlas: it is sent now,
+  ** while the mirror and its edge still match (growing the edge first made
+  ** the upload read past the mirror: a crash on Android's Online screen) */
+  gfx_flush();
+  gfx_texture_changed();
   if (g_tab) memset(g_tab, 0, sizeof(Glyph) * TABLE);
   g_tab_used = 0;
   g_sx = g_sy = g_row_h = 0;
@@ -293,9 +297,10 @@ static Glyph *rasterize(Glyph *g, int face, int size, u32 cp) {
     /* Atlas full: a bigger one if allowed, else start over; either way
     ** the glyphs are rasterized again on demand. Retry this one (the
     ** table was cleared, so not from g). */
-    if (g_asz < ATLAS_MAX) g_asz *= 2;
-    else g_resets++;
-    drop_cache();
+    int grown = g_asz < ATLAS_MAX ? g_asz * 2 : g_asz;
+    if (grown == g_asz) g_resets++;
+    drop_cache();               /* with the old edge: the frame record still uploads from the mirror */
+    g_asz = grown;
     return get_glyph(face, size, want);
   }
   g_rasterized++;

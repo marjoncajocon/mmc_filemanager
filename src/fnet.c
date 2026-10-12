@@ -215,7 +215,26 @@ static bool split_url(const char *url, bool *tls, char *host, size_t hcap, int *
 static HINET g_wh_ses;
 static SDL_SpinLock g_wh_lk;
 
+static int g_wh_fresh = -1;             /* MMCFM_NET_FRESH=1: a session per request, as before (tests) */
+
+static HINET wh_new_session(void) {
+  HINET ses = wh.open(NET_UA_W, WH_ACCESS_AUTOMATIC, NULL, NULL, 0);
+  if (!ses) ses = wh.open(NET_UA_W, WH_ACCESS_DEFAULT, NULL, NULL, 0);
+  if (ses) {
+    DWORD protos = WH_TLS12 | WH_TLS13;
+    if (!wh.setopt(ses, WH_OPT_SECURE_PROTOCOLS, &protos, sizeof protos)) {
+      protos = WH_TLS11 | WH_TLS12;
+      wh.setopt(ses, WH_OPT_SECURE_PROTOCOLS, &protos, sizeof protos);
+    }
+    DWORD decomp = WH_DECOMP_ALL;
+    wh.setopt(ses, WH_OPT_DECOMPRESSION, &decomp, sizeof decomp);
+  }
+  return ses;
+}
+
 static HINET wh_session(void) {
+  if (g_wh_fresh < 0) g_wh_fresh = getenv("MMCFM_NET_FRESH") != NULL;
+  if (g_wh_fresh) return wh_new_session();
   SDL_AtomicLock(&g_wh_lk);
   if (!g_wh_ses) {
     HINET ses = wh.open(NET_UA_W, WH_ACCESS_AUTOMATIC, NULL, NULL, 0);
@@ -388,6 +407,7 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
 done:
   if (req) wh.close(req);
   if (con) wh.close(con);                                        /* the session keeps the connection */
+  if (ses && g_wh_fresh > 0) wh.close(ses);
   fm_free(whost);
   fm_free(wpath);
   fm_free(whdr);

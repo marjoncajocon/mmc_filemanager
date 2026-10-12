@@ -539,7 +539,10 @@ static void *amc_open(const char *path, int flags, FmVidInfo *in) {
       } else if (audio && !s->a.codec && !(flags & VID_OPEN_NO_AUDIO) && rate > 0 && rate <= 768000 &&
                  ch > 0 && ch <= 64 && track_open(s, &s->a, i, f, mime, false)) {
         keep = true;
-        in->rate = rate;
+        /* AAC at 24 kHz or less is nearly always HE-AAC: the decoder puts out
+        ** twice the rate the container states, so that is announced (no
+        ** resampling down and up again; plain AAC is resampled up instead) */
+        in->rate = !strcmp(mime, "audio/mp4a-latm") && rate <= 24000 ? rate * 2 : rate;
         ach = ch;
         codec_name(mime, in->acodec, sizeof in->acodec);
       }

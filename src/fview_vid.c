@@ -53,7 +53,10 @@
 #include "fonline_int.h"
 #include "flyrics.h"
 
-#define QN 3
+#define QN 3                 /* video frames kept decoded ahead */
+#define QMAX 48              /* ... more while the sound runs low (it may be muxed later than the picture) */
+#define QMAX_BYTES (48u << 20)
+#define AUDIO_LOW 0.25       /* seconds of queued sound below which the video queue may grow */
 #define AUDIO_AHEAD 1.0      /* seconds of decoded audio kept queued */
 
 enum { VS_OPENING = 0, VS_READY, VS_ERROR };
@@ -96,7 +99,7 @@ static struct {
   FmVidInfo info;
   bool started;            /* main thread set up audio; decoding may begin */
   bool eof;
-  VFrame q[QN];
+  VFrame q[QMAX];
   int qhead, qcount;
   bool seek_req;
   double seek_to;
@@ -108,6 +111,7 @@ static struct {
   u64 base_out;
   double base_t;
   bool base_set;
+  double a_next;           /* where the next decoded sound should start (-1: unknown) */
   u64 last_audio_ms;
   float volume;
   /* clock */
@@ -212,11 +216,18 @@ static void stream_test_log(const char *fmt, ...) {
 
 /* ---- audio callback ------------------------------------------------------------- */
 
+static volatile int g_cb_n, g_cb_short, g_cb_wait_ms;   /* MMCFM_PLAY_LOG: device calls, short ones, longest lock wait */
+
 static void SDLCALL vid_audio_cb(void *u, Uint8 *stream, int len) {
   FM_UNUSED(u);
+  u64 w0 = SDL_GetTicks64();
   SDL_LockMutex(V.mx);
+  int wt = (int)(SDL_GetTicks64() - w0);
+  if (wt > g_cb_wait_ms) g_cb_wait_ms = wt;
   int got = V.ast ? SDL_AudioStreamGet(V.ast, stream, len) : 0;
   if (got < 0) got = 0;
+  g_cb_n++;
+  if (got < len) g_cb_short++;
   if (got < len) memset(stream + got, 0, (size_t)(len - got));
   int frames = got / (int)(sizeof(float) * 2);
   eq_process(&V.eq, (float *)stream, frames);
@@ -267,6 +278,18 @@ static double audio_queued(void) {
   return (double)SDL_AudioStreamAvailable(V.ast) / (sizeof(float) * 2) / V.dev_rate;
 }
 
+/* How many video frames the worker may keep ahead. Normally QN; while the
+** sound is running dry the queue grows (to QMAX, under QMAX_BYTES), so the
+** worker keeps reading until the sound that is muxed later in the stream
+** (HLS segments often carry it a second behind the picture) arrives. With
+** a fixed QN the worker slept on a full picture queue, the sound ran out and
+** the sound-driven clock crawled: play, pause, play, pause. */
+static int video_room(void) {
+  if (!V.info.has_audio || V.eof || audio_queued() >= AUDIO_LOW) return QN;
+  size_t fb = (size_t)FM_MAX(1, V.info.w) * FM_MAX(1, V.info.h) * 3 / 2;
+  return FM_CLAMP((int)(QMAX_BYTES / fb), QN, QMAX);
+}
+
 static int worker(void *u) {
   FM_UNUSED(u);
   FmErr err;
@@ -296,13 +319,14 @@ static int worker(void *u) {
       V.qhead = V.qcount = 0;
       if (V.ast) SDL_AudioStreamClear(V.ast);
       V.base_set = false;
+      V.a_next = -1;
       V.eof = false;
       V.ended = false;
       V.clock_set = false;
       continue;
     }
     if (V.eof) { SDL_CondWait(V.cv, V.mx); continue; }
-    bool vfull = V.qcount >= QN;
+    bool vfull = V.qcount >= video_room();
     bool afull = V.info.has_audio && audio_queued() > AUDIO_AHEAD;
     if ((V.info.has_video && vfull) || (afull && (!V.info.has_video || V.qcount > 0))) {
       /* the frame presenter and the audio callback signal when they take
@@ -324,8 +348,8 @@ static int worker(void *u) {
       if (ev == VID_EV_VIDEO || !V.info.has_video || ev <= 0) V.drop_before = 0;
     }
     if (ev == VID_EV_VIDEO) {
-      if (vf.w > 0 && vf.h > 0 && V.qcount < QN) {
-        VFrame *d = &V.q[(V.qhead + V.qcount) % QN];
+      if (vf.w > 0 && vf.h > 0 && V.qcount < QMAX) {
+        VFrame *d = &V.q[(V.qhead + V.qcount) % QMAX];
         copy_frame(d, &vf);
         V.qcount++;
         if (!V.clock_set || V.paused) { SDL_UnlockMutex(V.mx); app_wake(); SDL_LockMutex(V.mx); }
@@ -336,7 +360,21 @@ static int worker(void *u) {
           V.base_set = true;
           V.base_t = pc.t >= 0 ? pc.t : V.clock;
           V.base_out = V.out_frames + (u64)(audio_queued() * V.dev_rate);
+        } else if (pc.t >= 0 && V.a_next >= 0 && pc.t - V.a_next > 0.03 && pc.t - V.a_next < 5) {
+          /* a hole in the sound (Windows' MPEG-TS reader loses the last
+          ** sound packet of each HLS segment, 0.4 s): silence fills it.
+          ** The clock counts the sound played, so without it every hole
+          ** put the clock that much behind the picture; the picture queue
+          ** filled, decoding stopped, the sound ran out and play crawled. */
+          static const float kZero[1024];
+          int left = (int)((pc.t - V.a_next) * pc.rate) * pc.channels;
+          while (left > 0) {
+            int k = FM_MIN(left, (int)FM_COUNT(kZero));
+            SDL_AudioStreamPut(V.ast, kZero, k * (int)sizeof(float));
+            left -= k;
+          }
         }
+        if (pc.t >= 0) V.a_next = pc.t + (double)pc.frames / pc.rate;
         SDL_AudioStreamPut(V.ast, pc.pcm, pc.frames * pc.channels * (int)sizeof(float));
       }
     } else {
@@ -392,6 +430,7 @@ static void seek_to(double t) {
   V.qhead = V.qcount = 0;
   if (V.ast) SDL_AudioStreamClear(V.ast);
   V.base_set = false;
+  V.a_next = -1;
   V.eof = false;
   V.ended = false;
   V.clock = t;
@@ -430,7 +469,10 @@ static void start_playback(void) {
     if (SDL_WasInit(SDL_INIT_AUDIO) || SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
       SDL_AudioSpec want, have;
       memset(&want, 0, sizeof want);
-      want.freq = V.info.rate;
+      /* never below 44.1 kHz: Android's output at 22050 Hz (HE-AAC's core
+      ** rate, Dailymotion's sound) played only 3/4 of real time, and the
+      ** clock follows the sound; the stream converts up */
+      want.freq = FM_MAX(V.info.rate, 44100);
       want.format = AUDIO_F32SYS;
       want.channels = 2;
       want.samples = 1024;
@@ -481,7 +523,7 @@ static void vid_view_close(void) {
   }
   if (V.dev) SDL_CloseAudioDevice(V.dev);
   if (V.ast) SDL_FreeAudioStream(V.ast);
-  for (int i = 0; i < QN; i++) fm_free(V.q[i].plane[0]);
+  for (int i = 0; i < QMAX; i++) fm_free(V.q[i].plane[0]);
   if (V.tex) SDL_DestroyTexture(V.tex);
   screensaver(false);
   if (V.cursor_hidden) SDL_ShowCursor(SDL_ENABLE);
@@ -567,6 +609,7 @@ static void restart_worker(const char *video, const char *audio, int flags, doub
   V.qhead = V.qcount = 0;
   V.out_frames = V.base_out = 0;
   V.base_set = false;
+  V.a_next = -1;
   V.last_audio_ms = 0;
   V.clock = at > 0 ? at : 0;
   V.clock_set = false;
@@ -798,6 +841,32 @@ static void update_clock(void) {
   else if (!(starved && is_url(V.path) && V.starve_t && SDL_GetTicks64() - V.starve_t > 120)) V.clock += ui.dt;
 }
 
+/* MMCFM_PLAY_LOG=1: every 2 s, how playback went (pictures shown, late ones
+** dropped, the clock against the wall, stalls): smooth or stuttering. */
+static struct { int on, shown, dropped, stalls; u64 t0, o0; double c0; } g_pl = { -1 };
+
+static void play_log(void) {
+  if (g_pl.on < 0) g_pl.on = getenv("MMCFM_PLAY_LOG") != NULL;
+  if (!g_pl.on) return;
+  u64 now = SDL_GetTicks64();
+  if (!g_pl.t0) { g_pl.t0 = now; g_pl.c0 = V.clock; return; }
+  if (now - g_pl.t0 < 2000) return;
+  double wall = (now - g_pl.t0) / 1000.0, adv = V.clock - g_pl.c0;
+  SDL_LockMutex(V.mx);
+  double aq = audio_queued(), vt = V.qcount ? V.q[(V.qhead + V.qcount - 1) % QMAX].t : -1;
+  SDL_UnlockMutex(V.mx);
+  fm_log("play-log: %.1f s wall, clock +%.2f s (%.0f%%), %d shown (%.1f fps), %d dropped late, %d stalls, queue %d "
+         "(last %.2f, clock %.2f), sound queued %.2f s, device played %.0f%% (%d calls, %d short, lock wait %d ms), buffering %d, paused %d", wall, adv,
+         wall > 0 ? adv / wall * 100.0 : 0, g_pl.shown, g_pl.shown / wall, g_pl.dropped, g_pl.stalls, V.qcount, vt,
+         V.clock, aq, (double)(V.out_frames - g_pl.o0) / FM_MAX(1, V.dev_rate) / wall * 100.0, g_cb_n, g_cb_short, g_cb_wait_ms, (int)V.buffering,
+         (int)V.paused);
+  g_pl.shown = g_pl.dropped = g_pl.stalls = 0;
+  g_pl.t0 = now;
+  g_pl.c0 = V.clock;
+  g_pl.o0 = V.out_frames;
+  g_cb_n = g_cb_short = g_cb_wait_ms = 0;
+}
+
 static void present_frame(void) {
   SDL_LockMutex(V.mx);
   if (!V.clock_set && V.qcount > 0) {
@@ -811,12 +880,13 @@ static void present_frame(void) {
   }
   /* drop frames that are already late */
   int dropped = 0;
-  while (V.qcount > 1 && V.q[(V.qhead + 1) % QN].t <= V.clock) {
-    V.qhead = (V.qhead + 1) % QN;
+  while (V.qcount > 1 && V.q[(V.qhead + 1) % QMAX].t <= V.clock) {
+    V.qhead = (V.qhead + 1) % QMAX;
     V.qcount--;
     dropped++;
   }
   if (dropped) SDL_CondSignal(V.cv);
+  g_pl.dropped += dropped;
   VFrame *f = NULL;
   if (V.qcount > 0 && (V.q[V.qhead].t <= V.clock + 0.008 || !V.have_frame)) f = &V.q[V.qhead];
   SDL_UnlockMutex(V.mx);
@@ -831,6 +901,7 @@ static void present_frame(void) {
   }
   if (V.tex) {
     SDL_UpdateYUVTexture(V.tex, NULL, f->plane[0], f->stride[0], f->plane[1], f->stride[1], f->plane[2], f->stride[2]);
+    if (V.shown_t != f->t) g_pl.shown++;
     V.have_frame = true;
     V.shown_t = f->t;
     if (g_on && !g_on->ttff_done) {
@@ -849,7 +920,7 @@ static void present_frame(void) {
     }
   }
   SDL_LockMutex(V.mx);
-  V.qhead = (V.qhead + 1) % QN;
+  V.qhead = (V.qhead + 1) % QMAX;
   V.qcount--;
   SDL_CondBroadcast(V.cv);
   SDL_UnlockMutex(V.mx);
@@ -1127,7 +1198,7 @@ static void stream_checks(int *state, bool *ready) {
     bool was = V.buffering;
     V.buffering = V.starve_t && ui.now - V.starve_t > 250;
     if (V.starve_t && !V.buffering) view_wake_in(260);
-    if (V.buffering && !was) { fm_log("stream: buffering at %.1f s", V.clock); stream_test_log("buffering %.2f", V.clock); }
+    if (V.buffering && !was) { fm_log("stream: buffering at %.1f s", V.clock); stream_test_log("buffering %.2f", V.clock); g_pl.stalls++; }
   } else {
     V.starve_t = 0;
     V.buffering = false;
@@ -1576,6 +1647,7 @@ void video_mini_draw(FmRect r) {
 }
 
 static void vid_view_frame(FmRect area) {
+  play_log();
   gfx_rect(area, VIEW_BG);
   int state;
   bool ready;

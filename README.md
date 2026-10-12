@@ -453,6 +453,8 @@ The tests are offline by default. Network checks are opt-in through the variable
 | `MMCFM_AMC_TRACE=1` | Android: logs every MediaCodec extractor read. |
 | `MMCFM_PHOTO_LOG=1` | Thumbnails per search: time to the first tile and until the screen is filled, downloads and disk-cache hits, KB, failures (429s), pictures decoded again. |
 | `MMCFM_SEG_LOG=1` | HLS: one log line per segment (size, time on the network, Mbit/s against what the video needs, ring fill, time the reader starved), failed tries, stream opens, closes and seeks. |
+| `MMCFM_PLAY_LOG=1` | Video playback: every 2 s, how far the clock moved against wall time, frames shown and dropped, stalls, the picture queue, queued sound, how much the sound device played and its short (underrun) calls. |
+| `MMCFM_NET_FRESH=1` | A new connection for every request (no reuse): to compare against connection reuse. |
 | `MMCFM_DEMO_QUERY=text` | The query for `--demo-online` (may hold spaces; Android test arguments split on them). |
 | `MMCFM_TEST_TAP=x,y,ms[;x,y,ms...]` | Queues a press and its release together at x,y (window pixels) ms after start, several in order: checks quick taps under a frame-rate cap, two-tap confirmations. |
 | `MMCFM_IDLE_LOG=1` (or a window in ms, e.g. `1000`) | Every 5 s (or that window) logs the frames built, how many were presented and how many were the same picture (skipped), the loop's wakeups, and the source lines that asked for them (ui_animate / ui_redraw / app_wake, "busy" for loading animations): finds what keeps an idle screen drawing. |

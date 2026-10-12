@@ -95,7 +95,17 @@ typedef struct Hls {
   bool ts_looked;
   char *key_uri;               /* the AES-128 key in `key` (fetched once per URI) */
   u8 key[16];
+  /* MPEG-TS continuity counters, renumbered to run on across segments (see ts_renumber) */
+  struct TsCc *cc;             /* [8192], one per PID; NULL until a TS segment */
+  u32 seg_gen;                 /* counts segment starts */
+  u8 ts_hdr[3];                /* the running packet's first bytes */
 } Hls;
+
+typedef struct TsCc {
+  u32 gen;                     /* the segment its offset was set in */
+  u8 off, last;                /* added to the segment's counter; the last counter passed on */
+  bool seen;
+} TsCc;
 
 struct FmNetStream {
   char *url;
@@ -388,6 +398,33 @@ static double ts_first_pts(const u8 *p, size_t n) {
   return 0;
 }
 
+/* MPEG-TS segments each start their packets' continuity counters again at 0,
+** so joined into one stream every segment boundary looks like lost packets.
+** Windows' TS reader then throws away the sound packet it was holding: the
+** last 0.4 s of every segment's sound went missing (a Dailymotion video
+** played smooth for 10 s, then stuttered). Each PID's counter gets an offset
+** at a segment's start so it runs on from the previous segment's; within a
+** segment the counters keep their own steps (repeats, no-payload packets).
+** p holds the n bytes from offset pos of the running segment. */
+static void ts_renumber(Hls *h, u8 *p, size_t n, i64 pos) {
+  if (!h->cc && !(h->cc = (TsCc *)fm_calloc(8192, sizeof *h->cc))) return;
+  for (size_t i = 0; i < n; i++) {
+    int o = (int)((pos + (i64)i) % 188);
+    if (o < 3) { h->ts_hdr[o] = p[i]; continue; }
+    if (o != 3 || h->ts_hdr[0] != 0x47) continue;
+    TsCc *c = &h->cc[((h->ts_hdr[1] & 0x1f) << 8) | h->ts_hdr[2]];
+    u8 cc = p[i] & 15;
+    if (c->gen != h->seg_gen) {                        /* this PID's first packet in the segment */
+      bool payload = (p[i] >> 4) & 1;
+      c->off = c->seen ? (u8)((c->last + (payload ? 1 : 0) - cc) & 15) : 0;
+      c->gen = h->seg_gen;
+    }
+    c->last = (u8)((cc + c->off) & 15);
+    c->seen = true;
+    p[i] = (u8)((p[i] & 0xF0) | c->last);
+  }
+}
+
 /* Plain segment bytes of the job holding the turn into the stream (mx held). */
 static bool hls_put(void *u, const u8 *p, size_t n) {
   HlsJob *j = (HlsJob *)u;
@@ -426,6 +463,20 @@ static bool hls_put(void *u, const u8 *p, size_t n) {
     s->discard -= (i64)d;
     p += d;
     n -= d;
+  }
+  if (n && h->strip == 0 && !h->pl.map_uri && !strcmp(s->ctype, "video/mp2t")) {
+    i64 pos = h->got - (i64)n;                         /* p: the chunk's tail */
+    u8 buf[4096];
+    while (n) {
+      size_t k = FM_MIN(n, sizeof buf);
+      memcpy(buf, p, k);
+      ts_renumber(h, buf, k, pos);
+      if (!put_audio(s, buf, k)) return false;
+      p += k;
+      n -= k;
+      pos += (i64)k;
+    }
+    return true;
   }
   return !n || put_audio(s, p, n);
 }
@@ -682,6 +733,7 @@ static int hls_worker(void *u) {
     SDL_LockMutex(s->mx);                              /* cur's turn */
     h->turn = cur;
     h->got = 0;
+    h->seg_gen++;
     h->strip = -1;
     h->seg_pos = h->wpos;
     if (!cur->init && !h->live && h->off[cur->item] < 0) h->off[cur->item] = h->wpos;
@@ -755,6 +807,7 @@ static int hls_worker(void *u) {
 static void hls_locate(FmNetStream *s, i64 at) {
   Hls *h = s->hls;
   h->got = 0;
+  h->seg_gen++;
   h->strip = -1;
   h->turn = NULL;
   if (h->live) {                                       /* only forward: from the running segment */
@@ -929,7 +982,7 @@ static bool hls_behind(FmNetStream *s) {
 }
 
 FmNetStream *ns_open(const char *url, const char *headers, char *err, size_t errcap) {
-  if (seg_log_on()) fm_log("ns_open %.140s", url);
+  if (seg_log_on()) fm_log("ns_open %s", url);
   if (err && errcap) err[0] = 0;
   if (!net_available()) {
     if (err) fm_strlcpy(err, net_backend(), errcap);
@@ -1150,6 +1203,7 @@ void ns_close(FmNetStream *s) {
     hls_media_free(&s->hls->pl);
     fm_free(s->hls->off);
     fm_free(s->hls->key_uri);
+    fm_free(s->hls->cc);
     fm_free(s->hls);
   }
   if (s->cv) SDL_DestroyCond(s->cv);
