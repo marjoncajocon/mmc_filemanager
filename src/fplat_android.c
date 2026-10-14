@@ -28,6 +28,8 @@ typedef struct Jni {
 } Jni;
 
 static bool jni_begin(Jni *j) {
+  j->act = NULL;                       /* jni_end releases only what was taken */
+  j->cls = NULL;
   j->env = (JNIEnv *)SDL_AndroidGetJNIEnv();
   if (!j->env) return false;
   j->act = (jobject)SDL_AndroidGetActivity();
@@ -166,6 +168,17 @@ JNIEXPORT void JNICALL Java_io_github_mmc_filemanager_FmActivity_nativeImeInset(
 }
 
 int plat_ime_inset(void) { return SDL_AtomicGet(&g_ime_px); }
+
+/* FmActivity sends the refresh rate in use (it asks for the fastest mode);
+** SDL reads it only when the surface changes. Hundredths of a Hz. */
+static SDL_atomic_t g_hz100;
+JNIEXPORT void JNICALL Java_io_github_mmc_filemanager_FmActivity_nativeRefreshRate(JNIEnv *e, jclass c, jfloat hz) {
+  FM_UNUSED(e);
+  FM_UNUSED(c);
+  SDL_AtomicSet(&g_hz100, hz > 0 ? (int)(hz * 100.0f + 0.5f) : 0);
+}
+
+float plat_refresh_hz(void) { return SDL_AtomicGet(&g_hz100) / 100.0f; }
 
 /* ---- SDL's HIDDeviceManager natives -------------------------------------- */
 

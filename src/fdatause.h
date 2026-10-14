@@ -20,6 +20,7 @@ void datause_init(void);
 /* Main thread, every loop (also in the background): cheap; saves every 30 s
 ** while data moves, and when the day changes. */
 void datause_pump(void);
+void datause_flush(void);       /* saves now (the app may be ended from the background) */
 void datause_shutdown(void);    /* saves */
 void datause_get(FmDataUse *u);
 void datause_clear(void);       /* everything back to 0, from today */

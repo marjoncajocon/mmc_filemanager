@@ -990,13 +990,11 @@ static void run_compress(FmJob *j) {
     FmConflict c = resolve(j, out, NULL, out, sizeof out);
     if (c == CONFLICT_SKIP) { job_skip(j, 0); return; }
     if (c == CONFLICT_CANCEL) return;
-    if (c == CONFLICT_OVERWRITE) {
-      if (plat_is_dir(out)) {
-        job_error(j, out, FM_ERR_EXISTS, "A folder with this name exists");
-        return;
-      }
-      FmErr e = plat_remove_file(out);
-      if (e != FM_OK) { job_error(j, out, e, NULL); return; }
+    /* Overwrite: arc_create replaces out only once the new archive is whole,
+    ** so a failed or cancelled run keeps the old one. */
+    if (c == CONFLICT_OVERWRITE && plat_is_dir(out)) {
+      job_error(j, out, FM_ERR_EXISTS, "A folder with this name exists");
+      return;
     }
   }
   fm_strlcpy(j->cur_arc, out, sizeof j->cur_arc);
@@ -1010,7 +1008,6 @@ static void run_compress(FmJob *j) {
   o.password = j->password[0] ? j->password : NULL;
   FmErr e = arc_create(out, (const char *const *)j->srcs, j->nsrc, j->base_dir, &o, &cb);
   if (e != FM_OK) {
-    plat_remove_file(out);
     if (e != FM_ERR_CANCEL && !j->cancel) job_error(j, out, e, NULL);
     j->info.result[0] = 0;
   } else {

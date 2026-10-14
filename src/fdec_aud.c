@@ -289,10 +289,11 @@ FmAudio *aud_open_msg(const char *path, const char *headers, FmErr *err, char *m
       break;
     case AK_VORBIS: {
       int e = 0;
-      /* stb_vorbis owns the FILE from here (close_handle_on_close) */
+      /* stb_vorbis owns the FILE from here (close_handle_on_close), also
+      ** when it fails: it closed it then, and the fallback below closed it twice */
       a->vorb = stb_vorbis_open_file(a->f, 1, &e, NULL);
+      a->f = NULL;
       if (a->vorb) {
-        a->f = NULL;
         stb_vorbis_info vi = stb_vorbis_get_info(a->vorb);
         a->src_ch = vi.channels;
         a->rate = (int)vi.sample_rate;
@@ -316,7 +317,7 @@ FmAudio *aud_open_msg(const char *path, const char *headers, FmErr *err, char *m
       a->kind = AK_FF;
       a->src_ch = vi->channels;
       a->rate = vi->rate;
-      a->len = (u64)(vi->duration * vi->rate);
+      a->len = vi->duration > 0 ? (u64)(vi->duration * vi->rate) : 0;
       fm_strlcpy(a->codec, vi->acodec[0] ? vi->acodec : "FFmpeg", sizeof a->codec);
       ok = a->rate > 0 && a->src_ch > 0;
     }
@@ -439,8 +440,12 @@ static bool net_mp3_seek(FmAudio *a, u64 frame) {
   if (!ns_seek(a->ns, at)) return false;
   drmp3_uninit(a->mp3);
   memset(a->mp3, 0, sizeof *a->mp3);
-  if (!drmp3_init(a->mp3, f_read, mp3_seek, mp3_tell, NULL, a, NULL)) return false;
-  return true;
+  /* no seek callback: dr_mp3 would probe the tags at the end and then seek
+  ** back to byte 0, so every seek restarted the track */
+  if (drmp3_init(a->mp3, f_read, NULL, NULL, NULL, a, NULL)) return true;
+  drmp3_uninit(a->mp3);
+  memset(a->mp3, 0, sizeof *a->mp3);        /* reads return 0: the track ends */
+  return false;
 }
 
 bool aud_seek(FmAudio *a, u64 frame) {

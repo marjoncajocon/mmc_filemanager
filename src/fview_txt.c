@@ -753,6 +753,8 @@ static void copy_range(u64 a, u64 b) {
 /* ---- hex mode ------------------------------------------------------------------------ */
 
 static const u8 *hex_page(u64 off, size_t len) {
+  /* the last screen asks past the end: without the clamp it never hit and was read again every frame */
+  if (off < g.ix.size && len > g.ix.size - off) len = (size_t)(g.ix.size - off);
   if (g.hexbuf && off >= g.hex_off && off + len <= g.hex_off + g.hex_len) return g.hexbuf + (off - g.hex_off);
   size_t cap = FM_MAX(len * 2, (size_t)65536);
   fm_free(g.hexbuf);
@@ -761,6 +763,7 @@ static const u8 *hex_page(u64 off, size_t len) {
   g.hex_off -= g.hex_off % (u64)g.hex_cols;
   g.hex_len = 0;
   if (fm_fseek64(g.ix.rf, (i64)g.hex_off, SEEK_SET) == 0) g.hex_len = fread(g.hexbuf, 1, cap, g.ix.rf);
+  memset(g.hexbuf + g.hex_len, 0, cap - g.hex_len);   /* a file that shrank since it opened shows zeros, not old memory */
   if (off < g.hex_off || off > g.hex_off + g.hex_len) return NULL;
   return g.hexbuf + (off - g.hex_off);
 }
@@ -1050,6 +1053,9 @@ static void txt_frame(FmRect area) {
 
   /* find bar */
   if (g.find_open) {
+    /* above the soft keyboard, so the text shrinks and the field stays seen */
+    float kb = body.y + body.h - (ui.h - ui_keyboard_h());
+    if (kb > 0) rect_cut_bottom(&body, FM_MIN(kb, body.h * 0.6f));
     FmRect fb = rect_cut_bottom(&body, ui.m.bar_h + DP(8));
     gfx_rect(fb, T.surface2);
     ui_divider(fb.x, fb.x + fb.w, fb.y);

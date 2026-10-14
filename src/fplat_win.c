@@ -191,11 +191,19 @@ FmErr plat_mkdirs(const char *path) {
   char p[FM_PATH_MAX];
   fm_strlcpy(p, path, sizeof p);
   size_t n = strlen(p);
+  /* \\server\share is the root of a UNC path: never made, and "\\server"
+  ** alone is no folder at all */
+  size_t root = 0;
+  if (fm_is_sep(p[0]) && fm_is_sep(p[1])) {
+    int seps = 0;
+    for (root = 2; root < n; root++)
+      if (fm_is_sep(p[root]) && ++seps == 2) break;
+  }
   for (size_t i = 0; i <= n; i++) {
     if (i == n || fm_is_sep(p[i])) {
       char c = p[i];
       p[i] = 0;
-      if (i > 0 && !(i == 2 && p[1] == ':') && p[0] && !plat_is_dir(p)) {
+      if (i > root && !(i == 2 && p[1] == ':') && p[0] && !plat_is_dir(p)) {
         FmErr e = plat_mkdir(p);
         if (e != FM_OK && e != FM_ERR_EXISTS) return e;
       }
@@ -503,6 +511,7 @@ int plat_cpu_count(void) {
 }
 
 int plat_ime_inset(void) { return 0; }
+float plat_refresh_hz(void) { return 0; }
 
 bool plat_storage_granted(void) { return true; }
 void plat_storage_request(void) {}

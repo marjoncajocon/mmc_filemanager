@@ -185,6 +185,12 @@ static bool wh_load(void) {
 bool net_available(void) { return wh_load(); }
 const char *net_backend(void) { return wh_load() ? "WinHTTP" : "WinHTTP is missing"; }
 
+/* WideCharToMultiByte leaves a too-small buffer full and unterminated
+** (a long non-ASCII icy-name): cut it instead */
+static void from_w(const wchar_t *w, char *out, int cap) {
+  if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, out, cap, NULL, NULL)) out[cap - 1] = 0;
+}
+
 static wchar_t *to_w(const char *s) {
   int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
   wchar_t *w = (wchar_t *)fm_alloc((size_t)(n > 0 ? n : 1) * sizeof(wchar_t));
@@ -355,7 +361,7 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
   wchar_t wt[96];
   sz = sizeof wt;
   if (wh.qhdr(req, WH_QUERY_CTYPE, NULL, wt, &sz, NULL))
-    WideCharToMultiByte(CP_UTF8, 0, wt, -1, out->type, (int)sizeof out->type, NULL, NULL);
+    from_w(wt, out->type, (int)sizeof out->type);
   DWORD clen = 0;
   sz = sizeof clen;
   u64 total = wh.qhdr(req, WH_QUERY_CLEN | WH_QUERY_NUMBER, NULL, &clen, &sz, NULL) ? clen : 0;
@@ -365,24 +371,24 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
     char a[128];
     sz = sizeof hv;
     if (wh.qhdr(req, WH_QUERY_CUSTOM, L"Accept-Ranges", hv, &sz, NULL)) {
-      WideCharToMultiByte(CP_UTF8, 0, hv, -1, a, (int)sizeof a, NULL, NULL);
+      from_w(hv, a, (int)sizeof a);
       out->ranges = fm_strnicmp(a, "bytes", 5) == 0;
     }
     if (status == 206) out->ranges = true;
     sz = sizeof hv;
     if (wh.qhdr(req, WH_QUERY_CUSTOM, L"Content-Range", hv, &sz, NULL)) {
-      WideCharToMultiByte(CP_UTF8, 0, hv, -1, a, (int)sizeof a, NULL, NULL);
+      from_w(hv, a, (int)sizeof a);
       const char *sl = strchr(a, '/');
       if (sl && sl[1] != '*') out->total = (i64)_atoi64(sl + 1);
     }
     sz = sizeof hv;
     if (wh.qhdr(req, WH_QUERY_CUSTOM, L"icy-metaint", hv, &sz, NULL)) {
-      WideCharToMultiByte(CP_UTF8, 0, hv, -1, a, (int)sizeof a, NULL, NULL);
+      from_w(hv, a, (int)sizeof a);
       out->icy_metaint = atoi(a);
     }
     sz = sizeof hv;
     if (wh.qhdr(req, WH_QUERY_CUSTOM, L"icy-name", hv, &sz, NULL))
-      WideCharToMultiByte(CP_UTF8, 0, hv, -1, out->icy_name, (int)sizeof out->icy_name, NULL, NULL);
+      from_w(hv, out->icy_name, (int)sizeof out->icy_name);
   }
   if (b->head) b->head(b->su, out);
   u8 chunk[16384];
@@ -405,6 +411,7 @@ static FmErr wh_request(const char *url, const char *headers, Body *b, FmNetProg
   }
   err = FM_OK;
 done:
+  if (err != FM_OK && cancel && *cancel) err = FM_ERR_CANCEL;   /* a blocked call failed after the cancel */
   if (req) wh.close(req);
   if (con) wh.close(con);                                        /* the session keeps the connection */
   if (ses && g_wh_fresh > 0) wh.close(ses);
@@ -509,7 +516,9 @@ static size_t cu_header(char *p, size_t sz, size_t n, void *u) {
   CuCtx *c = (CuCtx *)u;
   size_t len = sz * n;
   char line[256];
-  fm_strlcpy(line, p, FM_MIN(len + 1, sizeof line));
+  size_t ln = FM_MIN(len, sizeof line - 1);   /* curl's header data is not NUL-terminated */
+  memcpy(line, p, ln);
+  line[ln] = 0;
   line[strcspn(line, "\r\n")] = 0;
   FmNetResp *o = c->out;
   bool status_line = !fm_strnicmp(line, "HTTP/", 5) || !fm_strnicmp(line, "ICY ", 4);

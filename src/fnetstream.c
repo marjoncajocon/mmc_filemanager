@@ -858,8 +858,10 @@ static void stop_worker(FmNetStream *s) {
 
 /* ---- public ---------------------------------------------------------------------- */
 
-/* stream: open streams by URL, for the video player's buffered-range bar (ns_url_buffered) */
-static FmNetStream *g_open[8];
+/* stream: open streams by URL, for the video player's buffered-range bar
+** (ns_url_buffered) and ns_abort_url. 16: a picture and sound pair on Android
+** holds up to 4 windows each, plus a reopen while the old ones close. */
+static FmNetStream *g_open[16];
 static SDL_SpinLock g_open_lk;
 
 static void open_list(FmNetStream *s, bool add) {
@@ -1191,6 +1193,16 @@ void ns_abort(FmNetStream *s) {
   s->cancel = 1;               /* the worker stops at its next poll; ns_close joins it */
   SDL_CondBroadcast(s->cv);
   SDL_UnlockMutex(s->mx);
+}
+
+/* ns_close takes a stream off the list (under the lock) before freeing it, so
+** every stream seen here is alive. */
+void ns_abort_url(const char *url) {
+  if (!url || !url[0]) return;
+  SDL_AtomicLock(&g_open_lk);
+  for (int i = 0; i < FM_COUNT(g_open); i++)
+    if (g_open[i] && !strcmp(g_open[i]->url, url)) ns_abort(g_open[i]);
+  SDL_AtomicUnlock(&g_open_lk);
 }
 
 void ns_close(FmNetStream *s) {

@@ -415,7 +415,13 @@ void thumb_init(void) {
   for (int i = 0; i < TH_ENTRIES; i++) g.e[i].next = -1;
   g.mx = SDL_CreateMutex();
   g.cv = SDL_CreateCond();
-  if (!g.mx || !g.cv) return;
+  if (!g.mx || !g.cv) {                /* the next call tries again: nothing may stay behind */
+    if (g.cv) SDL_DestroyCond(g.cv);
+    if (g.mx) SDL_DestroyMutex(g.mx);
+    g.mx = NULL;
+    g.cv = NULL;
+    return;
+  }
   char base[FM_PATH_MAX];
   if (plat_place(PLACE_CACHE, base, sizeof base) && fm_path_join(g.cache_dir, sizeof g.cache_dir, base, "thumbs"))
     g.cache_ok = plat_mkdirs(g.cache_dir) == FM_OK || plat_is_dir(g.cache_dir);

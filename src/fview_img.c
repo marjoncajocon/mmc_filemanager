@@ -156,7 +156,7 @@ static void load_slot_work(const char *path, Slot *res, int view_w, int view_h, 
   if (res->info.orient == 0) res->info.orient = 1;
 }
 
-static volatile int g_cancel_dummy;
+static volatile int g_cancel;     /* set on close: a decode still running stops early */
 
 static int loader(void *u) {
   FM_UNUSED(u);
@@ -175,7 +175,7 @@ static int loader(void *u) {
       SDL_UnlockMutex(g.mx);
       Slot res;
       memset(&res, 0, sizeof res);
-      load_slot_work(path, &res, vw, vh, &g_cancel_dummy);
+      load_slot_work(path, &res, vw, vh, &g_cancel);
       SDL_LockMutex(g.mx);
       if (s->gen == gen && s->state == SK_LOADING) {
         s->err = res.err;
@@ -254,6 +254,8 @@ static int gif_player(void *u) {
   FmGif *gf = gif_open(path, false, &err);
   fm_free(path);
   if (!gf) return 0;
+  /* the file changed since it was measured: the frame buffer would be too small */
+  if (gif_width(gf) != g.gif_w || gif_height(gf) != g.gif_h) { gif_close(gf); return 0; }
   int loops = 0, played = 0;
   size_t bytes = (size_t)gif_width(gf) * gif_height(gf) * 4;
   for (;;) {
@@ -320,7 +322,16 @@ static void gif_start(Slot *s) {
   g.gif_stopped = false;
   g.gif_quit = false;
   g.gif_due = 0;
-  g.gif_thr = fm_thread_create(gif_player, "gif", fm_strdup(g.paths[s->index]));
+  char *path = fm_strdup(g.paths[s->index]);
+  g.gif_thr = fm_thread_create(gif_player, "gif", path);
+  if (!g.gif_thr) {
+    /* gif_stop only cleans up after a thread: the still image stays */
+    fm_free(path);
+    SDL_DestroyTexture(g.gif_tex);
+    g.gif_tex = NULL;
+    fm_free(g.gif_buf);
+    g.gif_buf = NULL;
+  }
 }
 
 static void gif_pump(void) {
@@ -468,9 +479,11 @@ static void img_close(void) {
   gif_stop();
   SDL_LockMutex(g.mx);
   g.quit = true;
+  g_cancel = 1;
   SDL_CondBroadcast(g.cv);
   SDL_UnlockMutex(g.mx);
   if (g.thr) SDL_WaitThread(g.thr, NULL);
+  g_cancel = 0;
   for (int i = 0; i < 2; i++) {
     img_free(&g.s[i].img);
     if (g.s[i].tex) SDL_DestroyTexture(g.s[i].tex);

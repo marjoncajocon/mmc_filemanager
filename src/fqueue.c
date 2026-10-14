@@ -144,7 +144,7 @@ bool qline_parse(const char *line, FmQItem *it) {
   it->file = line[0] == 'F';
   it->live = p[1][0] == '1';
   it->dur = atof(p[2]);
-  if (it->dur < 0 || it->dur != it->dur) it->dur = 0;
+  if (!(it->dur > 0 && it->dur < 1e9)) it->dur = 0;            /* NaN and inf too */
   char **dst[] = { &it->url, &it->title, &it->artist, &it->album, &it->art, &it->ref };
   for (int i = 0; i < 6; i++) *dst[i] = unesc_dup(p[3 + i], len[3 + i]);
   if ((it->file && !it->url[0]) || (!it->url[0] && !it->ref[0])) {
@@ -757,7 +757,7 @@ int pl_import_m3u(const char *path) {
     memset(it, 0, sizeof *it);
     it->url = fm_strdup(url ? s : full);
     it->file = !url;
-    it->dur = dur > 0 ? dur : 0;
+    it->dur = dur > 0 && dur < 1e9 ? dur : 0;                  /* "inf" would overflow the export */
     /* "Artist - Title" from #EXTINF */
     const char *dash = strstr(title, " - ");
     if (dash) {

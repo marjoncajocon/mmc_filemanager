@@ -1373,6 +1373,7 @@ static void draw_tray(void) {
   }
   x += ow + DP(8);
   bool fin = false;
+  n = pdl_count();                          /* a row may have been removed above */
   for (int i = 0; i < n; i++) fin |= pdl_at(i)->state != PD_RUNNING && pdl_at(i)->state != PD_QUEUED;
   if (fin) {
     const char *lc = "Clear";

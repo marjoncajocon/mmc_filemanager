@@ -254,6 +254,14 @@ FmErr proc_run(const char *const *argv, FmProcLine cb, void *user, int *exit_cod
   if (pipe(pe)) { close(po[0]); close(po[1]); return FM_ERR_IO; }
   if (pipe(px)) { close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); return FM_ERR_IO; }
   fcntl(px[1], F_SETFD, FD_CLOEXEC);       /* closes on a successful exec */
+  /* nor may a helper started at the same time on another thread inherit
+  ** our pipes: holding their write ends, it kept our EOF away until it
+  ** exited (yt-dlp downloads video and audio in parallel). dup2 in the
+  ** child clears the flag on its stdout and stderr. */
+  fcntl(po[0], F_SETFD, FD_CLOEXEC);
+  fcntl(po[1], F_SETFD, FD_CLOEXEC);
+  fcntl(pe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(pe[1], F_SETFD, FD_CLOEXEC);
   pid_t pid = fork();
   if (pid < 0) {
     close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); close(px[0]); close(px[1]);

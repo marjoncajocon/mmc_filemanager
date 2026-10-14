@@ -68,6 +68,9 @@ double ns_hls_duration(const FmNetStream *s);
 ** pending reads before tearing down (Media Foundation's async reads must
 ** complete before MFShutdown). ns_close is still needed afterwards. */
 void   ns_abort(FmNetStream *s);
+/* ns_abort for every open stream reading url (the video player letting go of
+** a decoder it no longer waits for: its blocked reads return at once). */
+void   ns_abort_url(const char *url);
 void   ns_close(FmNetStream *s);
 /* stream: for an open stream reading url (the first one found): the next byte
 ** its reader gets, the end of the data buffered after it, and the size (-1

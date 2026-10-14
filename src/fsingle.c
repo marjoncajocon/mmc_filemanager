@@ -108,7 +108,10 @@ static FmErr single_open(FmArc *a) {
       mtime = le32(h + 4);
       if (h[3] & 8) {                      /* FNAME */
         i64 off = 10;
-        if (h[3] & 4) off += 2 + (h[10] | (h[11] << 8));
+        if (h[3] & 4) {                    /* FEXTRA: its length follows the 10-byte header */
+          if (hn < 12) return FM_ERR_FORMAT;
+          off += 2 + (h[10] | (h[11] << 8));
+        }
         char fn[FM_PATH_MAX];
         size_t n = 0;
         if (fm_fseek64(a->f, off, SEEK_SET) == 0) {

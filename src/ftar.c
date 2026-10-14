@@ -333,6 +333,7 @@ static FmErr tar_open(FmArc *a) {
     size_t pl = strlen(path);
     bool is_dir = type == '5' || ((type == '0' || type == 0) && pl && path[pl - 1] == '/');
     int hard = type == '1' ? find_entry(a, link, a->n) : -1;
+    if (hard >= 0 && tp->t[hard].hard >= 0) hard = tp->t[hard].hard;   /* link to a link */
     u64 esize = type == '2' ? strlen(link) : hard >= 0 ? a->e[hard].size : size;
     int idx = arc_add(a, path, esize, size, mtime, is_dir);
     FmArcEntry *ae = arc_at(a, idx);

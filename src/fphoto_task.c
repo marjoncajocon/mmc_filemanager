@@ -111,14 +111,19 @@ void ptask_free(PhTask *t, bool cancel) {
   fm_free(t);
 }
 
-static PhTask *g_dead[32];
-static int g_ndead;
+/* Grows instead of joining when full: flipping fast through the lightbox
+** drops two tasks a photo, and a join here would wait on the network. */
+static PhTask **g_dead;
+static int g_ndead, g_capdead;
 
 void ptask_drop(PhTask *t) {
   if (!t) return;
   t->cancel = 1;
-  if (g_ndead < FM_COUNT(g_dead)) g_dead[g_ndead++] = t;
-  else ptask_free(t, true);                 /* full: wait for this one */
+  if (g_ndead == g_capdead) {
+    g_capdead = g_capdead ? g_capdead * 2 : 32;
+    g_dead = (PhTask **)fm_realloc(g_dead, sizeof *g_dead * (size_t)g_capdead);
+  }
+  g_dead[g_ndead++] = t;
 }
 
 void ptask_reap(void) {
@@ -132,7 +137,9 @@ void ptask_reap(void) {
 void ptask_shutdown(void) {
   for (int i = 0; i < g_ndead; i++) g_dead[i]->cancel = 1;
   for (int i = 0; i < g_ndead; i++) ptask_free(g_dead[i], true);
-  g_ndead = 0;
+  fm_free(g_dead);
+  g_dead = NULL;
+  g_ndead = g_capdead = 0;
 }
 
 /* ---- downloads --------------------------------------------------------------- */

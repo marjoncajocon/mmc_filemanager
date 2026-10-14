@@ -438,6 +438,7 @@ void cloud_ui_signin(int serial) {
 
 static void login_done(FmCloudTask *t) {
   if (U.kind != U_FORM || U.serial != t->serial) return;   /* the sheet was closed */
+  if (t->cancel) return;                                   /* stopped: a newer try may run */
   U.busy = false;
   if (t->err != FM_OK) {
     fm_strlcpy(U.err, t->err == FM_ERR_CANCEL ? "Cancelled" : t->msg, sizeof U.err);
@@ -650,7 +651,7 @@ static int link_svcs(const FmCloud **out, int max) {
 }
 
 static void link_done(FmCloudTask *t) {
-  if (U.kind != U_LINK) return;
+  if (U.kind != U_LINK || t->cancel) return;       /* closed, or stopped: a newer try may run */
   U.busy = false;
   if (t->err != FM_OK) {
     fm_strlcpy(U.err, t->msg, sizeof U.err);

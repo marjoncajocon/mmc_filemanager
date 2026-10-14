@@ -272,14 +272,19 @@ void atask_free(AoTask *t, bool cancel) {
   fm_free(t);
 }
 
-static AoTask *g_dead[32];
-static int g_ndead;
+/* grows instead of joining on the UI thread: a task blocked in the network
+** (WinHTTP waits out its timeouts) would freeze the screen */
+static AoTask **g_dead;
+static int g_ndead, g_capdead;
 
 void atask_drop(AoTask *t) {
   if (!t) return;
   t->cancel = 1;
-  if (g_ndead < FM_COUNT(g_dead)) g_dead[g_ndead++] = t;
-  else atask_free(t, true);
+  if (g_ndead == g_capdead) {
+    g_capdead = g_capdead ? g_capdead * 2 : 32;
+    g_dead = (AoTask **)fm_realloc(g_dead, sizeof *g_dead * (size_t)g_capdead);
+  }
+  g_dead[g_ndead++] = t;
 }
 
 void atask_reap(void) {
@@ -293,7 +298,9 @@ void atask_reap(void) {
 void atask_shutdown(void) {
   for (int i = 0; i < g_ndead; i++) g_dead[i]->cancel = 1;
   for (int i = 0; i < g_ndead; i++) atask_free(g_dead[i], true);
-  g_ndead = 0;
+  g_ndead = g_capdead = 0;
+  fm_free(g_dead);
+  g_dead = NULL;
 }
 
 /* ---- downloads ------------------------------------------------------------------ */
@@ -424,7 +431,7 @@ void adl_pump(void) {
       d->frac = 1;
       fm_strlcpy(d->path, t->out, sizeof d->path);
       ui_toast("Saved \xE2\x80\x9C%s\xE2\x80\x9D", fm_path_base(d->path));
-    } else if (t->err == FM_ERR_CANCEL) {
+    } else if (t->err == FM_ERR_CANCEL || t->cancel) {   /* a cancel inside a blocked request reads as IO */
       d->state = AD_CANCELLED;
     } else if (d->tries++ == 0 && fm_stristr(t->errtext, "network")) {
       d->state = AD_QUEUED;                 /* once more after a network blip */

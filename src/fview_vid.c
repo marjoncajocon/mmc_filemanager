@@ -39,6 +39,18 @@
 **     instead of running ahead and dropping every late frame, and a spinner
 **     says "Buffering". The seek bar shows how far ahead the stream reader
 **     (fnetstream) holds data.
+**   - Closing never waits for the decoder worker. It can sit in a network
+**     read or a codec open for many seconds (a stalled server: until the
+**     timeouts), and joining it froze the app on Back, on a quality switch
+**     and when the app went to the background. Each worker gets a VSess
+**     (its lock, wake-up and quit flag, the sources it opens) that it shares
+**     by reference count: closing sets quit under the lock, aborts the
+**     streams of its URLs and lets go; the worker sees quit the next time it
+**     takes the lock, touches nothing else and closes its decoder on its own.
+**   - Inline play (online videos): the same player drawn in a result's
+**     thumbnail (video_inline_draw) with small controls, ticked from
+**     video_bg_pump like background play. Its fullscreen button hands it to
+**     the full player; Back there returns it to the thumbnail, still playing.
 */
 #include "fview_int.h"
 #include "ftitle.h"
@@ -52,6 +64,8 @@
 #include "fnetstream.h"
 #include "fonline_int.h"
 #include "flyrics.h"
+#include "fsdl.h"
+#include "fnet.h"
 
 #define QN 3                 /* video frames kept decoded ahead */
 #define QMAX 48              /* ... more while the sound runs low (it may be muxed later than the picture) */
@@ -83,17 +97,52 @@ static int g_aspect;
 
 #define VID_SRC_MAX 4096     /* stream URLs can be long */
 
+/* One decoder worker's share (see the header): the worker reads only this
+** until it holds the lock with quit unset. */
+typedef struct VSess {
+  SDL_mutex *mx;
+  SDL_cond *cv;
+  bool quit;                 /* under mx */
+  SDL_atomic_t refs;         /* the player and the worker */
+  char path[VID_SRC_MAX], audio[VID_SRC_MAX];
+  int flags;
+  bool live;
+} VSess;
+
+static SDL_atomic_t g_workers;   /* workers still running, closed or not (shutdown waits a little) */
+
+static VSess *sess_new(void) {
+  VSess *ss = (VSess *)fm_calloc(1, sizeof *ss);
+  ss->mx = SDL_CreateMutex();
+  ss->cv = SDL_CreateCond();
+  SDL_AtomicSet(&ss->refs, 1);
+  if (!ss->mx || !ss->cv) {
+    if (ss->cv) SDL_DestroyCond(ss->cv);
+    if (ss->mx) SDL_DestroyMutex(ss->mx);
+    fm_free(ss);
+    return NULL;
+  }
+  return ss;
+}
+
+static void sess_unref(VSess *ss) {
+  if (!ss || !SDL_AtomicDecRef(&ss->refs)) return;
+  SDL_DestroyCond(ss->cv);
+  SDL_DestroyMutex(ss->mx);
+  fm_free(ss);
+}
+
 static struct {
   bool open;
   char path[VID_SRC_MAX];
   char audio[VID_SRC_MAX];   /* separate sound track (streams), "" = none */
   bool stream;               /* opened by video_open_stream */
   char title[256];
-  /* worker */
+  /* worker: mx and cv are the current session's (sess) */
+  VSess *sess;
   SDL_Thread *thr;
   SDL_mutex *mx;
   SDL_cond *cv;
-  bool quit;
   int state;
   FmErr err;
   FmVidInfo info;
@@ -148,6 +197,11 @@ static struct {
   ** bg_q = the online quality to go back to (-1: none); bg_flags = the open
   ** flags of a local file before it went sound-only */
   bool background;
+  bool bg_auto;            /* sent there by the app leaving the screen: the picture comes back with it */
+  bool inl;                /* drawn in an online result's thumbnail, not as the viewer */
+  bool inl_home;           /* the full player came from there: Back goes back to it */
+  u64 inl_chrome_until;    /* inline controls shown until then */
+  bool reupload;           /* the renderer was reset: upload the shown picture again */
   int bg_q, bg_flags;
   char bg_video[FM_PATH_MAX], bg_audio[FM_PATH_MAX];
   u64 lock_hint_until;     /* unlock button visible until then */
@@ -172,7 +226,7 @@ typedef struct VOnline {
   u64 ok_since;              /* playing without trouble since (re-arms the reconnect) */
   /* resolve worker (re-resolve, cache download, a quality without a kept URL) */
   SDL_Thread *thr;
-  SDL_atomic_t done;
+  SDL_atomic_t done;         /* 0 running, 1 finished, 2 the player let go (the thread frees o) */
   volatile int cancel;
   FmVsrcConf rconf;
   FmVsrcStream *res;
@@ -194,6 +248,7 @@ typedef struct VOnline {
   u64 test_t;
   bool demo_menu;
   bool demo_chrome;          /* --demo-chrome: the controls stay up (buffer bar screenshots) */
+  bool demo_end;              /* MMCFM_DEMO_SEEK_END done */
   bool demo_seeks;           /* --demo-stream-seeks: jump ahead after each second of smooth play */
   u64 demo_smooth;
 } VOnline;
@@ -290,32 +345,39 @@ static int video_room(void) {
   return FM_CLAMP((int)(QMAX_BYTES / fb), QN, QMAX);
 }
 
+/* The decoder thread. It owns one reference to ss and reads nothing of the
+** player's until it holds ss->mx with quit unset: after a close the player's
+** state belongs to the next video (see the header). */
 static int worker(void *u) {
-  FM_UNUSED(u);
+  VSess *ss = (VSess *)u;
+  SDL_mutex *mx = ss->mx;
+  SDL_cond *cv = ss->cv;
   FmErr err;
-  FmVid *vid = V.audio[0] ? vid_open_pair(V.path, V.audio, V.open_flags, &err) : vid_open(V.path, V.open_flags, &err);
-  SDL_LockMutex(V.mx);
+  FmVid *vid = ss->audio[0] ? vid_open_pair(ss->path, ss->audio, ss->flags, &err) : vid_open(ss->path, ss->flags, &err);
+  SDL_LockMutex(mx);
+  if (ss->quit) goto out;
   if (!vid) {
     V.state = VS_ERROR;
     V.err = err;
-    SDL_UnlockMutex(V.mx);
+    SDL_UnlockMutex(mx);
     app_wake();
-    return 0;
+    goto done;
   }
   V.info = *vid_info(vid);
-  if (g_on && g_on->st.live) V.info.duration = 0;   /* a decoder's guess from the first bytes */
+  if (ss->live) V.info.duration = 0;   /* a decoder's guess from the first bytes */
   V.state = VS_READY;
-  SDL_UnlockMutex(V.mx);
+  SDL_UnlockMutex(mx);
   app_wake();
-  SDL_LockMutex(V.mx);
-  while (!V.quit && !V.started) SDL_CondWait(V.cv, V.mx);
-  while (!V.quit) {
+  SDL_LockMutex(mx);
+  while (!ss->quit && !V.started) SDL_CondWait(cv, mx);
+  while (!ss->quit) {
     if (V.seek_req) {
       double t = V.seek_to;
       V.seek_req = false;
-      SDL_UnlockMutex(V.mx);
+      SDL_UnlockMutex(mx);
       vid_seek(vid, t);
-      SDL_LockMutex(V.mx);
+      SDL_LockMutex(mx);
+      if (ss->quit) break;
       V.qhead = V.qcount = 0;
       if (V.ast) SDL_AudioStreamClear(V.ast);
       V.base_set = false;
@@ -325,21 +387,22 @@ static int worker(void *u) {
       V.clock_set = false;
       continue;
     }
-    if (V.eof) { SDL_CondWait(V.cv, V.mx); continue; }
+    if (V.eof) { SDL_CondWait(cv, mx); continue; }
     bool vfull = V.qcount >= video_room();
     bool afull = V.info.has_audio && audio_queued() > AUDIO_AHEAD;
     if ((V.info.has_video && vfull) || (afull && (!V.info.has_video || V.qcount > 0))) {
       /* the frame presenter and the audio callback signal when they take
       ** something, so this only sleeps; the timeout is a safety net
       ** (it used to poll every 20 ms, waking the CPU 50 times a second) */
-      SDL_CondWaitTimeout(V.cv, V.mx, 250);
+      SDL_CondWaitTimeout(cv, mx, 250);
       continue;
     }
-    SDL_UnlockMutex(V.mx);
+    SDL_UnlockMutex(mx);
     FmVidFrame vf;
     FmVidPcm pc;
     int ev = vid_decode(vid, &vf, &pc);
-    SDL_LockMutex(V.mx);
+    SDL_LockMutex(mx);
+    if (ss->quit) break;
     if (V.seek_req) continue;
     if (V.drop_before > 0) {
       /* resuming after a reopen: decode up to the position, show nothing before it */
@@ -352,7 +415,7 @@ static int worker(void *u) {
         VFrame *d = &V.q[(V.qhead + V.qcount) % QMAX];
         copy_frame(d, &vf);
         V.qcount++;
-        if (!V.clock_set || V.paused) { SDL_UnlockMutex(V.mx); app_wake(); SDL_LockMutex(V.mx); }
+        if (!V.clock_set || V.paused) { SDL_UnlockMutex(mx); app_wake(); SDL_LockMutex(mx); }
       }
     } else if (ev == VID_EV_AUDIO) {
       if (V.ast && pc.frames > 0 && pc.rate == V.info.rate && pc.channels == V.info.channels) {
@@ -381,13 +444,17 @@ static int worker(void *u) {
       V.eof = true;
       if (ev == VID_EV_ERROR) V.dec_error = true;
       if (V.ast) SDL_AudioStreamFlush(V.ast);
-      SDL_UnlockMutex(V.mx);
+      SDL_UnlockMutex(mx);
       app_wake();
-      SDL_LockMutex(V.mx);
+      SDL_LockMutex(mx);
     }
   }
-  SDL_UnlockMutex(V.mx);
+out:
+  SDL_UnlockMutex(mx);
+done:
   vid_close(vid);
+  sess_unref(ss);
+  SDL_AtomicDecRef(&g_workers);
   return 0;
 }
 
@@ -502,7 +569,11 @@ static void online_free(void) {
   g_on = NULL;
   if (o->thr) {
     o->cancel = 1;                 /* yt-dlp is killed through the cancel flag */
-    SDL_WaitThread(o->thr, NULL);
+    /* never waited for (a resolve can sit in the network for a long time):
+    ** a resolve still running owns o from now on and frees it (on_resolve) */
+    SDL_DetachThread(o->thr);
+    o->thr = NULL;
+    if (SDL_AtomicCAS(&o->done, 0, 2)) return;
   }
   fm_free(o->res);
   fm_free(o);
@@ -510,17 +581,48 @@ static void online_free(void) {
 
 static void pip_exit(void);
 
+/* Lets the worker go without waiting for it (see the header): quit under its
+** lock, its streams aborted so a blocked read returns, the thread detached.
+** The sound device closes after it, so the callback is done with V too. */
+static void let_worker_go(void) {
+  if (!V.thr) return;
+  VSess *ss = V.sess;
+  SDL_LockMutex(ss->mx);
+  ss->quit = true;
+  SDL_CondBroadcast(ss->cv);
+  SDL_UnlockMutex(ss->mx);
+  ns_abort_url(ss->path);
+  ns_abort_url(ss->audio);
+  SDL_DetachThread(V.thr);
+  V.thr = NULL;
+}
+
+/* Starts a worker on the current session for V.path / V.audio / V.open_flags. */
+static bool start_worker(bool live) {
+  VSess *ss = V.sess;
+  if (!ss || ss->quit) return false;
+  fm_strlcpy(ss->path, V.path, sizeof ss->path);
+  fm_strlcpy(ss->audio, V.audio, sizeof ss->audio);
+  ss->flags = V.open_flags;
+  ss->live = live;
+  SDL_AtomicIncRef(&ss->refs);
+  SDL_AtomicIncRef(&g_workers);
+  int tag = fm_thread_tag();
+  fm_set_thread_tag(NET_GROUP_VIDEOS);  /* data usage: also when the mini bar restarts it (under Home) */
+  V.thr = fm_thread_create(worker, "video", ss);
+  fm_set_thread_tag(tag);
+  if (V.thr) return true;
+  SDL_AtomicDecRef(&ss->refs);
+  SDL_AtomicDecRef(&g_workers);
+  return false;
+}
+
 static void vid_view_close(void) {
   pip_exit();
   online_free();
   if (!V.open) return;
-  if (V.thr) {
-    SDL_LockMutex(V.mx);
-    V.quit = true;
-    SDL_CondBroadcast(V.cv);
-    SDL_UnlockMutex(V.mx);
-    SDL_WaitThread(V.thr, NULL);
-  }
+  u64 t0 = SDL_GetTicks64();
+  let_worker_go();
   if (V.dev) SDL_CloseAudioDevice(V.dev);
   if (V.ast) SDL_FreeAudioStream(V.ast);
   for (int i = 0; i < QMAX; i++) fm_free(V.q[i].plane[0]);
@@ -530,13 +632,23 @@ static void vid_view_close(void) {
 #ifndef FM_MOBILE
   if (V.fullscreen_set && app.win) SDL_SetWindowFullscreen(app.win, 0);
 #endif
-  if (V.cv) SDL_DestroyCond(V.cv);
-  if (V.mx) SDL_DestroyMutex(V.mx);
+  sess_unref(V.sess);
   memset(&V, 0, sizeof V);
+  fm_log("video: closed in %d ms (%d decoders still closing)", (int)(SDL_GetTicks64() - t0), SDL_AtomicGet(&g_workers));
 }
 
-/* Everything the worker reads is set before it starts. */
-static bool open_impl(const char *path, const char *audio, const char *title, bool stream) {
+/* App exit: closed workers still closing their decoders get a moment (a
+** process ending under Media Foundation or MediaCodec work can crash);
+** one stuck in the network is left behind. */
+void video_shutdown(void) {
+  vid_view_close();
+  u64 until = SDL_GetTicks64() + 1500;
+  while (SDL_AtomicGet(&g_workers) > 0 && SDL_GetTicks64() < until) SDL_Delay(10);
+}
+
+/* Everything the worker reads is set before it starts. live: an online
+** stream on air (its decoder's duration is a guess). */
+static bool open_impl(const char *path, const char *audio, const char *title, bool stream, bool live) {
   vid_view_close();
   memset(&V, 0, sizeof V);
   V.open = true;
@@ -545,12 +657,11 @@ static bool open_impl(const char *path, const char *audio, const char *title, bo
   fm_strlcpy(V.audio, audio ? audio : "", sizeof V.audio);
   fm_strlcpy(V.title, title && title[0] ? title : fm_path_base(path), sizeof V.title);
   V.volume = conf.volume > 0 ? conf.volume : 0.8f;
-  V.mx = SDL_CreateMutex();
-  V.cv = SDL_CreateCond();
+  V.sess = sess_new();
+  if (V.sess) { V.mx = V.sess->mx; V.cv = V.sess->cv; }
   audio_pause();
   vid_clear_net_error();               /* a refusal reported now belongs to this video */
-  if (V.mx && V.cv) V.thr = fm_thread_create(worker, "video", NULL);
-  if (!V.thr) { V.state = VS_ERROR; V.err = FM_ERR_NOMEM; }
+  if (!start_worker(live)) { V.state = VS_ERROR; V.err = FM_ERR_NOMEM; }
   view_chrome_poke(&V.chrome);
   /* screenshots: --demo-audio FILE --demo-viz-overlay / --demo-viz-panel / --demo-eq N */
   for (int i = 1; i < app.argc; i++) {
@@ -564,14 +675,14 @@ static bool open_impl(const char *path, const char *audio, const char *title, bo
 
 static bool vid_view_open(const char *path, const char *const *list, int n, int index) {
   FM_UNUSED(list); FM_UNUSED(n); FM_UNUSED(index);
-  return open_impl(path, NULL, NULL, false);
+  return open_impl(path, NULL, NULL, false, false);
 }
 
 bool video_open_stream(const char *title, const char *video, const char *audio) {
   if (!video || !video[0]) return false;
   if (app.viewer && app.viewer->close) app.viewer->close();
   app.viewer = NULL;
-  open_impl(video, audio, title, true);
+  open_impl(video, audio, title, true, false);
   app.viewer = &g_view_video;
   ui_redraw();
   return true;
@@ -579,18 +690,21 @@ bool video_open_stream(const char *title, const char *video, const char *audio) 
 
 /* Stops the decoder worker and the sound (the window, picture and settings stay). */
 static void stop_worker(void) {
-  if (V.thr) {
-    SDL_LockMutex(V.mx);
-    V.quit = true;
-    SDL_CondBroadcast(V.cv);
-    SDL_UnlockMutex(V.mx);
-    SDL_WaitThread(V.thr, NULL);
-    V.thr = NULL;
-  }
+  bool had = V.thr != NULL;
+  let_worker_go();
   if (V.dev) { SDL_CloseAudioDevice(V.dev); V.dev = 0; }
   SDL_LockMutex(V.mx);
   if (V.ast) { SDL_FreeAudioStream(V.ast); V.ast = NULL; }
   SDL_UnlockMutex(V.mx);
+  /* the old worker keeps its session until it ends; the next one gets a new
+  ** one (if that fails, the old one stays, quit set, and restart reports it) */
+  VSess *ns = had ? sess_new() : NULL;
+  if (ns) {
+    sess_unref(V.sess);
+    V.sess = ns;
+    V.mx = ns->mx;
+    V.cv = ns->cv;
+  }
 }
 
 /* Opens other sources in the same player at `at` seconds: a quality switch,
@@ -601,7 +715,6 @@ static void restart_worker(const char *video, const char *audio, int flags, doub
   fm_strlcpy(V.path, video, sizeof V.path);
   fm_strlcpy(V.audio, audio ? audio : "", sizeof V.audio);
   V.open_flags = flags;
-  V.quit = false;
   V.state = VS_OPENING;
   V.err = FM_OK;
   V.started = false;
@@ -628,8 +741,7 @@ static void restart_worker(const char *video, const char *audio, int flags, doub
     g_on->fail[0] = 0;
   }
   vid_clear_net_error();
-  V.thr = fm_thread_create(worker, "video", NULL);
-  if (!V.thr) { V.state = VS_ERROR; V.err = FM_ERR_NOMEM; }
+  if (!start_worker(live_now())) { V.state = VS_ERROR; V.err = FM_ERR_NOMEM; }
   ui_redraw();
 }
 
@@ -658,7 +770,11 @@ static int on_resolve(void *u) {
                 ? o->src->resolve(&o->rconf, &o->item, o->res, on_progress, o, o->rerrtext, sizeof o->rerrtext,
                                   &o->cancel)
                 : FM_ERR_UNSUPPORTED;
-  SDL_AtomicSet(&o->done, 1);
+  if (!SDL_AtomicCAS(&o->done, 0, 1)) {   /* 2: the player closed and left o to this thread */
+    fm_free(o->res);
+    fm_free(o);
+    return 0;
+  }
   app_wake();
   return 0;
 }
@@ -691,7 +807,10 @@ static bool online_resolve_ex(int height, bool cache, int want, const char *note
   SDL_LockMutex(V.mx);
   V.state = VS_OPENING;
   SDL_UnlockMutex(V.mx);
+  int tag = fm_thread_tag();
+  fm_set_thread_tag(NET_GROUP_VIDEOS);
   o->thr = fm_thread_create(on_resolve, "vid-resolve", o);
+  fm_set_thread_tag(tag);
   if (!o->thr) {
     SDL_LockMutex(V.mx);
     V.state = VS_ERROR;
@@ -731,7 +850,7 @@ static bool online_failed(const char *why) {
 /* Main thread, every frame: a finished resolve opens its result. */
 static void on_pump(void) {
   VOnline *o = g_on;
-  if (!o || !o->thr || !SDL_AtomicGet(&o->done)) return;
+  if (!o || !o->thr || SDL_AtomicGet(&o->done) != 1) return;
   SDL_WaitThread(o->thr, NULL);
   o->thr = NULL;
   FmVsrcStream *r = o->res;
@@ -794,12 +913,25 @@ static void quality_pick(int i) {
   }
 }
 
+static bool open_online(const FmVsrc *src, const FmVsrcConf *c, const FmVsrcItem *item, const FmVsrcStream *st,
+                        u64 t_click, bool inl);
+
 bool video_open_online(const FmVsrc *src, const FmVsrcConf *c, const FmVsrcItem *item, const FmVsrcStream *st,
                        u64 t_click) {
+  return open_online(src, c, item, st, t_click, false);
+}
+
+bool video_open_online_inline(const FmVsrc *src, const FmVsrcConf *c, const FmVsrcItem *item, const FmVsrcStream *st,
+                              u64 t_click) {
+  return open_online(src, c, item, st, t_click, true);
+}
+
+static bool open_online(const FmVsrc *src, const FmVsrcConf *c, const FmVsrcItem *item, const FmVsrcStream *st,
+                        u64 t_click, bool inl) {
   if (!st || !st->video[0]) return false;
   if (app.viewer && app.viewer->close) app.viewer->close();
   app.viewer = NULL;
-  open_impl(st->video, st->audio[0] ? st->audio : NULL, item ? item->title : NULL, true);
+  open_impl(st->video, st->audio[0] ? st->audio : NULL, item ? item->title : NULL, true, st->live);
   VOnline *o = (VOnline *)fm_calloc(1, sizeof *o);
   o->src = src;
   if (c) o->conf = *c;
@@ -821,7 +953,12 @@ bool video_open_online(const FmVsrc *src, const FmVsrcConf *c, const FmVsrcItem 
                     st->q[i].needs_ffmpeg ? " needs-ffmpeg" : "");
   stream_test_log("open \"%s\" %s", o->item.title, st->local ? "cache file" : "stream");
   g_on = o;
-  app.viewer = &g_view_video;
+  if (inl) {
+    V.inl = true;
+    V.inl_chrome_until = 0;
+  } else {
+    app.viewer = &g_view_video;
+  }
   ui_redraw();
   return true;
 }
@@ -888,9 +1025,21 @@ static void present_frame(void) {
   if (dropped) SDL_CondSignal(V.cv);
   g_pl.dropped += dropped;
   VFrame *f = NULL;
+  bool again = false;
   if (V.qcount > 0 && (V.q[V.qhead].t <= V.clock + 0.008 || !V.have_frame)) f = &V.q[V.qhead];
+  if (!f && V.reupload) {
+    /* the slot just shown is the last one the worker writes again */
+    VFrame *last = &V.q[(V.qhead + QMAX - 1) % QMAX];
+    if (V.qcount < QMAX - 1 && last->plane[0] && last->t == V.shown_t) f = last, again = true;
+  }
+  V.reupload = false;
   SDL_UnlockMutex(V.mx);
   if (!f) return;
+  if (V.background || app.background) {   /* nothing shows it: taken off the queue, not uploaded */
+    again = false;
+    V.shown_t = f->t;
+    goto taken;
+  }
   /* the worker never writes the head slot while it is queued */
   if (!V.tex || V.tw != f->w || V.th != f->h) {
     if (V.tex) SDL_DestroyTexture(V.tex);
@@ -919,9 +1068,13 @@ static void present_frame(void) {
                       (int)(now - g_on->t_click), f->t);
     }
   }
+  if (again) return;
+taken:
   SDL_LockMutex(V.mx);
-  V.qhead = (V.qhead + 1) % QMAX;
-  V.qcount--;
+  if (V.qcount > 0 && f == &V.q[V.qhead]) {   /* a seek may have emptied the queue meanwhile */
+    V.qhead = (V.qhead + 1) % QMAX;
+    V.qcount--;
+  }
   SDL_CondBroadcast(V.cv);
   SDL_UnlockMutex(V.mx);
 }
@@ -1204,6 +1357,13 @@ static void stream_checks(int *state, bool *ready) {
     V.buffering = false;
   }
   if (o && o->demo_chrome) view_chrome_poke(&V.chrome);
+  /* MMCFM_DEMO_SEEK_END=N: once, N seconds before the end (tests the end of streams) */
+  if (o && !o->demo_end && playing && V.have_frame && V.info.duration > 0 && getenv("MMCFM_DEMO_SEEK_END")) {
+    o->demo_end = true;
+    double to = V.info.duration - atof(getenv("MMCFM_DEMO_SEEK_END"));
+    fm_log("demo: seek to %.1f s of %.1f s", to, V.info.duration);
+    seek_to(to);
+  }
   if (o && o->demo_seeks && playing && V.have_frame && V.info.duration > 60) {
     if (V.buffering || V.starve_t || !V.clock_set) o->demo_smooth = 0;
     else if (!o->demo_smooth) o->demo_smooth = ui.now;
@@ -1447,13 +1607,17 @@ static int audio_quality(void) {
 /* Hides the player and keeps the sound: online videos switch to their
 ** sound-only stream (less data, no picture decoding), local files reopen
 ** sound-only at the same moment. */
-static void to_background(void) {
+static void to_background(bool keep) {
   if (!V.open || V.background || !V.info.has_audio) return;
   pip_exit();
   V.bg_q = -1;
   V.bg_flags = V.open_flags;
-  int aq = audio_quality();
-  if (aq >= 0 && g_on->st.cur != aq) {
+  int aq = keep ? -1 : audio_quality();
+  if (keep) {
+    /* the app is only hidden: the same decoder goes on and its pictures are
+    ** skipped (present_frame), so coming back is instant, where reopening
+    ** the stream sound-only and again with the picture cost seconds each */
+  } else if (aq >= 0 && g_on->st.cur != aq) {
     V.bg_q = g_on->st.cur;
     quality_pick(aq);
   } else if (aq < 0 && V.info.has_video && !(V.open_flags & VID_OPEN_AUDIO_ONLY)) {
@@ -1479,6 +1643,7 @@ static void to_background(void) {
 static void from_background(void) {
   if (!V.open || !V.background) return;
   V.background = false;
+  V.bg_auto = false;
   if (V.bg_q >= 0 && g_on) {
     quality_pick(V.bg_q);
   } else if (V.bg_flags != V.open_flags) {
@@ -1496,7 +1661,7 @@ bool video_mini_active(void) { return V.open && V.background; }
 
 bool video_media_info(FmMediaInfo *m) {
   memset(m, 0, sizeof *m);
-  if (!V.open || (!V.background && app.viewer != &g_view_video)) return false;
+  if (!V.open || (!V.background && !V.inl && app.viewer != &g_view_video)) return false;
   fm_strlcpy(m->title, V.title, sizeof m->title);
   m->playing = !V.paused && !V.ended;
   m->track = -2;                       /* a video, not a music track */
@@ -1508,7 +1673,27 @@ void video_media_toggle(void) {
 }
 
 void video_app_hidden(void) {
-  if (V.open && !V.background && !V.paused && !V.ended && app.viewer == &g_view_video) to_background();
+  if (V.open && !V.background && !V.paused && !V.ended && app.viewer == &g_view_video) {
+    to_background(true);
+    V.bg_auto = V.background;
+  }
+}
+
+/* Back on screen: a video the app hiding sent to the background shows its
+** picture again where the sound is (one the user sent there stays). */
+void video_app_shown(void) {
+  if (V.open && V.background && V.bg_auto && !app.viewer) from_background();
+  V.bg_auto = false;
+}
+
+/* SDL_RENDER_DEVICE_RESET: the texture is gone; the shown picture is uploaded
+** again (it stays in its queue slot), so a paused video does not go black. */
+void video_render_reset(void) {
+  if (!V.open) return;
+  if (V.tex) SDL_DestroyTexture(V.tex);
+  V.tex = NULL;
+  V.tw = V.th = 0;
+  V.reupload = V.have_frame;
 }
 
 /* --demo-video FILE [--demo-video-bg AT[,BACK]]: opens FILE; at AT seconds
@@ -1541,7 +1726,7 @@ static void demo_video(void) {
     }
   }
   if (!file) return;
-  open_impl(file, NULL, NULL, false);
+  open_impl(file, NULL, NULL, false, false);
   app.viewer = &g_view_video;
 }
 
@@ -1567,7 +1752,7 @@ static void demo_steps(void) {
   if (!V.background && g_demo_bg >= 0 && V.clock >= g_demo_bg) {
     fm_log("demo: to the background at %.1f s", V.clock);
     g_demo_bg = 1e9;
-    to_background();
+    to_background(false);
   } else if (V.background && g_demo_fg >= 0 && V.clock >= g_demo_fg) {
     fm_log("demo: back to the picture at %.1f s", V.clock);
     g_demo_fg = -1;
@@ -1590,11 +1775,12 @@ static void demo_steps(void) {
 void video_bg_pump(void) {
   demo_video();
   demo_steps();
-  if (!V.open || !V.background) return;
+  if (!V.open || !(V.background || (V.inl && app.viewer != &g_view_video))) return;
+  play_log();
   int state;
   bool ready;
   tick(&state, &ready);
-  if (ready && !V.paused && !V.ended) view_wake_in(500);   /* the bar's time and progress */
+  if (ready && !V.paused && !V.ended) view_wake_in(500);   /* the bar's time and progress (inline: it animates) */
 }
 
 void video_bg_stop(void) {
@@ -1762,7 +1948,7 @@ static void vid_view_frame(FmRect area) {
   /* keys */
   if (ready) {
     if (ui_key(SDLK_a, 0)) set_aspect(g_aspect + 1);
-    if (ui_key(SDLK_b, 0) && V.info.has_audio && V.info.has_video) { to_background(); return; }
+    if (ui_key(SDLK_b, 0) && V.info.has_audio && V.info.has_video) { to_background(false); return; }
     if (ui_key(SDLK_p, 0) && V.info.has_video && !pip_on()) { pip_enter(); return; }
     if (ui_key(SDLK_SPACE, 0) || ui_key(SDLK_k, 0) || ui_key(SDLK_AUDIOPLAY, 0)) set_paused(!V.paused);
     if (!live_now() && ui_key(SDLK_RIGHT, 0)) { seek_to(V.clock + 10); view_chrome_poke(&V.chrome); }
@@ -1869,7 +2055,7 @@ static void vid_view_frame(FmRect area) {
   }
   if (can_bg && view_bar_btn(&act, ui_id("vid.bgbtn"), IC_MUSIC, "Play in background, sound only (B)", VIEW_BAR_MEDIA,
                              chrome, false)) {
-    to_background();
+    to_background(false);
     return;
   }
 #ifndef FM_MOBILE
@@ -1906,7 +2092,7 @@ static void vid_view_frame(FmRect area) {
     case VM_VIZ: V.viz_panel = true; viz_panel_tab(0); break;
     case VM_EQ: V.viz_panel = true; viz_panel_tab(1); break;
     case VM_QUALITY: quality_menu(act.x + act.w, area.y + ui.m.bar_h); break;
-    case VM_BG: to_background(); return;
+    case VM_BG: to_background(false); return;
     case VM_PIP: pip_enter(); return;
     default: break;
   }
@@ -2001,4 +2187,143 @@ static void vid_view_frame(FmRect area) {
   }
 }
 
-const FmViewer g_view_video = { "video", vid_view_open, vid_view_frame, vid_view_close };
+/* ---- inline play (online videos) -------------------------------------------------- */
+
+#define INL_CHROME_MS 2800
+
+bool video_inline_active(void) { return V.open && V.inl; }
+
+/* The result playing inline (or opening its full player from there). */
+bool video_inline_is(const FmVsrcItem *it) {
+  if (!V.open || !(V.inl || V.inl_home) || !g_on || !it) return false;
+  if (it->id[0] && g_on->item.id[0]) return strcmp(it->id, g_on->item.id) == 0;
+  return it->page[0] && strcmp(it->page, g_on->item.page) == 0;
+}
+
+void video_inline_stop(void) {
+  if (V.open && (V.inl || V.inl_home)) {
+    if (app.viewer == &g_view_video) app.viewer = NULL;
+    vid_view_close();
+    ui_redraw();
+  }
+}
+
+/* The fullscreen button: the same player (worker, sound, place) takes the window. */
+static void inline_to_full(void) {
+  V.inl = false;
+  V.inl_home = true;
+  view_chrome_poke(&V.chrome);
+  if (app.viewer && app.viewer != &g_view_video && app.viewer->close) app.viewer->close();
+  app.viewer = &g_view_video;
+  ui_redraw();
+}
+
+/* The player's close: from a full player that came from a thumbnail, Back
+** returns it there, still playing; otherwise it ends. */
+static void vid_viewer_close(void) {
+  if (V.open && V.inl_home && !V.background && g_on) {
+    pip_exit();
+#ifndef FM_MOBILE
+    if (V.fullscreen_set && app.win) { SDL_SetWindowFullscreen(app.win, 0); V.fullscreen_set = false; }
+#endif
+    if (V.cursor_hidden) { SDL_ShowCursor(SDL_ENABLE); V.cursor_hidden = false; }
+    V.inl_home = false;
+    V.inl = true;
+    V.inl_chrome_until = ui.now + INL_CHROME_MS;
+    ui_redraw();
+    return;
+  }
+  vid_view_close();
+}
+
+void video_inline_draw(FmRect r, float rad) {
+  if (!video_inline_active()) return;
+  int state;
+  SDL_LockMutex(V.mx);
+  state = V.state;
+  SDL_UnlockMutex(V.mx);
+  bool ready = state == VS_READY && V.started;
+  bool playing = ready && !V.paused && !V.ended;
+  screensaver(playing);
+  gfx_rrect(r, rad, FM_HEX(0x000000));
+  if (V.tex && V.tw > 0 && V.th > 0) {
+    double sar = V.info.sar > 0.1 && V.info.sar < 10 ? V.info.sar : 1.0;
+    FmRect pic, src;
+    int a = g_aspect;
+    g_aspect = AR_FIT;                   /* the whole picture in the thumbnail, whatever the full player uses */
+    place_picture(r, sar, &pic, &src);
+    g_aspect = a;
+    gfx_clip_push(r);
+    gfx_tex(V.tex, &src, pic, FM_HEX(0xFFFFFF));
+    gfx_clip_pop();
+  }
+  bool resolving = g_on && g_on->thr;
+  bool opening = state == VS_OPENING || (ready && V.info.has_video && !V.have_frame);
+  /* progress along the bottom edge */
+  double dur = V.info.duration;
+  if (dur > 0 && !live_now()) {
+    FmRect bar = { r.x + rad * 0.5f, r.y + r.h - DP(3), r.w - rad, DP(3) };
+    gfx_rect(bar, col_alpha(FM_HEX(0xFFFFFF), 0.25f));
+    gfx_rect(FM_RECT(bar.x, bar.y, bar.w * (float)FM_CLAMP(V.clock / dur, 0.0, 1.0), bar.h), T.accent);
+  }
+  /* taps: show the controls; with them shown, the middle plays/pauses */
+  u32 base = ui_id("vinl");
+  int f = ui_hit(ui_idn(base, 1), r);
+  bool shown = !playing || ui.now < V.inl_chrome_until || (!ui.touch_mode && (f & UI_HOVER));
+  if (state == VS_ERROR) {
+    gfx_rrect(r, rad, col_alpha(VIEW_SCRIM, 0.75f));
+    font_draw_center(FONT_BOLD, ui.m.font_small, FM_RECT(r.x, r.y + r.h * 0.5f - DP(20), r.w, DP(20)),
+                     "Cannot play this stream", VIEW_FG);
+    font_draw_center(FONT_REGULAR, ui.m.font_small, FM_RECT(r.x, r.y + r.h * 0.5f + DP(2), r.w, DP(20)),
+                     "Tap for details", VIEW_FG2);
+    shown = true;
+  } else if (resolving || opening || V.buffering) {
+    float s = FM_MIN(DP(40), r.h * 0.3f);
+    FmRect sp = rect_center(r, s, s);
+    gfx_circle(sp.x + s * 0.5f, sp.y + s * 0.5f, s * 0.75f, col_alpha(VIEW_SCRIM, 0.7f));
+    ui_spinner(sp, VIEW_FG);
+  }
+  float bs = DP(ui.touch_mode ? 44 : 36);
+  bool act = false;
+  if (shown && state != VS_ERROR) {
+    gfx_rrect(r, rad, col_alpha(VIEW_SCRIM, 0.28f));
+    if (ready && !opening && !V.buffering) {
+      float ps = FM_MIN(DP(56), r.h * 0.4f);
+      FmRect pb = rect_center(r, ps, ps);
+      gfx_circle(pb.x + ps * 0.5f, pb.y + ps * 0.5f, ps * 0.5f, col_alpha(VIEW_SCRIM, 0.6f));
+      if (ui_icon_btn(ui_idn(base, 2), pb, playing ? IC_PAUSE : IC_PLAY, VIEW_FG, playing ? "Pause" : "Play")) {
+        set_paused(!V.paused);
+        V.inl_chrome_until = ui.now + INL_CHROME_MS;
+        act = true;
+      }
+    }
+    char t[48], d[24];
+    view_fmt_time(V.clock, t, sizeof t);
+    if (dur > 0 && !live_now()) {
+      view_fmt_time(dur, d, sizeof d);
+      fm_strlcat(t, " / ", sizeof t);
+      fm_strlcat(t, d, sizeof t);
+    } else if (live_now()) {
+      fm_strlcpy(t, "LIVE", sizeof t);
+    }
+    float fs = ui.m.font_small;
+    font_draw(FONT_BOLD, fs, r.x + DP(10), r.y + r.h - DP(8) - font_line_h(fs) - DP(6), t, -1, VIEW_FG);
+  }
+  if (shown) {
+    FmRect fb = { r.x + r.w - bs - DP(4), r.y + r.h - bs - DP(6), bs, bs };
+    if (ui_icon_btn(ui_idn(base, 3), fb, IC_FULLSCREEN, VIEW_FG, "Full screen")) { inline_to_full(); return; }
+    FmRect cb = { r.x + r.w - bs - DP(4), r.y + DP(4), bs, bs };
+    if (ui_icon_btn(ui_idn(base, 4), cb, IC_CLOSE, VIEW_FG, "Stop")) { video_inline_stop(); return; }
+  }
+  if ((f & UI_CLICK) && !act) {
+    if (state == VS_ERROR) { inline_to_full(); return; }  /* the full player says why and offers the way out */
+    if (!ui.touch_mode && shown && ready) set_paused(!V.paused);
+    V.inl_chrome_until = shown && ui.touch_mode && playing ? 0 : ui.now + INL_CHROME_MS;
+  }
+  if (f & UI_DCLICK) { inline_to_full(); return; }
+  if (playing || resolving || opening) ui_animate();   /* the pictures, the spinner */
+  else if (ui.now < V.inl_chrome_until) view_wake_in((int)(V.inl_chrome_until - ui.now) + 20);
+  if (playing && ui.now < V.inl_chrome_until) view_wake_in((int)(V.inl_chrome_until - ui.now) + 20);
+}
+
+const FmViewer g_view_video = { "video", vid_view_open, vid_view_frame, vid_viewer_close };

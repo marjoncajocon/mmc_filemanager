@@ -284,6 +284,31 @@ static ssize_t net_read_at(void *u, off64_t off, void *buf, size_t size) {
       n->w[i].hit_round = false;
     }
     if (pk) { done += pk; continue; }
+    /* the end of the stream (an HLS length is known once a connection read
+    ** its last segment): a read running past it took the rest from a
+    ** read-ahead above and ends here. Asking on opened a new connection,
+    ** which re-downloaded from a segment boundary for the missing tail: 13 s
+    ** of "Buffering" a few seconds before the end of a Dailymotion video. */
+    i64 szk = -1;
+    for (int i = 0; i < NET_WINS; i++)
+      if (n->w[i].ns && ns_size(n->w[i].ns) >= 0) szk = ns_size(n->w[i].ns);
+    if (szk >= 0 && p >= szk) break;
+    /* HLS: p is where a connection's read-ahead ends (the reader caught up
+    ** with the download): its next bytes are on the way, so wait for them
+    ** rather than restart at a segment boundary on another connection */
+    int front = -1;
+    for (int i = 0; i < NET_WINS && front < 0; i++)
+      if (n->w[i].ns && ns_is_hls(n->w[i].ns) && ns_tell(n->w[i].ns) + (i64)ns_buffered(n->w[i].ns) == p) front = i;
+    if (front >= 0) {
+      FmNetStream *fs = n->w[front].ns;
+      u64 until = plat_now_ms() + 8000;
+      while (!pk && plat_now_ms() < until && !(ns_size(fs) >= 0 && p >= ns_size(fs))) {
+        usleep(10000);
+        pk = ns_peek_at(fs, p, (u8 *)buf + done, size - done);
+      }
+      if (pk) { done += pk; continue; }
+      if (ns_size(fs) >= 0 && p >= ns_size(fs)) break;
+    }
     /* a window whose connection reads on to p */
     int k = -1;
     i64 lend = 0;

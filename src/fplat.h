@@ -117,6 +117,8 @@ int plat_window_corners(bool round, int radius_px, u32 border_rgb, bool maximize
 /* Height in window pixels of the on-screen keyboard covering the bottom of
 ** the window (Android); 0 on desktops and while it is hidden. */
 int plat_ime_inset(void);
+/* Android: the display's refresh rate as the window uses it (Hz), 0 = unknown or elsewhere. */
+float plat_refresh_hz(void);
 
 /* Storage permission (Android 11+: all-files access). Desktop: always true. */
 bool plat_storage_granted(void);

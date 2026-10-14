@@ -31,6 +31,7 @@
 #include "fcloud_app.h"                /* cloud */
 #include "fqueue.h"                    /* music queue, playlists */
 #include "fdatause.h"                  /* data usage */
+#include "flyrics.h"                   /* lyrics */
 
 /* ---- state -------------------------------------------------------------- */
 
@@ -455,6 +456,7 @@ void app_render_reset(void) {
   font_reset();
   thumb_reset();
   online_render_reset();               /* online */
+  video_render_reset();                /* the player's picture */
   photo_render_reset();                /* photos */
 }
 
@@ -3220,7 +3222,7 @@ void app_shutdown(void) {
   datause_shutdown();
   audio_queue_save_now();              /* the queue, the track and where it was */
   app_close_viewer();
-  video_bg_stop();                     /* a video playing in the background */
+  video_shutdown();                    /* a video playing in the background, decoders still closing */
   tray_shutdown();
   ops_shutdown();
   cloud_tasks_shutdown();              /* cloud: stop listings and sign-ins */
@@ -3244,6 +3246,7 @@ void app_shutdown(void) {
   wiki_shutdown();                     /* wiki */
   photo_shutdown();                    /* photos */
   online_shutdown();                   /* online */
+  lyrics_shutdown();                   /* lyrics */
   cloud_shutdown();                    /* cloud */
   thumb_shutdown();
 }
@@ -3289,6 +3292,7 @@ void app_event(const SDL_Event *e) {
       }
       break;
     case SDL_APP_DIDENTERFOREGROUND:
+      video_app_shown();               /* a video sent to sound only by hiding shows its picture again */
       /* back from the system settings (storage permission) */
       panel_refresh(&g_p[0]);
       panel_refresh(&g_p[1]);
@@ -3297,6 +3301,7 @@ void app_event(const SDL_Event *e) {
     case SDL_APP_WILLENTERBACKGROUND:
       video_app_hidden();              /* a playing video goes on as sound */
       conf_flush(true);
+      datause_flush();
       audio_queue_save_now();          /* Android may end the app from the background */
       pl_flush();
       break;

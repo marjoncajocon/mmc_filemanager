@@ -114,6 +114,45 @@ public class FmActivity extends SDLActivity {
            fullscreen; keep the default system bars otherwise. */
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
         watchKeyboard();
+        preferHighRefresh();
+    }
+
+    /* ---- refresh rate ------------------------------------------------------- */
+
+    /* An app that does not ask runs at 60 Hz on many 90/120 Hz phones, so
+       scrolling looked uneven. The window asks for the fastest mode of the
+       current resolution (the native side still caps its frame rate when the
+       user set one), and the rate in use goes to the native side, since SDL
+       reads it only when the surface changes. */
+    private static native void nativeRefreshRate(float hz);
+
+    private void preferHighRefresh() {
+        if (Build.VERSION.SDK_INT < 23) return;
+        final android.view.Display d = getWindowManager().getDefaultDisplay();
+        android.view.Display.Mode cur = d.getMode(), best = cur;
+        for (android.view.Display.Mode m : d.getSupportedModes())
+            if (m.getPhysicalWidth() == cur.getPhysicalWidth() && m.getPhysicalHeight() == cur.getPhysicalHeight()
+                    && m.getRefreshRate() > best.getRefreshRate()) best = m;
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.preferredDisplayModeId = best.getModeId();
+        getWindow().setAttributes(lp);
+        sendRefreshRate(d);
+        ((android.hardware.display.DisplayManager) getSystemService(Context.DISPLAY_SERVICE)).registerDisplayListener(
+            new android.hardware.display.DisplayManager.DisplayListener() {
+                @Override public void onDisplayAdded(int id) {}
+                @Override public void onDisplayRemoved(int id) {}
+                @Override public void onDisplayChanged(int id) {
+                    if (id == d.getDisplayId()) sendRefreshRate(d);
+                }
+            }, null);
+    }
+
+    private static void sendRefreshRate(android.view.Display d) {
+        try {
+            nativeRefreshRate(d.getRefreshRate());
+        } catch (UnsatisfiedLinkError e) {
+            /* native library not loaded yet: the next display change sends it */
+        }
     }
 
     /* ---- soft keyboard height ---------------------------------------------- */

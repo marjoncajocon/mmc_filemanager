@@ -130,7 +130,12 @@ find_android() {
   [ -f "$PLATFORM_JAR" ] || die "no platforms/android-*/android.jar in $SDK"
   JAVA_BIN=""
   if [ -n "${JAVA_HOME:-}" ]; then JAVA_BIN="$(cygpath -u "$JAVA_HOME" 2>/dev/null || echo "$JAVA_HOME")/bin/"; fi
-  [ -x "${JAVA_BIN}javac$EXE" ] || [ -x "${JAVA_BIN}javac" ] || JAVA_BIN="/d/env/java/jdk-21.0.11/bin/"
+  # then javac on PATH, then the newest JDK under /d/env/java (any version, so a JDK update needs no edit)
+  if ! [ -x "${JAVA_BIN}javac$EXE" ] && ! [ -x "${JAVA_BIN}javac" ]; then
+    if command -v javac >/dev/null 2>&1; then JAVA_BIN="$(dirname "$(command -v javac)")/"
+    else JAVA_BIN="$(ls -d /d/env/java/jdk-*/bin 2>/dev/null | sort -V | tail -1)/"; fi
+  fi
+  [ -x "${JAVA_BIN}javac$EXE" ] || [ -x "${JAVA_BIN}javac" ] || die "no JDK found (set JAVA_HOME)"
 }
 
 find_cmake() {

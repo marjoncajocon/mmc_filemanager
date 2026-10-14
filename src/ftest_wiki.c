@@ -202,8 +202,8 @@ static const char kTaxon[] =
   "\"taxon_photos\":[{\"photo\":{\"id\":7,\"url\":\"https://x/photos/7/square.jpg\",\"medium_url\":\"https://x/photos/7/medium.jpg\","
   "\"attribution\":\"(c) someone, CC BY\"}}]}]}";
 static const char kDict[] =
-  "[{\"word\":\"hello\",\"phonetic\":\"/h\u0259\u02c8l\u0259\u028a/\",\"phonetics\":[{\"text\":\"/h\u0259\u02c8l\u0259\u028a/\","
-  "\"audio\":\"https://api.dictionaryapi.dev/media/pronunciations/en/hello-uk.mp3\"},{\"text\":\"/h\u025b\u02c8lo\u028a/\",\"audio\":\"\"}],"
+  "[{\"word\":\"hello\",\"phonetic\":\"/h\xC9\x99\xCB\x88l\xC9\x99\xCA\x8A/\",\"phonetics\":[{\"text\":\"/h\xC9\x99\xCB\x88l\xC9\x99\xCA\x8A/\","
+  "\"audio\":\"https://api.dictionaryapi.dev/media/pronunciations/en/hello-uk.mp3\"},{\"text\":\"/h\xC9\x9B\xCB\x88lo\xCA\x8A/\",\"audio\":\"\"}],"
   "\"meanings\":[{\"partOfSpeech\":\"noun\",\"definitions\":[{\"definition\":\"\\\"Hello!\\\" or an equivalent greeting.\","
   "\"example\":\"She said hello.\"}],\"synonyms\":[\"greeting\"],\"antonyms\":[]},"
   "{\"partOfSpeech\":\"interjection\",\"definitions\":[{\"definition\":\"A greeting.\"}],\"synonyms\":[],\"antonyms\":[\"bye\"]}]}]";
@@ -422,12 +422,12 @@ static const char kChapter[] =
   "\"book\":{\"id\":\"JHN\",\"name\":\"John\",\"numberOfChapters\":21},"
   "\"chapter\":{\"number\":3,\"content\":[{\"type\":\"heading\",\"content\":[\"Jesus and Nicodemus\"]},"
   "{\"type\":\"verse\",\"number\":1,\"content\":[\"Now there was a man.\"]},{\"type\":\"line_break\"},"
-  "{\"type\":\"verse\",\"number\":16,\"content\":[\"He gave His one and only\",{\"noteId\":17},\"Son.\",{\"noteId\":18},\"\u201d\"]}]},"
+  "{\"type\":\"verse\",\"number\":16,\"content\":[\"He gave His one and only\",{\"noteId\":17},\"Son.\",{\"noteId\":18},\"\xE2\x80\x9D\"]}]},"
   "\"previousChapterApiLink\":\"/api/BSB/JHN/2.json\",\"nextChapterApiLink\":\"/api/BSB/JHN/4.json\","
   "\"thisChapterAudioLinks\":{\"david\":\"https://audio.example/david.mp3\",\"bad\":\"http://plain/x.mp3\"}}";
 
 static const char kMw[] =
-  "[{\"meta\":{\"id\":\"love:1\"},\"hwi\":{\"hw\":\"love\",\"prs\":[{\"mw\":\"\u02c8l\u0259v\",\"sound\":{\"audio\":\"love0001\"}}]},"
+  "[{\"meta\":{\"id\":\"love:1\"},\"hwi\":{\"hw\":\"love\",\"prs\":[{\"mw\":\"\xCB\x88l\xC9\x99v\",\"sound\":{\"audio\":\"love0001\"}}]},"
   "\"fl\":\"noun\",\"def\":[{\"sseq\":[[[\"sense\",{\"dt\":[[\"text\",\"{bc}strong affection\"],"
   "[\"vis\",[{\"t\":\"maternal {it}love{/it} for a child\"}]]]}]]]}],"
   "\"et\":[[\"text\",\"Middle English, from Old English {it}lufu{/it}\"]],\"date\":\"before the 12th century{ds||1||}\","
@@ -450,7 +450,7 @@ static void bt_offline(void) {
   TEST_CHECK(rd_bible_parse_chapter(kChapter, sizeof kChapter - 1, "BSB/JHN/3", &a, &m) == FM_OK && a.doc);
   TEST_CHECK(!strcmp(a.title, "John 3") && !strcmp(a.desc, "Berean Standard Bible") && !strcmp(a.id, "BSB/JHN/3"));
   if (a.doc) {
-    TEST_CHECK(strstr(a.doc->text, "one and only Son.\u201d") != NULL);             /* the notes' places: a space between words only */
+    TEST_CHECK(strstr(a.doc->text, "one and only Son.\xE2\x80\x9D") != NULL);             /* the notes' places: a space between words only */
     TEST_CHECK(doc_anchor(a.doc, "v16") >= 0 && strstr(a.doc->text, "Jesus and Nicodemus"));
     bool prev = false, next = false, ch21 = false;
     for (int i = 0; i < a.doc->nlinks; i++) {
@@ -466,8 +466,8 @@ static void bt_offline(void) {
   /* Merriam-Webster */
   char mk[300];
   rd_mw_markup("{bc}a {it}feeling{/it} of {sx|affection||} {ldquo}x{rdquo} {a_link|warmth} {dx}see {dxt|like||}{/dx} 1<2", mk, sizeof mk);
-  TEST_CHECK(!strcmp(mk, "<b>:</b> a <i>feeling</i> of affection \u201cx\u201d warmth \u2014 see like 1&lt;2"));
-  if (strcmp(mk, "<b>:</b> a <i>feeling</i> of affection \u201cx\u201d warmth \u2014 see like 1&lt;2")) printf("    markup: %s\n", mk);
+  TEST_CHECK(!strcmp(mk, "<b>:</b> a <i>feeling</i> of affection \xE2\x80\x9Cx\xE2\x80\x9D warmth \xE2\x80\x94 see like 1&lt;2"));
+  if (strcmp(mk, "<b>:</b> a <i>feeling</i> of affection \xE2\x80\x9Cx\xE2\x80\x9D warmth \xE2\x80\x94 see like 1&lt;2")) printf("    markup: %s\n", mk);
   memset(&a, 0, sizeof a);
   memset(&m, 0, sizeof m);
   TEST_CHECK(rd_mw_parse(kMw, sizeof kMw - 1, "love", &a, &m) == FM_OK && a.doc);

@@ -215,6 +215,10 @@ void conf_load(void) {
   char path[FM_PATH_MAX];
   if (!conf_file(path, sizeof path, "mmcfm.ini")) return;
   FILE *f = fm_fopen(path, "rb");
+  if (!f) {                       /* conf_save stopped between the remove and the rename */
+    if (!conf_file(path, sizeof path, "mmcfm.ini.tmp")) return;
+    f = fm_fopen(path, "rb");
+  }
   if (!f) return;
   char line[FM_PATH_MAX * 2 + 64];
   bool skipping = false;

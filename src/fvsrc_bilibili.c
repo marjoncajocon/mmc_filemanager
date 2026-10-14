@@ -417,8 +417,12 @@ static FmErr bl_search(const FmVsrcConf *c, const char *query, const char *page_
 
   /* a link: that one video */
   char bv[16], loc[1024];
-  if (strstr(q, "b23.tv/") && follow_short(strncmp(q, "http", 4) ? "https://b23.tv/" : q, loc, sizeof loc, cancel))
-    fm_strlcpy(q, loc, sizeof q);
+  const char *sh = strstr(q, "b23.tv/");
+  if (sh) {                               /* the short link alone: share text has words around it */
+    char su[440];
+    fm_snprintf(su, sizeof su, "https://%.*s", (int)strcspn(sh, " \t\r\n"), sh);
+    if (follow_short(su, loc, sizeof loc, cancel)) fm_strlcpy(q, loc, sizeof q);
+  }
   if (vsrc_bilibili_id(q, bv, sizeof bv) && (strstr(q, "://") || strlen(q) == 12)) {
     BlParam p[1];
     memset(p, 0, sizeof p);

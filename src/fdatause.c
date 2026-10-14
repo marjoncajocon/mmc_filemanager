@@ -46,7 +46,9 @@ static bool file_path(char *out, size_t cap) {
 }
 
 static DuDay *day_slot(int day) {
-  if (D.n && D.d[D.n - 1].day == day) return &D.d[D.n - 1];
+  /* the clock set back (a time zone east to west) counts into the newest
+  ** day: the days stay in order, which load relies on */
+  if (D.n && D.d[D.n - 1].day >= day) return &D.d[D.n - 1];
   if (D.n == DU_DAYS) {                         /* the oldest day goes into "older" */
     for (int g = 0; g < NET_GROUPS; g++) D.older[g] += D.d[0].b[g];
     memmove(D.d, D.d + 1, sizeof D.d[0] * (DU_DAYS - 1));
@@ -63,6 +65,11 @@ static void load(void) {
   D.since = today();
   if (!file_path(p, sizeof p)) return;
   FILE *f = fm_fopen(p, "rb");
+  if (!f) {                          /* save stopped between the remove and the rename */
+    char tmp[FM_PATH_MAX];
+    fm_snprintf(tmp, sizeof tmp, "%s.part", p);
+    f = fm_fopen(tmp, "rb");
+  }
   if (!f) return;
   char line[512];
   while (fgets(line, sizeof line, f)) {
@@ -84,9 +91,9 @@ static void load(void) {
       }
       if (line[0] == 'o') {
         for (int g = 0; g < NET_GROUPS; g++) D.older[g] += v[g];
-      } else if (day > 19700000 && (!D.n || day > D.d[D.n - 1].day)) {
-        DuDay *x = day_slot(day);
-        for (int g = 0; g < NET_GROUPS; g++) x->b[g] = v[g];
+      } else if (day > 19700000) {
+        DuDay *x = day_slot(day);         /* a day out of order adds to the newest */
+        for (int g = 0; g < NET_GROUPS; g++) x->b[g] += v[g];
       }
     }
   }
@@ -109,9 +116,13 @@ static void save(void) {
     for (int g = 0; g < NET_GROUPS; g++) fprintf(f, " %llu", (unsigned long long)D.d[i].b[g]);
     fprintf(f, "\n");
   }
-  bool ok = fclose(f) == 0;
-  if (ok) plat_remove_file(p);                  /* plat_rename never replaces: the old file goes first */
-  if (!ok || plat_rename(tmp, p) != FM_OK) plat_remove_file(tmp);
+  if (fclose(f) != 0) {
+    plat_remove_file(tmp);
+  } else {
+    plat_remove_file(p);                        /* plat_rename never replaces: the old file goes first */
+    /* a failed rename keeps the .part: it is complete, and load reads it */
+    if (plat_rename(tmp, p) != FM_OK) fm_log("data usage: cannot replace %s", p);
+  }
   D.dirty = false;
   D.saved_at = SDL_GetTicks64();
 }
@@ -130,7 +141,7 @@ void datause_pump(void) {
   u64 now[NET_GROUPS];
   net_traffic(now);
   int day = today();
-  bool moved = false, new_day = !D.n || D.d[D.n - 1].day != day;
+  bool moved = false, new_day = !D.n || day > D.d[D.n - 1].day;
   for (int g = 0; g < NET_GROUPS && !moved; g++) moved = now[g] != D.last[g];
   if (moved) {
     DuDay *x = day_slot(day);
@@ -143,11 +154,13 @@ void datause_pump(void) {
   if (D.dirty && (new_day || SDL_GetTicks64() - D.saved_at >= DU_SAVE_MS)) save();
 }
 
-void datause_shutdown(void) {
+void datause_flush(void) {
   if (!D.init) return;
   datause_pump();
   if (D.dirty) save();
 }
+
+void datause_shutdown(void) { datause_flush(); }
 
 void datause_get(FmDataUse *u) {
   memset(u, 0, sizeof *u);

@@ -11,8 +11,11 @@
 **     lyrics_clean cuts that down to an artist and a track before asking.
 **   - One song at a time: a worker fetches it (cancelled when the song
 **     changes) and the lines live in one table the main thread reads after
-**     the worker is done. The reply is cached on disk (lyrics/<hash>.json),
-**     a "not found" too, so a song costs the network once.
+**     the worker is done. The worker is detached and owns its request with
+**     the main thread (two references): a song change never waits for a
+**     connect that is stuck, and whoever lets go last frees it. The reply
+**     is cached on disk (lyrics/<hash>.json), a "not found" too, so a song
+**     costs the network once.
 **   - Drawing is time-based: the line being sung is found by binary search
 **     at the player's position; the list glides to it (ui_anim), which
 **     costs frames only while it moves.
@@ -32,6 +35,16 @@
 
 typedef struct LyLine { double t; char *s; } LyLine;
 
+/* One fetch: the worker's question and answer (two references). */
+typedef struct LyJob {
+  SDL_atomic_t refs;
+  volatile int cancel;
+  char artist[200], track[300];
+  char *reply;               /* the worker's result (JSON), NULL = failed */
+  size_t reply_len;
+  char err[160];
+} LyJob;
+
 static struct {
   char key[600];             /* artist|title asked for */
   int state;
@@ -40,15 +53,7 @@ static struct {
   LyLine *ln;
   int n;
   char *text;                /* the lines' storage */
-  /* the fetch */
-  SDL_Thread *thr;
-  SDL_atomic_t done;
-  volatile int cancel;
-  char q_artist[200], q_track[300];
-  double q_dur;
-  char *reply;               /* the worker's result (JSON), NULL = failed */
-  size_t reply_len;
-  char reply_err[160];
+  LyJob *job;                /* the fetch */
   /* plain lyrics scroll */
   FmScroll scroll;
 } L;
@@ -318,45 +323,50 @@ static bool get(const char *url, char **out, size_t *len, char *err, size_t cap,
   return ok;
 }
 
+static void job_unref(LyJob *j) {
+  if (!SDL_AtomicDecRef(&j->refs)) return;
+  fm_free(j->reply);
+  fm_free(j);
+}
+
 static int SDLCALL worker(void *u) {
-  FM_UNUSED(u);
+  LyJob *j = (LyJob *)u;
   char ae[600], te[900], url[1800];
-  net_urlencode(L.q_artist, ae, sizeof ae);
-  net_urlencode(L.q_track, te, sizeof te);
+  net_urlencode(j->artist, ae, sizeof ae);
+  net_urlencode(j->track, te, sizeof te);
   char *body = NULL;
   size_t len = 0;
   bool missing = false;
   /* the exact song first (the artist known), then a search */
-  if (L.q_artist[0]) {
+  if (j->artist[0]) {
     fm_snprintf(url, sizeof url, "https://lrclib.net/api/get?artist_name=%s&track_name=%s", ae, te);
-    get(url, &body, &len, L.reply_err, sizeof L.reply_err, &L.cancel, &missing);
+    get(url, &body, &len, j->err, sizeof j->err, &j->cancel, &missing);
   }
-  if (!body && !L.cancel && (missing || !L.q_artist[0])) {
+  if (!body && !j->cancel && (missing || !j->artist[0])) {
     char q[600], qe[1800];
-    fm_snprintf(q, sizeof q, "%s %s", L.q_artist, L.q_track);
+    fm_snprintf(q, sizeof q, "%s %s", j->artist, j->track);
     net_urlencode(q, qe, sizeof qe);
     fm_snprintf(url, sizeof url, "https://lrclib.net/api/search?q=%s", qe);
-    get(url, &body, &len, L.reply_err, sizeof L.reply_err, &L.cancel, &missing);
+    get(url, &body, &len, j->err, sizeof j->err, &j->cancel, &missing);
   }
-  L.reply = body;
-  L.reply_len = len;
-  SDL_AtomicSet(&L.done, 1);
-  app_wake();
+  j->reply = body;
+  j->reply_len = len;
+  if (!j->cancel) app_wake();
+  job_unref(j);
   return 0;
 }
 
 static void stop_fetch(void) {
-  if (!L.thr) return;
-  L.cancel = 1;
-  SDL_WaitThread(L.thr, NULL);
-  L.thr = NULL;
-  fm_free(L.reply);
-  L.reply = NULL;
+  if (!L.job) return;
+  L.job->cancel = 1;
+  job_unref(L.job);
+  L.job = NULL;
 }
 
 int lyrics_want(const char *artist, const char *title, double duration) {
   char a[200], t[300], key[600];
   lyrics_clean(artist, title, a, sizeof a, t, sizeof t);
+  FM_UNUSED(duration);
   if (!t[0]) return LY_NONE;
   fm_snprintf(key, sizeof key, "%s|%s", a, t);
   if (strcmp(key, L.key)) {                         /* another song */
@@ -373,34 +383,38 @@ int lyrics_want(const char *artist, const char *title, double duration) {
       if (!n) fm_strlcpy(L.msg, "LRCLIB has no lyrics for this song", sizeof L.msg);
       fm_free(cached);
     } else {
-      fm_strlcpy(L.q_artist, a, sizeof L.q_artist);
-      fm_strlcpy(L.q_track, t, sizeof L.q_track);
-      L.q_dur = duration;
-      L.reply_err[0] = 0;
-      L.cancel = 0;
-      SDL_AtomicSet(&L.done, 0);
+      LyJob *j = (LyJob *)fm_calloc(1, sizeof *j);
+      fm_strlcpy(j->artist, a, sizeof j->artist);
+      fm_strlcpy(j->track, t, sizeof j->track);
+      SDL_AtomicSet(&j->refs, 2);
       L.state = LY_LOADING;
-      L.thr = fm_thread_create(worker, "lyrics", NULL);
-      if (!L.thr) { L.state = LY_ERROR; fm_strlcpy(L.msg, "Cannot start a thread", sizeof L.msg); }
+      SDL_Thread *thr = fm_thread_create(worker, "lyrics", j);
+      if (thr) {
+        SDL_DetachThread(thr);
+        L.job = j;
+      } else {
+        fm_free(j);
+        L.state = LY_ERROR;
+        fm_strlcpy(L.msg, "Cannot start a thread", sizeof L.msg);
+      }
     }
   }
-  if (L.thr && SDL_AtomicGet(&L.done)) {            /* the fetch is in */
-    SDL_WaitThread(L.thr, NULL);
-    L.thr = NULL;
+  if (L.job && SDL_AtomicGet(&L.job->refs) == 1) {  /* the fetch is in */
+    LyJob *j = L.job;
+    L.job = NULL;
     char cp[FM_PATH_MAX];
-    if (L.reply) {
-      L.state = lyrics_parse(L.reply, L.reply_len);
-      if (L.state != LY_ERROR && cache_file(L.key, cp, sizeof cp)) write_file(cp, L.reply, L.reply_len);
-    } else if (!L.reply_err[0]) {                   /* nobody has it: remembered as an empty file */
+    if (j->reply) {
+      L.state = lyrics_parse(j->reply, j->reply_len);
+      if (L.state != LY_ERROR && cache_file(L.key, cp, sizeof cp)) write_file(cp, j->reply, j->reply_len);
+    } else if (!j->err[0]) {                        /* nobody has it: remembered as an empty file */
       L.state = LY_MISSING;
       fm_strlcpy(L.msg, "LRCLIB has no lyrics for this song", sizeof L.msg);
       if (cache_file(L.key, cp, sizeof cp)) write_file(cp, "", 0);
     } else {
       L.state = LY_ERROR;
-      fm_strlcpy(L.msg, L.reply_err, sizeof L.msg);
+      fm_strlcpy(L.msg, j->err, sizeof L.msg);
     }
-    fm_free(L.reply);
-    L.reply = NULL;
+    job_unref(j);
   }
   return L.state;
 }

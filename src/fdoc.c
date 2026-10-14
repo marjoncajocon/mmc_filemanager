@@ -167,16 +167,21 @@ static int target_run0(Par *p) {
   return p->cur >= 0 ? p->d->b[p->cur].run0 : p->d->nruns;
 }
 
+/* The open <a>'s link, -1 none; past the 24 kept (deeper nesting) there is none. */
+static int cur_link(const Par *p) {
+  return p->nlinks > 0 && p->nlinks <= (int)FM_COUNT(p->links) ? p->links[p->nlinks - 1] : -1;
+}
+
 static u8 style(Par *p) {
   return (u8)((p->bold ? DS_BOLD : 0) | (p->italic ? DS_ITALIC : 0) | (p->code ? DS_CODE : 0) |
-              (p->nlinks && p->links[p->nlinks - 1] >= 0 ? DS_LINK : 0) | (p->small ? DS_SMALL : 0) | (p->pre ? DS_PRE : 0));
+              (cur_link(p) >= 0 ? DS_LINK : 0) | (p->small ? DS_SMALL : 0) | (p->pre ? DS_PRE : 0));
 }
 
 static void add_run(Par *p, const char *s, size_t n) {
   if (!n) return;
   FmDoc *d = p->d;
   u8 st = style(p);
-  int link = st & DS_LINK ? p->links[p->nlinks - 1] : -1;
+  int link = st & DS_LINK ? cur_link(p) : -1;
   int r0 = target_run0(p);
   if (d->nruns > r0) {
     DocRun *last = &d->runs[d->nruns - 1];
@@ -380,8 +385,8 @@ static void image(Par *p, const Attrs *a) {
   im->w = a->width;
   im->h = a->height;
   im->layer_of = -1;
-  int link = p->nlinks ? p->links[p->nlinks - 1] : -1;
-  if (link >= 0) im->href = fm_strdup(d->links[link]);
+  int link = cur_link(p);
+  if (link >= 0 && link < d->nlinks) im->href = fm_strdup(d->links[link]);
   int idx = d->nimgs++;
   if (p->ov_at && p->ov_img < 0) p->ov_img = idx;
   if (p->tdepth >= 1) {
@@ -420,8 +425,16 @@ static bool skip_this(Par *p, const char *tag, const Attrs *a) {
   return false;
 }
 
+/* "</caption>" may be left out: a row, a cell or the table's end closes it */
+static void close_caption(Par *p) {
+  if (!p->caption) return;
+  end_block(p);
+  p->caption = false;
+}
+
 static void finish_table(Par *p) {
   FmDoc *d = p->d;
+  close_caption(p);
   close_cell(p);
   DocTable *t = &d->tabs[p->tab];
   t->ncell = d->ncells - t->cell0;
@@ -659,12 +672,14 @@ static void start_tag(Par *p, const char *t, const Attrs *a) {
     }
   }
   if (p->tdepth == 1 && tag_is(t, "tr")) {
+    close_caption(p);
     close_cell(p);
     p->row++;
     p->col = 0;
     return;
   }
   if (p->tdepth == 1 && (tag_is(t, "td") || tag_is(t, "th"))) {
+    close_caption(p);
     close_cell(p);
     if (p->row < 0) p->row = 0;
     GROW(d->cells, d->ncells, d->ccells, DocCell);
@@ -1040,7 +1055,7 @@ static float lay_inline(FmDoc *d, int run0, int nrun, float maxw, float fs, bool
         int k = i, fit = i;
         float fw = 0;
         while (k < j) {
-          int cl = cp_bytes((u8)t[k]);
+          int cl = FM_MIN(cp_bytes((u8)t[k]), j - k);   /* bad UTF-8 never runs past the word */
           float nw = measure(t + i, k + cl - i, face, size, mono);
           if (nw > maxw - x && fit > i) break;
           fit = k + cl;

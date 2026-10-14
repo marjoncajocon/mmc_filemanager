@@ -165,7 +165,9 @@ static double display_period(void) {
     asked = now;
     SDL_DisplayMode m;
     int d = app.win ? SDL_GetWindowDisplayIndex(app.win) : 0;
-    if (SDL_GetCurrentDisplayMode(d < 0 ? 0 : d, &m) == 0 && m.refresh_rate >= 20 && m.refresh_rate <= 500)
+    float hz = plat_refresh_hz();      /* Android: the rate in use (SDL's goes stale after a mode switch) */
+    if (hz >= 20 && hz <= 500) period = 1000.0 / hz;
+    else if (SDL_GetCurrentDisplayMode(d < 0 ? 0 : d, &m) == 0 && m.refresh_rate >= 20 && m.refresh_rate <= 500)
       period = 1000.0 / m.refresh_rate;
   }
   return period;
@@ -310,15 +312,19 @@ static void frame(void) {
   if ((float)w != ui.w || (float)h != ui.h) ui_update_scale();
   u64 t0 = SDL_GetTicks64();
   gfx_begin(w, h, T.bg);
+  ui.frame_period = (float)(display_period() / 1000.0);
   ui_begin();
   app_frame();
   ui_end();
   gfx_end();
   pressed_now = false;
   /* presented or not: at most one frame per display frame, and per the maximum frame rate */
-  double period = display_period();
-  if (ui.max_fps > 0) period = FM_MAX(period, 1000.0 / ui.max_fps);
-  g_pace_until = t0 + (u64)(period + 0.5);
+  double disp = display_period(), period = disp;
+  if (ui.max_fps > 0 && SDL_GetTicks64() >= ui.scroll_until) period = FM_MAX(period, 1000.0 / ui.max_fps);
+  /* at the screen's rate the present's vsync wait paces; the timer only
+  ** keeps same-picture frames from spinning, so it must run a little
+  ** faster than the display (17 ms for 16.67 left a vsync empty every ~0.5 s) */
+  g_pace_until = t0 + (u64)(period <= disp ? disp * 0.85 : period + 0.5);
 }
 
 #ifdef __EMSCRIPTEN__

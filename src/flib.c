@@ -305,8 +305,17 @@ void lib_note_played(const char *path) {
       !(plat_place(PLACE_TEMP, tmp, sizeof tmp) && fm_path_is_inside(path, tmp)))
     return;
   if (g.nrecent > 0 && path_cmp(g.recent[0], path) == 0) return;
-  for (int i = 0; i < g.nrecent; i++)
-    if (path_cmp(g.recent[i], path) == 0) { recent_remove_at(i); break; }
+  /* one already there moves to the front, not freed: `path` may be that
+  ** very string (the Recent section opening one of its rows) */
+  for (int i = 1; i < g.nrecent; i++)
+    if (path_cmp(g.recent[i], path) == 0) {
+      char *s = g.recent[i];
+      memmove(g.recent + 1, g.recent, sizeof(char *) * (size_t)i);
+      g.recent[0] = s;
+      g.dirty = true;
+      g.data.gen++;
+      return;
+    }
   if (g.nrecent == LIB_RECENT_MAX) recent_remove_at(g.nrecent - 1);
   memmove(g.recent + 1, g.recent, sizeof(char *) * (size_t)g.nrecent);
   g.recent[0] = fm_strdup(path);

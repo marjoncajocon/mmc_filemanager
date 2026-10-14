@@ -157,7 +157,10 @@ typedef struct WkTask {
   SDL_atomic_t permille;      /* download progress, 0..1000 */
 } WkTask;
 
-static WkTask *g_dropped[16];
+/* Grows instead of joining when full: a join would wait on the network (a
+** whole Gutenberg book) with the UI stopped. */
+static WkTask **g_dropped;
+static int g_ndropped, g_capdropped;
 static char g_mw_key[80];      /* the user's Merriam-Webster key (wiki.txt "M"), read by the workers */
 
 static bool cache_path(const char *url, char *out, size_t cap) {
@@ -258,7 +261,7 @@ static int task_main(void *u) {
           memset(&r, 0, sizeof r);
           bool wm = strstr(u, "wikimedia.org") != NULL;
           t->err = net_download(u, wm ? wk_headers() : NULL, t->path, dl_progress, t, &r, &t->cancel);
-          if (t->err == FM_OK && r.status != 200) {
+          if (t->err != FM_ERR_CANCEL && r.status && r.status != 200) {   /* net_download fails non-2xx itself */
             t->err = FM_ERR_IO;
             if (r.status >= 500) fm_snprintf(t->error, sizeof t->error, "The server is not answering right now (%d): try again later", r.status);
             else fm_snprintf(t->error, sizeof t->error, "The server answered %d", r.status);
@@ -310,14 +313,17 @@ static void task_drop(WkTask **pt) {
   *pt = NULL;
   if (!t) return;
   t->cancel = 1;
-  for (int i = 0; i < FM_COUNT(g_dropped); i++)
-    if (!g_dropped[i]) { g_dropped[i] = t; return; }
-  task_free(t);                                       /* the list is full: wait now */
+  if (g_ndropped == g_capdropped) {
+    g_capdropped = g_capdropped ? g_capdropped * 2 : 16;
+    g_dropped = (WkTask **)fm_realloc(g_dropped, sizeof *g_dropped * (size_t)g_capdropped);
+  }
+  g_dropped[g_ndropped++] = t;
 }
 
 static void reap(void) {
-  for (int i = 0; i < FM_COUNT(g_dropped); i++)
-    if (g_dropped[i] && task_done(g_dropped[i])) { task_free(g_dropped[i]); g_dropped[i] = NULL; }
+  for (int i = 0; i < g_ndropped;)
+    if (task_done(g_dropped[i])) { task_free(g_dropped[i]); g_dropped[i] = g_dropped[--g_ndropped]; }
+    else i++;
 }
 
 /* ---- state ----------------------------------------------------------------------- */
@@ -384,6 +390,7 @@ static struct {
   struct { int src; char lang[WK_LANG], id[64], title[256]; float y; } stack[WK_STACK];
   int nstack;
   int back_page;               /* a sub-page returns here */
+  int art_back;                /* the article chain's Back, once the stack is empty: home or results */
   /* find in page */
   bool find_open, find_focus;
   char find_q[128], find_ran[128];
@@ -640,7 +647,7 @@ static void article_start(int src, const char *lang, const char *id, const char 
 
 static void search_start(const char *q, bool more) {
   if (!q || !q[0]) return;
-  if (cur()->kind == SK_DICT || cur()->kind == SK_MW) {   /* a word opens at once */
+  if (!more && (cur()->kind == SK_DICT || cur()->kind == SK_MW)) {   /* a word opens at once; more: res_src's */
     article_start(S.src, "en", NULL, q, true);
     return;
   }
@@ -668,6 +675,14 @@ static void search_start(const char *q, bool more) {
 /* Opens an article; push: the one on screen goes on the Back stack. */
 static void article_start(int src, const char *lang, const char *id, const char *title, bool push) {
   if ((!title || !title[0]) && (!id || !id[0])) return;
+  /* opened from home, results or the lists (the article not on screen): a
+  ** new chain, so Back leads where the user was, not to an article (or a
+  ** source's results) left before */
+  if (S.page != WP_ARTICLE && !(is_sub(S.page) && S.back_page == WP_ARTICLE)) {
+    S.nstack = 0;
+    push = false;
+    S.art_back = S.page == WP_RESULTS ? WP_RESULTS : WP_HOME;
+  }
   if (push && S.art_ok && S.nstack < WK_STACK) {
     S.stack[S.nstack].src = S.art_src;
     fm_strlcpy(S.stack[S.nstack].lang, S.art.lang, sizeof S.stack[0].lang);
@@ -765,7 +780,7 @@ static void go_back(void) {
         return;
       }
       task_drop(&S.t_art);
-      go(S.res.n || S.t_search ? WP_RESULTS : WP_HOME);
+      go(S.art_back == WP_RESULTS && (S.res.n || S.t_search) ? WP_RESULTS : WP_HOME);
       return;
     case WP_RESULTS: go(WP_HOME); return;
     default: wiki_close(); return;
@@ -1708,7 +1723,8 @@ static void find_close(void) {
 
 static void find_bar(FmRect r) {
   float bh = DP(ui.touch_mode ? 52 : 46), w = FM_MIN(r.w - DP(16), DP(560));
-  FmRect c = { r.x + (r.w - w) * 0.5f, r.y + r.h - bh - DP(10), w, bh };
+  float bottom = FM_MIN(r.y + r.h, ui.h - ui_keyboard_h());   /* above the on-screen keyboard */
+  FmRect c = { r.x + (r.w - w) * 0.5f, bottom - bh - DP(10), w, bh };
   gfx_shadow(c, DP(12), DP(12), col_alpha(T.shadow, 0.8f));
   gfx_rrect(c, DP(12), T.surface2);
   gfx_rrect_line(c, DP(12), DP(1), T.border);
@@ -1751,7 +1767,7 @@ static void page_article(FmRect r) {
   float col = FM_MIN(r.w - DP(32), DP(780));
   float x = r.x + (r.w - col) * 0.5f;
   FmDoc *doc = S.art.doc;
-  S.art_view_h = r.h;
+  S.art_view_h = FM_MAX(DP(40), FM_MIN(r.h, ui.h - ui_keyboard_h() - r.y));   /* find: the part the keyboard leaves */
   if (doc) {
     S.lay_total = doc_layout(doc, col, txt());
   } else {
@@ -2193,6 +2209,7 @@ static void page_picklang(FmRect r) {
     if (ui_radio(ui_idn(base, (u32)i), c, kLangs[i].name, on) && !on) {
       fm_strlcpy(S.lang, kLangs[i].code, sizeof S.lang);
       save_file();
+      task_drop(&S.t_search);                        /* its results are in the old language */
       wk_list_free(&S.res);
       S.res_error[0] = 0;
       go(WP_HOME);
@@ -2232,6 +2249,8 @@ bool wiki_open_saved(const char *key) {
 
 void wiki_close(void) {
   S.open = false;
+  task_drop(&S.t_play);                              /* no viewer pops up over what the user went to */
+  task_drop(&S.t_image);
   ui_focus(0);
   ui_redraw();
 }
@@ -2344,8 +2363,10 @@ void wiki_shutdown(void) {
   task_drop(&S.t_play);
   task_drop(&S.t_image);
   task_drop(&S.t_random);
-  for (int i = 0; i < FM_COUNT(g_dropped); i++)
-    if (g_dropped[i]) { task_free(g_dropped[i]); g_dropped[i] = NULL; }
+  for (int i = 0; i < g_ndropped; i++) task_free(g_dropped[i]);
+  fm_free(g_dropped);
+  g_dropped = NULL;
+  g_ndropped = g_capdropped = 0;
   wk_feed_free(&S.feed);
   wk_list_free(&S.browse);
   wk_list_free(&S.res);

@@ -539,10 +539,12 @@ int sink_remaining(FmArcSink *s) { return s->remaining; }
 
 #ifdef FM_POSIX
 /* True when `target`, read from the folder holding `rel`, stays below the
-** destination root. */
+** destination root. ".." is only allowed before the first name: a name may
+** be another link ("s" -> "."), so "s/.." would climb out lexically unseen. */
 static bool link_inside(const char *rel, const char *target) {
   if (!target[0] || target[0] == '/') return false;
   int depth = 0;
+  bool named = false;
   for (const char *p = rel; *p; p++) if (*p == '/') depth++;
   const char *s = target;
   while (*s) {
@@ -550,9 +552,10 @@ static bool link_inside(const char *rel, const char *target) {
     while (*e && *e != '/') e++;
     size_t len = (size_t)(e - s);
     if (len == 2 && s[0] == '.' && s[1] == '.') {
-      if (--depth < 0) return false;
+      if (named || --depth < 0) return false;
     } else if (len && !(len == 1 && s[0] == '.')) {
       depth++;
+      named = true;
     }
     s = *e ? e + 1 : e;
   }

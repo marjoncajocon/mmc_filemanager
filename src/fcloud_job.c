@@ -399,10 +399,20 @@ static FmErr upload_to(CJob *c, int i, const char *parent_id, const char *name, 
   return r;
 }
 
+/* A service's name as one local name: services (and shared links) allow
+** "..", '/' and '\\', which would otherwise write outside the target. */
+static void local_name(const char *name, char *out, size_t cap) {
+  fm_strlcpy(out, name, cap);
+  for (char *s = out; *s; s++)
+    if (*s == '/' || *s == '\\') *s = '_';
+  if (!out[0] || !strcmp(out, ".") || !strcmp(out, "..")) fm_strlcpy(out, "_", cap);
+}
+
 static void put_local(CJob *c, int i, const char *pdest) {
   Item *it = &c->it[i];
-  char dst[FM_PATH_MAX];
-  if (!fm_path_join(dst, sizeof dst, pdest, it->name)) {
+  char dst[FM_PATH_MAX], name[256];
+  local_name(it->name, name, sizeof name);
+  if (!fm_path_join(dst, sizeof dst, pdest, name)) {
     fail(c, i, FM_ERR_IO, "Path too long");
     return;
   }
@@ -414,14 +424,14 @@ static void put_local(CJob *c, int i, const char *pdest) {
   }
   bool replace = false;
   if (exists) {
-    FmConflict k = ask(c, i, pdest, it->name, (ds.flags & FM_ST_DIR) != 0, ds.size, ds.mtime);
+    FmConflict k = ask(c, i, pdest, name, (ds.flags & FM_ST_DIR) != 0, ds.size, ds.mtime);
     if (k == CONFLICT_SKIP || k == CONFLICT_CANCEL) {
       if (k == CONFLICT_SKIP) skipped(c, i);
       else mark_bad(c, i);
       return;
     }
     if (k == CONFLICT_KEEP_BOTH) {
-      if (!ops_unique_name(pdest, it->name, dst, sizeof dst)) { skipped(c, i); return; }
+      if (!ops_unique_name(pdest, name, dst, sizeof dst)) { skipped(c, i); return; }
     } else if (ds.flags & FM_ST_DIR) {
       fail(c, i, FM_ERR_EXISTS, "A folder with this name exists");
       if (!it->dir) ops_job_bytes(c->j, it->size);

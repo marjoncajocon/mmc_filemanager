@@ -49,6 +49,14 @@ struct FmVsrcItem;
 struct FmVsrcStream;
 bool video_open_online(const struct FmVsrc *src, const struct FmVsrcConf *conf, const struct FmVsrcItem *item,
                        const struct FmVsrcStream *st, u64 t_click);
+/* The same, played in the result's thumbnail (video_inline_draw), with a
+** button to the full player; Back there returns to the thumbnail. */
+bool video_open_online_inline(const struct FmVsrc *src, const struct FmVsrcConf *conf, const struct FmVsrcItem *item,
+                       const struct FmVsrcStream *st, u64 t_click);
+bool video_inline_active(void);
+bool video_inline_is(const struct FmVsrcItem *item);   /* the result playing inline */
+void video_inline_draw(FmRect r, float radius);        /* in the result's thumbnail rect */
+void video_inline_stop(void);
 
 /* The next image viewer opened on a single file shows `title` in its bar
 ** instead of the file name (online photos open a cached file). NULL clears. */
@@ -185,5 +193,8 @@ void audio_prev_track(void);
 bool video_media_info(FmMediaInfo *m);
 void video_media_toggle(void);         /* play/pause the video */
 void video_app_hidden(void);           /* the app left the screen: a playing video goes on as sound */
+void video_app_shown(void);            /* back on screen: that video shows its picture again */
+void video_render_reset(void);         /* SDL_RENDER_DEVICE_RESET: the picture is uploaded again */
+void video_shutdown(void);             /* app exit: closes the player, gives closing decoders a moment */
 
 #endif

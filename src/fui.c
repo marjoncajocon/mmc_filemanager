@@ -137,6 +137,35 @@ static void finger_update(void) {
 
 static int g_input_trace = -1;        /* MMCFM_INPUT_TRACE=1: where presses land (device debugging) */
 
+/* The pointer's recent positions while pressed, stamped with event times
+** (not frame times), for the fling velocity at release. */
+#define VT_N 16
+static struct { u32 t; float y; } g_vt[VT_N];
+static int g_vt_n, g_vt_i;
+static u32 g_vt_up;
+
+static void vt_add(u32 t, float y) {
+  g_vt[g_vt_i].t = t;
+  g_vt[g_vt_i].y = y;
+  g_vt_i = (g_vt_i + 1) % VT_N;
+  if (g_vt_n < VT_N) g_vt_n++;
+}
+
+/* px/s over the last ~80 ms before the release; 0 when the finger stood still before lifting */
+static float vt_velocity(void) {
+  if (g_vt_n < 2) return 0;
+  int last = (g_vt_i + VT_N - 1) % VT_N, k = last;
+  u32 t1 = g_vt[last].t;
+  if (g_vt_up - t1 > 60) return 0;
+  for (int n = 1; n < g_vt_n; n++) {
+    int p = (k + VT_N - 1) % VT_N;
+    if (t1 - g_vt[p].t > 80) break;
+    k = p;
+  }
+  if (t1 == g_vt[k].t) return 0;
+  return (g_vt[last].y - g_vt[k].y) * 1000.0f / (float)(t1 - g_vt[k].t);
+}
+
 void ui_event(const SDL_Event *e) {
   if (g_input_trace < 0) g_input_trace = getenv("MMCFM_INPUT_TRACE") != NULL;
   int trace = g_input_trace;
@@ -156,6 +185,7 @@ void ui_event(const SDL_Event *e) {
         float dx = ui.mx - ui.press_x, dy = ui.my - ui.press_y;
         if (dx * dx + dy * dy > slop() * slop()) ui.moved = true;
       }
+      if (ui.down) vt_add(e->motion.timestamp, ui.my);
       ui.redraw = FM_MAX(ui.redraw, 1);
       break;
     case SDL_MOUSEBUTTONDOWN:
@@ -171,6 +201,8 @@ void ui_event(const SDL_Event *e) {
         ui.press_t = SDL_GetTicks64();
         ui.moved = false;
         ui.long_fired = false;
+        g_vt_n = 0;
+        vt_add(e->button.timestamp, ui.my);
       } else if (e->button.button == SDL_BUTTON_RIGHT) {
         ui.rpressed = true;
       }
@@ -182,6 +214,7 @@ void ui_event(const SDL_Event *e) {
       if (e->button.button == SDL_BUTTON_LEFT) {
         ui.down = false;
         ui.released = true;
+        g_vt_up = e->button.timestamp;
       }
       ui.redraw = FM_MAX(ui.redraw, 2);
       break;
@@ -339,7 +372,17 @@ static int blink_phase(u64 now) { return (int)(((now - g_te.blink0) / 530) % 2);
 
 void ui_begin(void) {
   u64 now = SDL_GetTicks64();
-  ui.dt = g_last_frame ? (float)(now - g_last_frame) / 1000.0f : 1.0f / 60.0f;
+  /* dt from the high-resolution clock (whole ms made a 120 Hz frame 8 or 9
+  ** ms, flings stepped unevenly), snapped to whole display frames when it is
+  ** close: frames are shown at vsync, whatever the wake-up jitter was */
+  static u64 pc_last;
+  u64 pc = SDL_GetPerformanceCounter();
+  ui.dt = pc_last ? (float)((double)(pc - pc_last) / (double)SDL_GetPerformanceFrequency()) : 1.0f / 60.0f;
+  pc_last = pc;
+  if (ui.frame_period > 0) {
+    float n = roundf(ui.dt / ui.frame_period);
+    if (n >= 1 && fabsf(ui.dt - n * ui.frame_period) < 0.25f * ui.frame_period) ui.dt = n * ui.frame_period;
+  }
   if (ui.dt > 0.1f) ui.dt = 0.1f;
   g_last_frame = now;
   ui.now = now;
@@ -744,8 +787,13 @@ bool ui_slider(u32 id, FmRect r, float *v, float lo, float hi) {
   gfx_rrect(FM_RECT(x0, cy - th * 0.5f, (x1 - x0) * t, th), th * 0.5f, T.accent);
   gfx_circle(x0 + (x1 - x0) * t, cy, kr, T.accent);
   bool changed = false;
-  if (f & UI_HELD) {
-    ui.drag_owner = id;
+  /* touch: a finger landing on the slider may be scrolling the list under
+  ** it, so the value follows only a tap or a drag the list did not take */
+  bool act = (f & UI_HELD) != 0;
+  if (ui.from_touch)
+    act = (act && ui.moved && (ui.drag_owner == 0 || ui.drag_owner == id)) || (f & UI_CLICK);
+  if (act) {
+    if (f & UI_HELD) ui.drag_owner = id;
     float nt = (ui.mx - x0) / (x1 - x0);
     nt = FM_CLAMP(nt, 0.0f, 1.0f);
     float nv = lo + (hi - lo) * nt;
@@ -844,10 +892,13 @@ static void te_delete_sel(char *buf) {
 static bool te_insert(char *buf, int cap, const char *s, int n) {
   int len = (int)strlen(buf);
   /* drop control chars and newlines */
-  char clean[256];
-  int m = 0;
-  for (int i = 0; i < n && m < (int)sizeof clean - 1; i++)
+  char clean[FM_PATH_MAX];             /* the biggest field: a pasted path or link fits whole */
+  int m = 0, i = 0;
+  for (; i < n && m < (int)sizeof clean - 1; i++)
     if ((u8)s[i] >= 0x20 && s[i] != 0x7F) clean[m++] = s[i];
+  /* cut by the buffer in the middle of a code point: drop its first half */
+  if (i < n && ((u8)s[i] & 0xC0) == 0x80)
+    while (m > 0 && ((u8)clean[--m] & 0xC0) == 0x80) {}
   /* Shortened to fit: never split a code point. Only then: clean[m] past the
   ** cleaned text is not initialised, and reading it dropped typed characters
   ** at random (every key arrives on its own on Android). */
@@ -922,7 +973,14 @@ int ui_textfield(u32 id, FmRect r, char *buf, int cap, const char *hint, int fla
     g_tf_autofocus_done = id;
     ui_focus(id);
   }
-  if ((f & UI_PRESS) && ui.focus != id) ui_focus(id);
+  /* touch: focus on a tap, not on the press: a swipe that starts on the
+  ** field scrolls the list instead (it popped the keyboard up, the layout
+  ** moved, and the next tap landed on the wrong widget) */
+  int tap = ui.from_touch ? UI_CLICK : UI_PRESS;
+  if (ui.from_touch && ui.released && ui.long_fired && ui.active == id && !ui.moved && ui_input_ok() &&
+      pointer_in(r))
+    f |= UI_CLICK;                     /* a finger held still on the field is a tap too */
+  if ((f & tap) && ui.focus != id) ui_focus(id);
   bool focused = ui.focus == id;
   if (focused) g_tf_seen = id;
 
@@ -939,8 +997,8 @@ int ui_textfield(u32 id, FmRect r, char *buf, int cap, const char *hint, int fla
     g_te.scroll = 0;
     g_te.blink0 = ui.now;
     g_te.selecting = false;
-    if (f & UI_PRESS) g_te.caret = g_te.anchor = te_hit(buf, pw, x0, ui.mx);
-    f &= ~UI_PRESS;
+    if (f & tap) g_te.caret = g_te.anchor = te_hit(buf, pw, x0, ui.mx);
+    f &= ~tap;
   }
 
   if (focused && ui_input_ok()) {
@@ -948,7 +1006,7 @@ int ui_textfield(u32 id, FmRect r, char *buf, int cap, const char *hint, int fla
     if (g_te.caret > n) g_te.caret = n;
     if (g_te.anchor > n) g_te.anchor = n;
     /* mouse */
-    if (f & UI_PRESS) {
+    if (f & tap) {
       g_te.caret = te_hit(buf, pw, x0 - g_te.scroll, ui.mx);
       if (!(ui.mod & KMOD_SHIFT)) g_te.anchor = g_te.caret;
       if (ui.clicks >= 2) {
@@ -963,8 +1021,9 @@ int ui_textfield(u32 id, FmRect r, char *buf, int cap, const char *hint, int fla
       g_te.caret = te_hit(buf, pw, x0 - g_te.scroll, ui.mx);
     }
     if (!ui.down) g_te.selecting = false;
-    /* a press anywhere else drops focus */
-    if (ui.pressed && !rect_has(r, ui.press_x, ui.press_y)) ui.focus = 0;
+    /* a press anywhere else drops focus (touch: a tap, so scrolling keeps it) */
+    if ((ui.from_touch ? ui.released && !ui.moved : ui.pressed) && !rect_has(r, ui.press_x, ui.press_y))
+      ui.focus = 0;
 
     /* keys */
     for (int i = 0; i < ui.nkeys; i++) {
@@ -1057,7 +1116,7 @@ int ui_textfield(u32 id, FmRect r, char *buf, int cap, const char *hint, int fla
   if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_IBEAM);
 
   char disp[1024];
-  int map[512];
+  int map[1024];                       /* every byte of the biggest field (FM_PATH_MAX) */
   te_display(buf, pw, disp, sizeof disp, map, FM_COUNT(map));
   float fh = font_line_h(ui.m.font);
   float ty = r.y + (r.h - fh) * 0.5f;
@@ -1115,13 +1174,13 @@ void ui_scroll(FmScroll *s, u32 id, FmRect view, float content_h) {
       (ui.from_touch || ui.touch_mode) &&
       fabsf(ui.my - ui.press_y) > fabsf(ui.mx - ui.press_x)) {
     ui.drag_owner = id;
-    s->drag_y0 = ui.my;
+    s->drag_y0 = ui.press_y + (ui.my > ui.press_y ? slop() : -slop());   /* follows at once, less the slop */
     s->drag_off0 = s->y;
     s->vel = 0;
     dragging = true;
   }
   if (dragging) {
-    if (ui.down) {
+    if (ui.down || ui.released) {      /* the release frame still takes the last move */
       float ny = s->drag_off0 - (ui.my - s->drag_y0);
       /* rubber band past the ends */
       if (ny < 0) ny = ny / 3.0f;
@@ -1132,13 +1191,16 @@ void ui_scroll(FmScroll *s, u32 id, FmRect view, float content_h) {
       }
       s->y = ny;
       s->last_move = ui.now;
+      if (!ui.down) s->vel = (ny < 0 || ny > s->max) ? 0 : -vt_velocity();
     }
+    ui.scroll_until = ui.now + 150;
   } else if (fabsf(s->vel) > 1.0f) {
     s->y += s->vel * ui.dt;
     s->vel *= expf(-ui.dt * 3.2f);
     if (fabsf(s->vel) < DP(12)) s->vel = 0;
     if (s->y < -DP(60) || s->y > s->max + DP(60)) s->vel = 0;
     s->last_move = ui.now;
+    ui.scroll_until = ui.now + 150;
     ui_animate();
   }
   if (!dragging || !ui.down) {

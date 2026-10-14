@@ -1591,6 +1591,7 @@ static void draw_tray(void) {
   }
   x += ow + DP(8);
   bool fin = false;
+  n = adl_count();                        /* Remove above may have shortened the list */
   for (int i = 0; i < n; i++) fin |= adl_at(i)->state != AD_RUNNING && adl_at(i)->state != AD_QUEUED;
   if (fin) {
     const char *lc = "Clear";

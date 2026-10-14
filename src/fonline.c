@@ -60,6 +60,7 @@ static struct {
   FmScroll tray_scroll;
   OnTask *prep;
   bool prep_open;
+  bool prep_inline;            /* the result plays in its own thumbnail once resolved (no sheet unless it fails) */
   int prep_state;
   FmVsrcItem prep_item;
   const FmVsrc *prep_src;
@@ -67,8 +68,9 @@ static struct {
   float prep_frac;
   char prep_status[160];
   /* abandoned tasks, joined once their threads return */
-  OnTask *dead[16];
-  int ndead;
+  bool inline_seen;            /* a card drew the video playing inline this frame */
+  OnTask **dead;
+  int ndead, cdead;
   bool settings_focus;
   /* --demo-online */
   char demo_state[24];
@@ -124,8 +126,12 @@ static bool src_url_only(const FmVsrc *s) { return s && (s->flags & VSRC_URL); }
 static void drop_task(OnTask *t) {
   if (!t) return;
   t->cancel = 1;
-  if (S.ndead < FM_COUNT(S.dead)) S.dead[S.ndead++] = t;
-  else otask_free(t, true);          /* full: wait for this one */
+  /* the list grows: waiting here for a task stuck in the network froze the UI */
+  if (S.ndead == S.cdead) {
+    S.cdead = S.cdead ? S.cdead * 2 : 16;
+    S.dead = (OnTask **)fm_realloc(S.dead, (size_t)S.cdead * sizeof *S.dead);
+  }
+  S.dead[S.ndead++] = t;
 }
 
 static void reap(void) {
@@ -384,6 +390,7 @@ static void take_search(void) {
 /* ---- playing ------------------------------------------------------------------------------------ */
 
 static void prep_fail(const char *msg) {
+  S.prep_open = true;
   S.prep_state = PREP_FAIL;
   fm_strlcpy(S.prep_err, msg, sizeof S.prep_err);
   ui_redraw();
@@ -392,8 +399,10 @@ static void prep_fail(const char *msg) {
 static void play_item(const FmVsrc *s, const FmVsrcItem *it) {
   if (!s) return;
   if (S.prep) { drop_task(S.prep); S.prep = NULL; }
+  video_inline_stop();               /* one video at a time */
   S.detail_open = false;
-  S.prep_open = true;
+  S.prep_open = false;                 /* the thumbnail shows the opening; the sheet comes back for a failure */
+  S.prep_inline = true;
   S.prep_state = PREP_RUN;
   S.prep_item = *it;
   S.prep_src = s;
@@ -421,7 +430,12 @@ static void take_prep(void) {
   if (t->err == FM_OK) {
     /* streams and cache files alike: the player gets the quality list and
     ** handles expired links and the cache fallback itself */
-    if (video_open_online(S.prep_src, &t->conf, &S.prep_item, &t->stream, t->t0)) {
+    /* in its thumbnail while it is among the results, else the full player */
+    bool listed = false;
+    for (int i = 0; i < S.n && !listed; i++) listed = !strcmp(S.items[i].id, S.prep_item.id) && !strcmp(S.items[i].page, S.prep_item.page);
+    bool ok = listed && S.prep_inline ? video_open_online_inline(S.prep_src, &t->conf, &S.prep_item, &t->stream, t->t0)
+                                      : video_open_online(S.prep_src, &t->conf, &S.prep_item, &t->stream, t->t0);
+    if (ok) {
       S.prep_open = false;
     } else {
       prep_fail("The player could not open the stream.");
@@ -591,17 +605,36 @@ static void skeleton_card(FmRect c, const Grid *g, int k) {
 static void card(FmRect c, u32 id, int i, const Grid *g) {
   const FmVsrcItem *it = &S.items[i];
   FmRect hit = rect_inset(c, -DP(6));
+  FmRect thumb = { c.x, c.y, c.w, g->th };
+  float rad = DP(12);
+  /* playing here: the thumbnail is the player (its own taps); the text below opens the details */
+  bool inl = video_inline_is(it);
+  bool opening = !inl && S.prep && S.prep_inline && !S.prep_open && !strcmp(it->id, S.prep_item.id) &&
+                 !strcmp(it->page, S.prep_item.page);
+  if (inl) {
+    S.inline_seen = true;
+    hit = FM_RECT(c.x - DP(6), thumb.y + thumb.h, c.w + DP(12), c.h - thumb.h + DP(6));
+    if (video_inline_active()) video_inline_draw(thumb, rad);
+    else thumb_box(thumb, it, rad);    /* its full player is up */
+  }
   int f = ui_hit(id, hit);
   float hv = ui.touch_mode ? 0 : ui_anim(ui_idn(id, 1), (f & UI_HOVER) ? 1.0f : 0.0f, 14.0f);
   if (hv > 0.01f) gfx_rrect(hit, DP(16), col_alpha(T.hover, hv));
   if (f & UI_HELD) gfx_rrect(hit, DP(16), T.press);
-  FmRect thumb = { c.x, c.y, c.w, g->th };
-  float rad = DP(12);
-  thumb_box(thumb, it, rad);
-  badge(thumb, it, 1);
   bool clicked_play = false;
-  float pa = ui.touch_mode ? 1.0f : hv;
-  if (pa > 0.01f) clicked_play = play_disc(ui_idn(id, 2), thumb, pa, DP(ui.touch_mode ? 52 : 56));
+  if (!inl) {
+    thumb_box(thumb, it, rad);
+    badge(thumb, it, 1);
+    float pa = ui.touch_mode ? 1.0f : hv;
+    if (opening) {                     /* finding the stream: a spinner where the play button was */
+      float s = DP(40);
+      FmRect sp = rect_center(thumb, s, s);
+      gfx_circle(sp.x + s * 0.5f, sp.y + s * 0.5f, s * 0.75f, col_alpha(FM_RGBA(0, 0, 0, 255), 0.6f));
+      ui_spinner(sp, WHITE);
+    } else if (pa > 0.01f) {
+      clicked_play = play_disc(ui_idn(id, 2), thumb, pa, DP(ui.touch_mode ? 52 : 56));
+    }
+  }
   /* text */
   float y = thumb.y + thumb.h + DP(12);
   if (g->avatar) avatar(FM_RECT(c.x, y, DP(36), DP(36)), it->channel);
@@ -611,6 +644,7 @@ static void card(FmRect c, u32 id, int i, const Grid *g) {
   ofmt_meta(it, meta, sizeof meta);
   font_draw_ellipsis(FONT_REGULAR, ui.m.font_small, x, y + g->title_lh * (float)lines + DP(2), meta, w, T.text2);
   if (clicked_play) { play_item(cur_src(), it); return; }
+  if (opening && (f & UI_CLICK)) return;      /* it is opening already */
   if (f & UI_CLICK) open_detail(it);
   else if ((f & UI_RCLICK) || (f & UI_LONG)) open_menu(i, ui.mx, ui.my);
 }
@@ -1240,6 +1274,7 @@ static void draw_src_chips(FmRect r) {
 
 static void go_back(void) {
   if (ui.focus == ui_id("on.search")) { ui_focus(0); return; }
+  if (video_inline_active()) { video_inline_stop(); return; }   /* Back stops the video first */
   online_close();
 }
 
@@ -1623,7 +1658,9 @@ void online_shutdown(void) {
   if (S.prep) otask_free(S.prep, true);
   for (int i = 0; i < S.ndead; i++) S.dead[i]->cancel = 1;
   for (int i = 0; i < S.ndead; i++) otask_free(S.dead[i], true);
-  S.ndead = 0;
+  fm_free(S.dead);
+  S.dead = NULL;
+  S.ndead = S.cdead = 0;
   S.search = S.prep = NULL;
   odl_shutdown();
   oinst_shutdown();
@@ -1658,6 +1695,7 @@ void online_open(const char *source) {
 }
 
 void online_close(void) {
+  video_inline_stop();
   S.open = false;
   S.detail_open = S.tray_open = false;
   if (S.prep) { drop_task(S.prep); S.prep = NULL; }
@@ -1719,9 +1757,16 @@ void online_frame(FmRect area) {
     rect_cut_left(&r, gpx);
     draw_rail(rail);
   }
+  S.inline_seen = false;
   draw_body(r);
   draw_top(top, narrow);
   if (!S.open) return;
+  /* the result playing inline left the list (a new search): its video ends */
+  if (video_inline_active() && !S.inline_seen) {
+    bool listed = false;
+    for (int i = 0; i < S.n && !listed; i++) listed = video_inline_is(&S.items[i]);
+    if (!listed) video_inline_stop();
+  }
   /* one overlay at a time: preparing, then details, then the tray */
   if (S.prep_open) draw_prep();
   else if (S.detail_open) draw_detail();
