@@ -69,6 +69,8 @@ static struct {
   char prep_status[160];
   /* abandoned tasks, joined once their threads return */
   bool inline_seen;            /* a card drew the video playing inline this frame */
+  bool inline_docked;          /* its card scrolled above the list: the video is pinned at the top (conf.online_sticky) */
+  float inline_back_y;         /* the list's scroll that shows that card at the top again */
   OnTask **dead;
   int ndead, cdead;
   bool settings_focus;
@@ -614,8 +616,23 @@ static void card(FmRect c, u32 id, int i, const Grid *g) {
   if (inl) {
     S.inline_seen = true;
     hit = FM_RECT(c.x - DP(6), thumb.y + thumb.h, c.w + DP(12), c.h - thumb.h + DP(6));
-    if (video_inline_active()) video_inline_draw(thumb, rad);
-    else thumb_box(thumb, it, rad);    /* its full player is up */
+    if (video_inline_active() && !S.inline_docked) {
+      video_inline_draw(thumb, rad, false);
+    } else {
+      thumb_box(thumb, it, rad);       /* its full player is up, or it plays pinned at the top */
+      if (S.inline_docked) {
+        gfx_rrect(thumb, rad, col_alpha(FM_RGBA(0, 0, 0, 255), 0.55f));
+        const char *l = "Playing above";
+        float pw = font_width(FONT_BOLD, ui.m.font_small, l, -1) + DP(44), ph = DP(30);
+        FmRect pill = rect_center(thumb, pw, ph);
+        gfx_rrect(pill, ph * 0.5f, col_alpha(FM_RGBA(0, 0, 0, 255), 0.6f));
+        icon_draw(IC_PLAY, FM_RECT(pill.x + DP(12), pill.y + (ph - DP(16)) * 0.5f, DP(16), DP(16)), WHITE);
+        font_draw(FONT_BOLD, ui.m.font_small, pill.x + DP(32), pill.y + (ph - font_line_h(ui.m.font_small)) * 0.5f, l,
+                  -1, WHITE);
+        /* a tap brings the list back to it: the video goes back into its card */
+        if (ui_hit(ui_idn(id, 3), thumb) & UI_CLICK) { S.scroll.y = S.inline_back_y; S.scroll.vel = 0; ui_redraw(); }
+      }
+    }
   }
   int f = ui_hit(id, hit);
   float hv = ui.touch_mode ? 0 : ui_anim(ui_idn(id, 1), (f & UI_HOVER) ? 1.0f : 0.0f, 14.0f);
@@ -664,6 +681,21 @@ static void draw_grid(FmRect view, bool loading_first) {
   ui_scroll(&S.scroll, sid, view, content);
   float sy = S.scroll.y;
   float rh = g.ch + g.rgap;
+  /* the result playing inline: pinned at the top once its card scrolled above the list
+  ** (an overlay: the list keeps its place, so it docks and undocks where the card meets the edge) */
+  int pk = -1;
+  if (video_inline_active())
+    for (int i = 0; i < S.n && pk < 0; i++)
+      if (video_inline_is(&S.items[i])) pk = i;
+  FmRect dock = { 0, 0, 0, 0 };
+  S.inline_docked = false;
+  if (pk >= 0 && conf.online_sticky && !loading_first) {
+    int pr = pk / g.cols, pc = pk % g.cols;
+    float ty = view.y + g.pad + (float)pr * rh - sy;
+    S.inline_docked = ty < view.y;
+    S.inline_back_y = (float)pr * rh;
+    dock = FM_RECT(view.x + g.pad + (float)pc * (g.cw + g.gap), view.y + DP(6), g.cw, g.th);
+  }
   int r0 = FM_MAX(0, (int)((sy - g.pad) / rh));
   int r1 = FM_MIN(rows - 1, (int)((sy + view.h - g.pad) / rh));
   gfx_clip_push(view);
@@ -675,6 +707,10 @@ static void draw_grid(FmRect view, bool loading_first) {
       if (i < S.n) card(c, ui_idn(sid, (u32)i + 1), i, &g);
       else skeleton_card(c, &g, i - S.n + r);
     }
+  if (S.inline_docked) {                 /* drawn last: on top, and it gets the taps */
+    S.inline_seen = true;
+    video_inline_draw(dock, DP(12), true);
+  }
   /* footer: end of results, or a retry for a failed page */
   if (!loading_first && S.n > 0 && !more) {
     float fy = view.y + g.pad + (float)rows * rh - sy;
@@ -1713,6 +1749,12 @@ void online_pump(void) {
   odl_pump();
   oinst_pump();
   othumb_pump();
+  /* MMCFM_DEMO_SCROLL=PX: once a result plays inline, the list scrolls by PX (the pinned video) */
+  static bool demo_scrolled;
+  if (!demo_scrolled && video_inline_active() && getenv("MMCFM_DEMO_SCROLL")) {
+    demo_scrolled = true;
+    S.scroll.y = (float)atof(getenv("MMCFM_DEMO_SCROLL")) * ui.scale;
+  }
   /* --demo-online STATE: once the first results are in */
   if (S.demo_state[0] && !S.demo_done && S.searched && !S.search) {
     S.demo_done = true;

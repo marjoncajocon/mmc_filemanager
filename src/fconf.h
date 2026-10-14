@@ -83,6 +83,7 @@ typedef struct FmConf {
   char online_dl_dir[FM_PATH_MAX];/* downloads, "" = the system Downloads folder */
   int online_height;          /* preferred quality: 360, 480, 720, 1080 */
   bool online_safe;           /* safe search */
+  bool online_sticky;         /* the video playing in a result stays at the top while the list scrolls */
   /* online photos (fpsrc*.c, fphoto*.c) */
   char photo_source[16];      /* last used photo source key */
   char key_pexels[96], key_unsplash[96], key_pixabay[96];   /* free API keys, "" = none */

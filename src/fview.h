@@ -55,7 +55,7 @@ bool video_open_online_inline(const struct FmVsrc *src, const struct FmVsrcConf 
                        const struct FmVsrcStream *st, u64 t_click);
 bool video_inline_active(void);
 bool video_inline_is(const struct FmVsrcItem *item);   /* the result playing inline */
-void video_inline_draw(FmRect r, float radius);        /* in the result's thumbnail rect */
+void video_inline_draw(FmRect r, float radius, bool docked);   /* in the result's thumbnail rect, or pinned */
 void video_inline_stop(void);
 
 /* The next image viewer opened on a single file shows `title` in its bar

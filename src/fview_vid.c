@@ -1120,19 +1120,26 @@ static float live_pill(float x, float cy, float fs, float alpha) {
   return w;
 }
 
-static void vid_seek_bar(FmRect r) {
-  u32 id = ui_id("vid.seek");
+/* The timeline: drag (or tap) to seek. guard: it sits in a scrolling list
+** (the inline player), so on touch a finger only takes it once it moves
+** and the list did not claim the drag (ui_slider's rule), or on a tap.
+** True while it is being dragged or was just used. */
+static bool seek_bar(u32 id, FmRect r, bool guard) {
   double dur = V.info.duration;
   int f = dur > 0 ? ui_hit(id, rect_inset2(r, 0, -DP(8))) : 0;
   float t = dur > 0 ? (float)(V.clock / dur) : 0;
-  if (f & UI_HELD) {
-    ui.drag_owner = id;
+  bool act = (f & UI_HELD) != 0;
+  if (guard && ui.from_touch) act = (act && ui.moved && (ui.drag_owner == 0 || ui.drag_owner == id)) || (f & UI_CLICK);
+  if (act) {
+    if (f & UI_HELD) ui.drag_owner = id;
     V.seek_drag = true;
     V.seek_t = FM_CLAMP((ui.mx - r.x) / r.w, 0.0f, 1.0f);
     view_chrome_poke(&V.chrome);
   }
+  bool used = act;
   if (V.seek_drag) {
     t = V.seek_t;
+    used = true;
     if (!ui.down) { V.seek_drag = false; seek_to(V.seek_t * dur); }
   }
   t = FM_CLAMP(t, 0.0f, 1.0f);
@@ -1148,7 +1155,10 @@ static void vid_seek_bar(FmRect r) {
   gfx_rrect(FM_RECT(r.x, cy - th * 0.5f, r.w * t, th), th * 0.5f, T.accent);
   if (dur > 0) gfx_circle(r.x + r.w * t, cy, DP((f & (UI_HELD | UI_HOVER)) || V.seek_drag ? 8 : 6), T.accent);
   if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
+  return used || (f & (UI_PRESS | UI_CLICK));
 }
+
+static void vid_seek_bar(FmRect r) { seek_bar(ui_id("vid.seek"), r, false); }
 
 enum { VM_OPEN = 1, VM_SHARE, VM_INFO, VM_VIZ, VM_EQ, VM_ASPECT, VM_LOCK, VM_QUALITY, VM_BG, VM_PIP, VM_LYRICS, VM_AR0 = 100,
        VM_Q0 = 200 };
@@ -1185,27 +1195,40 @@ static void quality_menu(float x, float y) {
   ui_menu_open(ui_id("vid.qmenu"), x, y, it, n);
 }
 
-/* The chip in the bottom bar: the current quality; a click lists them all. */
-static void quality_chip(FmRect *row, FmColor fg, FmColor fg2) {
+static const char *quality_label(void) {
   const VOnline *o = g_on;
-  if (!o || !o->st.nq) return;
-  const FmVsrcQuality *cq = o->st.cur >= 0 && o->st.cur < o->st.nq ? &o->st.q[o->st.cur] : NULL;
-  const char *l = !cq ? "Quality" : cq->audio_only ? "Audio" : cq->label;
-  float tw = font_width(FONT_BOLD, ui.m.font_small, l, -1);
-  float w = tw + DP(20), h = DP(26);
-  FmRect cell = rect_cut_right(row, w + DP(12));
-  FmRect b = rect_center(cell, w, h);
-  u32 id = ui_id("vid.quality");
+  const FmVsrcQuality *cq = o && o->st.cur >= 0 && o->st.cur < o->st.nq ? &o->st.q[o->st.cur] : NULL;
+  return !cq ? "Quality" : cq->audio_only ? "Audio" : cq->label;
+}
+
+static float quality_chip_w(void) { return font_width(FONT_BOLD, ui.m.font_small, quality_label(), -1) + DP(20); }
+
+/* The current quality in a chip at b; a click lists them all (menu "vid.qmenu"
+** at menu_y). True when it took the click. */
+static bool quality_chip_at(u32 id, FmRect b, float menu_y, FmColor fg, FmColor fg2) {
+  const VOnline *o = g_on;
+  if (!o || !o->st.nq) return false;
+  const char *l = quality_label();
   int f = ui_hit(id, rect_inset2(b, -DP(4), -DP(6)));
   if (f & (UI_HOVER | UI_HELD)) gfx_rrect(b, DP(6), col_alpha(VIEW_FG, 0.14f * fg.a / 255.0f));
   gfx_rrect_line(b, DP(6), DP(1.5f), fg2);
   font_draw_center(FONT_BOLD, ui.m.font_small, b, l, fg);
   if (f & UI_HOVER) ui_set_cursor(SDL_SYSTEM_CURSOR_HAND);
-  if (f & UI_CLICK) quality_menu(b.x, b.y - DP(4));
+  if (f & UI_CLICK) quality_menu(b.x, menu_y);
   if (o->demo_menu && V.have_frame && !ui_menu_is_open()) {
     g_on->demo_menu = false;
-    quality_menu(b.x, b.y - DP(4));
+    quality_menu(b.x, menu_y);
   }
+  return (f & (UI_PRESS | UI_CLICK)) != 0;
+}
+
+/* The chip in the bottom bar: the current quality; a click lists them all. */
+static void quality_chip(FmRect *row, FmColor fg, FmColor fg2) {
+  if (!g_on || !g_on->st.nq) return;
+  float w = quality_chip_w(), h = DP(26);
+  FmRect cell = rect_cut_right(row, w + DP(12));
+  FmRect b = rect_center(cell, w, h);
+  quality_chip_at(ui_id("vid.quality"), b, b.y - DP(4), fg, fg2);
 }
 
 /* Where the picture goes in `area` and which part of the texture shows. */
@@ -2236,7 +2259,7 @@ static void vid_viewer_close(void) {
   vid_view_close();
 }
 
-void video_inline_draw(FmRect r, float rad) {
+void video_inline_draw(FmRect r, float rad, bool docked) {
   if (!video_inline_active()) return;
   int state;
   SDL_LockMutex(V.mx);
@@ -2245,6 +2268,7 @@ void video_inline_draw(FmRect r, float rad) {
   bool ready = state == VS_READY && V.started;
   bool playing = ready && !V.paused && !V.ended;
   screensaver(playing);
+  if (docked) gfx_shadow(r, rad, DP(14), T.shadow);   /* pinned over the list (fonline.c) */
   gfx_rrect(r, rad, FM_HEX(0x000000));
   if (V.tex && V.tw > 0 && V.th > 0) {
     double sar = V.info.sar > 0.1 && V.info.sar < 10 ? V.info.sar : 1.0;
@@ -2259,17 +2283,21 @@ void video_inline_draw(FmRect r, float rad) {
   }
   bool resolving = g_on && g_on->thr;
   bool opening = state == VS_OPENING || (ready && V.info.has_video && !V.have_frame);
-  /* progress along the bottom edge */
   double dur = V.info.duration;
-  if (dur > 0 && !live_now()) {
+  bool seekable = dur > 0 && !live_now();
+  /* the quality picked in the menu (the chip below opens it) */
+  int qres = ui_menu_result(ui_id("vid.qmenu"));
+  if (qres >= VM_Q0) { quality_pick(qres - VM_Q0); V.inl_chrome_until = ui.now + INL_CHROME_MS; }
+  /* taps: show the controls; with them shown, the middle plays/pauses */
+  u32 base = ui_id("vinl");
+  int f = ui_hit(ui_idn(base, 1), r);
+  bool shown = !playing || ui.now < V.inl_chrome_until || V.seek_drag || ui_menu_is_open() ||
+               (!ui.touch_mode && (f & UI_HOVER));
+  if (!shown && seekable) {             /* progress along the bottom edge */
     FmRect bar = { r.x + rad * 0.5f, r.y + r.h - DP(3), r.w - rad, DP(3) };
     gfx_rect(bar, col_alpha(FM_HEX(0xFFFFFF), 0.25f));
     gfx_rect(FM_RECT(bar.x, bar.y, bar.w * (float)FM_CLAMP(V.clock / dur, 0.0, 1.0), bar.h), T.accent);
   }
-  /* taps: show the controls; with them shown, the middle plays/pauses */
-  u32 base = ui_id("vinl");
-  int f = ui_hit(ui_idn(base, 1), r);
-  bool shown = !playing || ui.now < V.inl_chrome_until || (!ui.touch_mode && (f & UI_HOVER));
   if (state == VS_ERROR) {
     gfx_rrect(r, rad, col_alpha(VIEW_SCRIM, 0.75f));
     font_draw_center(FONT_BOLD, ui.m.font_small, FM_RECT(r.x, r.y + r.h * 0.5f - DP(20), r.w, DP(20)),
@@ -2286,8 +2314,8 @@ void video_inline_draw(FmRect r, float rad) {
   float bs = DP(ui.touch_mode ? 44 : 36);
   bool act = false;
   if (shown && state != VS_ERROR) {
-    gfx_rrect(r, rad, col_alpha(VIEW_SCRIM, 0.28f));
-    if (ready && !opening && !V.buffering) {
+    gfx_rrect(r, rad, col_alpha(VIEW_SCRIM, docked ? 0.38f : 0.28f));
+    if (ready && !opening && !V.buffering && !V.seek_drag) {
       float ps = FM_MIN(DP(56), r.h * 0.4f);
       FmRect pb = rect_center(r, ps, ps);
       gfx_circle(pb.x + ps * 0.5f, pb.y + ps * 0.5f, ps * 0.5f, col_alpha(VIEW_SCRIM, 0.6f));
@@ -2297,9 +2325,15 @@ void video_inline_draw(FmRect r, float rad) {
         act = true;
       }
     }
+    /* the timeline along the bottom, the time above its left end */
+    FmRect sb = { r.x + DP(12), r.y + r.h - DP(20), r.w - DP(24), DP(16) };
+    if (seekable && seek_bar(ui_idn(base, 5), sb, true)) {
+      act = true;
+      V.inl_chrome_until = ui.now + INL_CHROME_MS;
+    }
     char t[48], d[24];
-    view_fmt_time(V.clock, t, sizeof t);
-    if (dur > 0 && !live_now()) {
+    view_fmt_time(V.seek_drag && seekable ? V.seek_t * dur : V.clock, t, sizeof t);
+    if (seekable) {
       view_fmt_time(dur, d, sizeof d);
       fm_strlcat(t, " / ", sizeof t);
       fm_strlcat(t, d, sizeof t);
@@ -2307,10 +2341,20 @@ void video_inline_draw(FmRect r, float rad) {
       fm_strlcpy(t, "LIVE", sizeof t);
     }
     float fs = ui.m.font_small;
-    font_draw(FONT_BOLD, fs, r.x + DP(10), r.y + r.h - DP(8) - font_line_h(fs) - DP(6), t, -1, VIEW_FG);
+    font_draw(FONT_BOLD, fs, r.x + DP(12), sb.y - font_line_h(fs) - DP(2), t, -1, VIEW_FG);
+    /* the quality: a chip at the top left lists the others */
+    if (g_on && g_on->st.nq) {
+      float cw = quality_chip_w(), ch = DP(26);
+      FmRect qb = { r.x + DP(10), r.y + DP(10), cw, ch };
+      gfx_rrect(qb, DP(6), col_alpha(VIEW_SCRIM, 0.55f));
+      if (quality_chip_at(ui_idn(base, 6), qb, qb.y + qb.h + DP(4), VIEW_FG, VIEW_FG2)) {
+        act = true;
+        V.inl_chrome_until = ui.now + INL_CHROME_MS;
+      }
+    }
   }
   if (shown) {
-    FmRect fb = { r.x + r.w - bs - DP(4), r.y + r.h - bs - DP(6), bs, bs };
+    FmRect fb = { r.x + r.w - bs - DP(4), r.y + r.h - bs - DP(22), bs, bs };
     if (ui_icon_btn(ui_idn(base, 3), fb, IC_FULLSCREEN, VIEW_FG, "Full screen")) { inline_to_full(); return; }
     FmRect cb = { r.x + r.w - bs - DP(4), r.y + DP(4), bs, bs };
     if (ui_icon_btn(ui_idn(base, 4), cb, IC_CLOSE, VIEW_FG, "Stop")) { video_inline_stop(); return; }
@@ -2320,8 +2364,8 @@ void video_inline_draw(FmRect r, float rad) {
     if (!ui.touch_mode && shown && ready) set_paused(!V.paused);
     V.inl_chrome_until = shown && ui.touch_mode && playing ? 0 : ui.now + INL_CHROME_MS;
   }
-  if (f & UI_DCLICK) { inline_to_full(); return; }
-  if (playing || resolving || opening) ui_animate();   /* the pictures, the spinner */
+  if ((f & UI_DCLICK) && !act) { inline_to_full(); return; }
+  if (playing || resolving || opening || V.seek_drag) ui_animate();   /* the pictures, the spinner, the drag */
   else if (ui.now < V.inl_chrome_until) view_wake_in((int)(V.inl_chrome_until - ui.now) + 20);
   if (playing && ui.now < V.inl_chrome_until) view_wake_in((int)(V.inl_chrome_until - ui.now) + 20);
 }

@@ -199,6 +199,9 @@ static float layout(FmRect *r, u32 base, bool draw) {
     rect_cut_top(r, DP(6));
     FmRect sw = rect_cut_top(r, DP(ui.touch_mode ? 50 : 42));
     if (draw && ui_switch(ui_idn(base, 60), sw, "Safe search", &conf.online_safe)) online_conf_dirty();
+    sw = rect_cut_top(r, DP(ui.touch_mode ? 50 : 42));
+    if (draw && ui_switch(ui_idn(base, 61), sw, "Keep the playing video at the top while scrolling", &conf.online_sticky))
+      online_conf_dirty();
     rect_cut_top(r, DP(14));
   }
   return r->y - y0;
