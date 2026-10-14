@@ -297,7 +297,6 @@ void ui_event(const SDL_Event *e) {
 
 /* ---- frame -------------------------------------------------------------- */
 
-static u64 g_last_frame;
 static u32 g_frame;
 
 /* tooltip */
@@ -384,7 +383,6 @@ void ui_begin(void) {
     if (n >= 1 && fabsf(ui.dt - n * ui.frame_period) < 0.25f * ui.frame_period) ui.dt = n * ui.frame_period;
   }
   if (ui.dt > 0.1f) ui.dt = 0.1f;
-  g_last_frame = now;
   ui.now = now;
   g_frame++;
   ui.anim = false;

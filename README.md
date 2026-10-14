@@ -14,7 +14,7 @@ MMC File Manager is a dual-panel file manager written in plain C11 on SDL2, styl
 
 Developed by **MMC Solo Dev (Marjon Cajocon)**.
 
-Version: 0.1.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party code).
+Version: 0.2.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party code).
 
 ---
 

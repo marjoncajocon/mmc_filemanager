@@ -47,8 +47,8 @@ cd "$(dirname "$0")"
 APP="mmcfm"
 APP_NAME="MMC File Manager"
 APP_ID="io.github.mmc.filemanager"
-APP_VERSION="0.1.0"
-APP_VERSION_CODE=1
+APP_VERSION="0.2.0"
+APP_VERSION_CODE=2
 SDL_VER="2.32.10"
 
 # ---- arguments ----------------------------------------------------------------
