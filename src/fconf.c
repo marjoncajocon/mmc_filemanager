@@ -29,6 +29,7 @@ void conf_defaults(void) {
   fm_strlcpy(conf.audio_source, "radio", sizeof conf.audio_source);
   conf.online_safe = true;
   conf.online_sticky = true;
+  conf.video_pip = true;
   conf.theme = 0;
   conf.dark = true;
   conf.accent = -1;
@@ -158,6 +159,7 @@ static void set_key(const char *k, const char *raw) {
   else if (!strcmp(k, "online_height")) conf.online_height = to_int(v, 144, 2160, 720);
   else if (!strcmp(k, "online_safe")) conf.online_safe = to_bool(v);
   else if (!strcmp(k, "online_sticky")) conf.online_sticky = to_bool(v);
+  else if (!strcmp(k, "video_pip")) conf.video_pip = to_bool(v);
   else if (!strcmp(k, "photo_source")) fm_strlcpy(conf.photo_source, v, sizeof conf.photo_source);
   else if (!strcmp(k, "key_pexels")) fm_strlcpy(conf.key_pexels, v, sizeof conf.key_pexels);
   else if (!strcmp(k, "key_unsplash")) fm_strlcpy(conf.key_unsplash, v, sizeof conf.key_unsplash);
@@ -316,6 +318,7 @@ void conf_save(void) {
   put_i(f, "online_height", conf.online_height);
   put_i(f, "online_safe", conf.online_safe);
   put_i(f, "online_sticky", conf.online_sticky);
+  put_i(f, "video_pip", conf.video_pip);
   put(f, "photo_source", conf.photo_source);
   put(f, "key_pexels", conf.key_pexels);
   put(f, "key_unsplash", conf.key_unsplash);

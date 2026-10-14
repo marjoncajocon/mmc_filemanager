@@ -57,6 +57,12 @@ bool video_inline_active(void);
 bool video_inline_is(const struct FmVsrcItem *item);   /* the result playing inline */
 void video_inline_draw(FmRect r, float radius, bool docked);   /* in the result's thumbnail rect, or pinned */
 void video_inline_stop(void);
+void video_inline_float(void);         /* the list was left: it floats over every screen */
+bool video_float_active(void);
+void video_float_dock(void);           /* back beside its card in the list */
+void video_float_pre(void);            /* start of the frame: a press on the floating window is its own */
+void video_float_draw(void);           /* end of the frame, over the screens */
+bool video_sys_pip_draw(FmRect area);  /* Android's PiP window: only the picture; true when drawn */
 
 /* The next image viewer opened on a single file shows `title` in its bar
 ** instead of the file name (online photos open a cached file). NULL clears. */

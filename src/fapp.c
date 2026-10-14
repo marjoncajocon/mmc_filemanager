@@ -3311,7 +3311,19 @@ void app_event(const SDL_Event *e) {
 
 /* ---- frame -------------------------------------------------------------- */
 
+static void app_screens(void);
+
+/* The screens, with the floating video over all of them: it takes its
+** presses first (a list under it would scroll) and is drawn last. */
 void app_frame(void) {
+  video_float_pre();
+  app_screens();
+  /* the online list is not on screen (another screen over it): its video floats */
+  if (!online_was_drawn() && video_inline_active() && !plat_pip_active()) video_inline_float();
+  video_float_draw();
+}
+
+static void app_screens(void) {
   /* data usage: what starts while a view runs (its tasks, streams,
   ** thumbnails) counts under that view's group (fnet, fdatause) */
   fm_set_thread_tag(NET_GROUP_OTHER);
@@ -3329,6 +3341,8 @@ void app_frame(void) {
   while ((fj = ops_take_finished()) != NULL) job_finished(fj);
   conf_flush(false);
   menu_results();
+  /* Android's picture-in-picture window: the playing video only */
+  if (video_sys_pip_draw(FM_RECT(0, 0, ui.w, ui.h))) return;
 
   if (app.viewer) {
     FmRect full = { 0, 0, ui.w, ui.h };

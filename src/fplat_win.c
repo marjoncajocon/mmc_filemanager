@@ -512,6 +512,9 @@ int plat_cpu_count(void) {
 
 int plat_ime_inset(void) { return 0; }
 float plat_refresh_hz(void) { return 0; }
+void plat_pip_set(bool want, float aspect) { FM_UNUSED(want); FM_UNUSED(aspect); }
+bool plat_pip_active(void) { return false; }
+bool plat_pip_dismissed(void) { return false; }
 
 bool plat_storage_granted(void) { return true; }
 void plat_storage_request(void) {}

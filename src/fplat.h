@@ -119,6 +119,13 @@ int plat_window_corners(bool round, int radius_px, u32 border_rgb, bool maximize
 int plat_ime_inset(void);
 /* Android: the display's refresh rate as the window uses it (Hz), 0 = unknown or elsewhere. */
 float plat_refresh_hz(void);
+/* Android picture in picture (FmActivity): the main loop says each frame
+** whether leaving the app should open the system's PiP window and the
+** picture's width/height; active while the app shows in it; dismissed is
+** true once after the user closed that window. Elsewhere: nothing. */
+void plat_pip_set(bool want, float aspect);
+bool plat_pip_active(void);
+bool plat_pip_dismissed(void);
 
 /* Storage permission (Android 11+: all-files access). Desktop: always true. */
 bool plat_storage_granted(void);

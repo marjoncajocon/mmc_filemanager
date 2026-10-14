@@ -117,6 +117,75 @@ public class FmActivity extends SDLActivity {
         preferHighRefresh();
     }
 
+    /* ---- picture in picture ------------------------------------------------- */
+
+    /* Leaving the app (Home, recents) while a video plays asks for the
+       system's floating window; the native side then draws only the picture.
+       Phones without picture in picture, or with it switched off for this app,
+       refuse or throw: then nothing changes and the sound goes on alone, as
+       before. Closing the window pauses the video (the notification resumes it). */
+    private static native boolean nativePipWanted();
+    private static native float nativePipAspect();
+    private static native void nativePipMode(boolean on);
+    private static native void nativePipDismissed();
+
+    private boolean mInPip, mStopped;
+    private long mPipEnd;                                 /* when the window last went (uptime ms) */
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        enterPipIfPlaying();
+    }
+
+    private void enterPipIfPlaying() {
+        try {
+            if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return;
+            if (!nativePipWanted()) return;
+            android.app.PictureInPictureParams.Builder b = new android.app.PictureInPictureParams.Builder();
+            float a = nativePipAspect();
+            if (a > 0) {
+                a = Math.max(1 / 2.39f, Math.min(2.39f, a));          /* the system's limits */
+                b.setAspectRatio(new android.util.Rational(Math.round(a * 1000), 1000));
+            }
+            enterPictureInPictureMode(b.build());
+        } catch (Exception | UnsatisfiedLinkError e) {
+            /* not allowed here: the video goes on as sound */
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onPictureInPictureModeChanged(boolean on) {
+        super.onPictureInPictureModeChanged(on);
+        boolean closed = mInPip && !on && mStopped;      /* swiped away, not expanded */
+        if (mInPip && !on) mPipEnd = android.os.SystemClock.uptimeMillis();
+        mInPip = on;
+        try {
+            if (closed) nativePipDismissed();
+            else nativePipMode(on);
+        } catch (UnsatisfiedLinkError e) {
+            /* native library not loaded */
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        mStopped = false;
+    }
+
+    @Override
+    protected void onStop() {
+        mStopped = true;
+        /* the window was closed: stopped while in it, or (some phones tell the
+           mode first) just after it went without coming back to the screen */
+        if (mInPip || android.os.SystemClock.uptimeMillis() - mPipEnd < 1500) {
+            try { nativePipDismissed(); } catch (UnsatisfiedLinkError e) { /* not loaded */ }
+        }
+        super.onStop();
+    }
+
     /* ---- refresh rate ------------------------------------------------------- */
 
     /* An app that does not ask runs at 60 Hz on many 90/120 Hz phones, so

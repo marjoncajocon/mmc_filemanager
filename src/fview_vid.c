@@ -51,6 +51,14 @@
 **     thumbnail (video_inline_draw) with small controls, ticked from
 **     video_bg_pump like background play. Its fullscreen button hands it to
 **     the full player; Back there returns it to the thumbnail, still playing.
+**   - Floating (video_float_draw): leaving the list (Back, another screen, a
+**     search without it) keeps the video playing in a small window over every
+**     screen, dragged anywhere and snapped to the nearer side. Another video
+**     replaces it; back in the list next to its card it goes in again.
+**   - Android picture in picture: leaving the app with a picture playing asks
+**     the system for its PiP window (FmActivity); the app then draws only the
+**     picture (video_sys_pip_draw). Phones without it (or with it switched
+**     off) fall back to the sound going on alone, as before.
 */
 #include "fview_int.h"
 #include "ftitle.h"
@@ -200,6 +208,10 @@ static struct {
   bool bg_auto;            /* sent there by the app leaving the screen: the picture comes back with it */
   bool inl;                /* drawn in an online result's thumbnail, not as the viewer */
   bool inl_home;           /* the full player came from there: Back goes back to it */
+  bool flt;                /* floating over every screen (the list was left) */
+  bool home_flt;           /* the full player came from the floating window */
+  bool flt_drag;           /* the floating window follows the pointer */
+  float flt_dx, flt_dy;    /* where in the window it was taken */
   u64 inl_chrome_until;    /* inline controls shown until then */
   bool reupload;           /* the renderer was reset: upload the shown picture again */
   int bg_q, bg_flags;
@@ -1684,7 +1696,7 @@ bool video_mini_active(void) { return V.open && V.background; }
 
 bool video_media_info(FmMediaInfo *m) {
   memset(m, 0, sizeof *m);
-  if (!V.open || (!V.background && !V.inl && app.viewer != &g_view_video)) return false;
+  if (!V.open || (!V.background && !V.inl && !V.flt && app.viewer != &g_view_video)) return false;
   fm_strlcpy(m->title, V.title, sizeof m->title);
   m->playing = !V.paused && !V.ended;
   m->track = -2;                       /* a video, not a music track */
@@ -1795,10 +1807,13 @@ static void demo_steps(void) {
   }
 }
 
+static void sys_pip_update(void);
+
 void video_bg_pump(void) {
   demo_video();
   demo_steps();
-  if (!V.open || !(V.background || (V.inl && app.viewer != &g_view_video))) return;
+  sys_pip_update();
+  if (!V.open || !(V.background || ((V.inl || V.flt) && app.viewer != &g_view_video) || plat_pip_active())) return;
   play_log();
   int state;
   bool ready;
@@ -2215,25 +2230,44 @@ static void vid_view_frame(FmRect area) {
 #define INL_CHROME_MS 2800
 
 bool video_inline_active(void) { return V.open && V.inl; }
+bool video_float_active(void) { return V.open && V.flt; }
 
-/* The result playing inline (or opening its full player from there). */
+/* The result playing inline, floating, or in the full player from there. */
 bool video_inline_is(const FmVsrcItem *it) {
-  if (!V.open || !(V.inl || V.inl_home) || !g_on || !it) return false;
+  if (!V.open || !(V.inl || V.flt || V.inl_home) || !g_on || !it) return false;
   if (it->id[0] && g_on->item.id[0]) return strcmp(it->id, g_on->item.id) == 0;
   return it->page[0] && strcmp(it->page, g_on->item.page) == 0;
 }
 
 void video_inline_stop(void) {
-  if (V.open && (V.inl || V.inl_home)) {
+  if (V.open && (V.inl || V.flt || V.inl_home)) {
     if (app.viewer == &g_view_video) app.viewer = NULL;
     vid_view_close();
     ui_redraw();
   }
 }
 
+/* The list was left: the video floats over whatever comes. */
+void video_inline_float(void) {
+  if (!V.open || !V.inl) return;
+  V.inl = false;
+  V.flt = true;
+  V.inl_chrome_until = 0;
+  ui_redraw();
+}
+
+/* Back in the list beside its card: it goes in again. */
+void video_float_dock(void) {
+  if (!V.open || !V.flt) return;
+  V.flt = V.flt_drag = false;
+  V.inl = true;
+  ui_redraw();
+}
+
 /* The fullscreen button: the same player (worker, sound, place) takes the window. */
 static void inline_to_full(void) {
-  V.inl = false;
+  V.home_flt = V.flt;
+  V.inl = V.flt = V.flt_drag = false;
   V.inl_home = true;
   view_chrome_poke(&V.chrome);
   if (app.viewer && app.viewer != &g_view_video && app.viewer->close) app.viewer->close();
@@ -2251,7 +2285,9 @@ static void vid_viewer_close(void) {
 #endif
     if (V.cursor_hidden) { SDL_ShowCursor(SDL_ENABLE); V.cursor_hidden = false; }
     V.inl_home = false;
-    V.inl = true;
+    if (V.home_flt) V.flt = true;      /* back where it came from */
+    else V.inl = true;
+    V.home_flt = false;
     V.inl_chrome_until = ui.now + INL_CHROME_MS;
     ui_redraw();
     return;
@@ -2259,8 +2295,45 @@ static void vid_viewer_close(void) {
   vid_view_close();
 }
 
-void video_inline_draw(FmRect r, float rad, bool docked) {
-  if (!video_inline_active()) return;
+/* ---- floating window ------------------------------------------------------------- */
+
+static float g_flt_x = -1, g_flt_y = -1;   /* its top left; -1: not placed yet (bottom right) */
+
+/* Where it may go: under the top bar, above the bottom bars and the keyboard. */
+static FmRect float_area(void) {
+  float m = DP(10);
+  float top = ui.m.bar_h + m, bottom = ui.h - ui_keyboard_h() - DP(ui.touch_mode ? 76 : 52);
+  return FM_RECT(m, top, ui.w - 2 * m, FM_MAX(DP(80), bottom - top));
+}
+
+static FmRect float_rect(void) {
+  FmRect a = float_area();
+  float w = ui.portrait ? FM_MIN(ui.w * 0.56f, DP(340)) : FM_MIN(ui.w * 0.36f, DP(400));
+  w = FM_MAX(w, DP(180));
+  float h = floorf(w * 9.0f / 16.0f);
+  if (g_flt_x < 0) { g_flt_x = a.x + a.w - w; g_flt_y = a.y + a.h - h; }
+  float x = FM_CLAMP(g_flt_x, a.x, a.x + FM_MAX(0.0f, a.w - w));
+  float y = FM_CLAMP(g_flt_y, a.y, a.y + FM_MAX(0.0f, a.h - h));
+  return FM_RECT(floorf(x), floorf(y), w, h);
+}
+
+static u32 float_hit_id(void) { return ui_idn(ui_id("vflt"), 1); }
+
+/* Start of the frame, before the screens: a press on the window is its own,
+** or a list under it would take the drag for a scroll first. A tap gives the
+** press back on release, so the window's buttons still click. */
+void video_float_pre(void) {
+  if (!video_float_active() || plat_pip_active() || !ui_input_ok()) return;
+  FmRect r = float_rect();
+  u32 id = float_hit_id();
+  if (ui.pressed && ui.drag_owner == 0 && rect_has(r, ui.press_x, ui.press_y)) ui.drag_owner = id;
+  if (ui.released && ui.drag_owner == id && !ui.moved) ui.drag_owner = 0;
+}
+
+/* mode 0: in its card, 1: pinned at the top of the list, 2: floating. */
+static void inline_render(FmRect r, float rad, int mode) {
+  if (!V.open || (mode == 2 ? !V.flt : !V.inl)) return;
+  bool docked = mode != 0, full_ctl = mode != 2;
   int state;
   SDL_LockMutex(V.mx);
   state = V.state;
@@ -2289,11 +2362,28 @@ void video_inline_draw(FmRect r, float rad, bool docked) {
   int qres = ui_menu_result(ui_id("vid.qmenu"));
   if (qres >= VM_Q0) { quality_pick(qres - VM_Q0); V.inl_chrome_until = ui.now + INL_CHROME_MS; }
   /* taps: show the controls; with them shown, the middle plays/pauses */
-  u32 base = ui_id("vinl");
+  u32 base = ui_id(mode == 2 ? "vflt" : "vinl");
   int f = ui_hit(ui_idn(base, 1), r);
-  bool shown = !playing || ui.now < V.inl_chrome_until || V.seek_drag || ui_menu_is_open() ||
-               (!ui.touch_mode && (f & UI_HOVER));
-  if (!shown && seekable) {             /* progress along the bottom edge */
+  if (mode == 2) {
+    /* dragged anywhere (the press was taken in video_float_pre), then to the nearer side */
+    u32 hid = ui_idn(base, 1);
+    if (ui.down && ui.moved && ui.drag_owner == hid) {
+      if (!V.flt_drag) { V.flt_drag = true; V.flt_dx = ui.press_x - r.x; V.flt_dy = ui.press_y - r.y; }
+      g_flt_x = ui.mx - V.flt_dx;
+      g_flt_y = ui.my - V.flt_dy;
+      ui_animate();
+    }
+    if (V.flt_drag && !ui.down) {
+      V.flt_drag = false;
+      FmRect a = float_area();
+      g_flt_x = r.x + r.w * 0.5f < a.x + a.w * 0.5f ? a.x : a.x + a.w - r.w;
+      ui_redraw();
+    }
+    if (V.flt_drag) f &= ~(UI_CLICK | UI_DCLICK);
+  }
+  bool shown = (!playing || ui.now < V.inl_chrome_until || V.seek_drag || ui_menu_is_open() ||
+               (!ui.touch_mode && (f & UI_HOVER))) && !V.flt_drag;
+  if ((!shown || !full_ctl) && seekable) {   /* progress along the bottom edge */
     FmRect bar = { r.x + rad * 0.5f, r.y + r.h - DP(3), r.w - rad, DP(3) };
     gfx_rect(bar, col_alpha(FM_HEX(0xFFFFFF), 0.25f));
     gfx_rect(FM_RECT(bar.x, bar.y, bar.w * (float)FM_CLAMP(V.clock / dur, 0.0, 1.0), bar.h), T.accent);
@@ -2327,7 +2417,7 @@ void video_inline_draw(FmRect r, float rad, bool docked) {
     }
     /* the timeline along the bottom, the time above its left end */
     FmRect sb = { r.x + DP(12), r.y + r.h - DP(20), r.w - DP(24), DP(16) };
-    if (seekable && seek_bar(ui_idn(base, 5), sb, true)) {
+    if (full_ctl && seekable && seek_bar(ui_idn(base, 5), sb, true)) {
       act = true;
       V.inl_chrome_until = ui.now + INL_CHROME_MS;
     }
@@ -2341,9 +2431,9 @@ void video_inline_draw(FmRect r, float rad, bool docked) {
       fm_strlcpy(t, "LIVE", sizeof t);
     }
     float fs = ui.m.font_small;
-    font_draw(FONT_BOLD, fs, r.x + DP(12), sb.y - font_line_h(fs) - DP(2), t, -1, VIEW_FG);
+    if (full_ctl) font_draw(FONT_BOLD, fs, r.x + DP(12), sb.y - font_line_h(fs) - DP(2), t, -1, VIEW_FG);
     /* the quality: a chip at the top left lists the others */
-    if (g_on && g_on->st.nq) {
+    if (full_ctl && g_on && g_on->st.nq) {
       float cw = quality_chip_w(), ch = DP(26);
       FmRect qb = { r.x + DP(10), r.y + DP(10), cw, ch };
       gfx_rrect(qb, DP(6), col_alpha(VIEW_SCRIM, 0.55f));
@@ -2354,7 +2444,9 @@ void video_inline_draw(FmRect r, float rad, bool docked) {
     }
   }
   if (shown) {
-    FmRect fb = { r.x + r.w - bs - DP(4), r.y + r.h - bs - DP(22), bs, bs };
+    /* floating: back to the full player at the top left (the quality chip's place) */
+    FmRect fb = full_ctl ? FM_RECT(r.x + r.w - bs - DP(4), r.y + r.h - bs - DP(22), bs, bs)
+                         : FM_RECT(r.x + DP(4), r.y + DP(4), bs, bs);
     if (ui_icon_btn(ui_idn(base, 3), fb, IC_FULLSCREEN, VIEW_FG, "Full screen")) { inline_to_full(); return; }
     FmRect cb = { r.x + r.w - bs - DP(4), r.y + DP(4), bs, bs };
     if (ui_icon_btn(ui_idn(base, 4), cb, IC_CLOSE, VIEW_FG, "Stop")) { video_inline_stop(); return; }
@@ -2368,6 +2460,49 @@ void video_inline_draw(FmRect r, float rad, bool docked) {
   if (playing || resolving || opening || V.seek_drag) ui_animate();   /* the pictures, the spinner, the drag */
   else if (ui.now < V.inl_chrome_until) view_wake_in((int)(V.inl_chrome_until - ui.now) + 20);
   if (playing && ui.now < V.inl_chrome_until) view_wake_in((int)(V.inl_chrome_until - ui.now) + 20);
+}
+
+void video_inline_draw(FmRect r, float rad, bool docked) { inline_render(r, rad, docked ? 1 : 0); }
+
+/* Over every screen (fapp.c draws it last). */
+void video_float_draw(void) {
+  if (!video_float_active() || plat_pip_active()) return;
+  inline_render(float_rect(), DP(10), 2);
+}
+
+/* ---- Android picture in picture ------------------------------------------------- */
+
+/* Each frame: whether leaving the app now should ask for the system's PiP
+** window (a picture playing, the setting on) and its shape. FmActivity
+** asks from its own thread, so it goes through atomics (fplat_android.c). */
+static void sys_pip_update(void) {
+  bool shown = V.open && !V.background && (app.viewer == &g_view_video || V.inl || V.flt);
+  bool want = conf.video_pip && shown && V.info.has_video && V.have_frame && !V.paused && !V.ended;
+  float aspect = 0;
+  if (V.tw > 0 && V.th > 0) {
+    double sar = V.info.sar > 0.1 && V.info.sar < 10 ? V.info.sar : 1.0;
+    aspect = (float)(V.tw * sar / V.th);
+  }
+  plat_pip_set(want, aspect);
+  /* the system's window was closed (swiped away): the video stops, as on other apps */
+  if (plat_pip_dismissed() && V.open && !V.paused) set_paused(true);
+}
+
+/* In the system's PiP window the app draws only the picture: true when it did. */
+bool video_sys_pip_draw(FmRect area) {
+  if (!plat_pip_active() || !V.open || !V.have_frame) return false;
+  gfx_rect(area, FM_HEX(0x000000));
+  if (V.tex && V.tw > 0 && V.th > 0) {
+    double sar = V.info.sar > 0.1 && V.info.sar < 10 ? V.info.sar : 1.0;
+    FmRect pic, src;
+    int a = g_aspect;
+    g_aspect = AR_FIT;
+    place_picture(area, sar, &pic, &src);
+    g_aspect = a;
+    gfx_tex(V.tex, &src, pic, FM_HEX(0xFFFFFF));
+  }
+  if (!V.paused && !V.ended) ui_animate();
+  return true;
 }
 
 const FmViewer g_view_video = { "video", vid_view_open, vid_view_frame, vid_viewer_close };

@@ -180,6 +180,45 @@ JNIEXPORT void JNICALL Java_io_github_mmc_filemanager_FmActivity_nativeRefreshRa
 
 float plat_refresh_hz(void) { return SDL_AtomicGet(&g_hz100) / 100.0f; }
 
+/* Picture in picture: the main loop publishes what FmActivity asks for on
+** its own thread; FmActivity reports the mode and a closed window. */
+static SDL_atomic_t g_pip_want, g_pip_aspect1000, g_pip_on, g_pip_gone;
+
+void plat_pip_set(bool want, float aspect) {
+  SDL_AtomicSet(&g_pip_want, want ? 1 : 0);
+  SDL_AtomicSet(&g_pip_aspect1000, aspect > 0 && aspect < 100 ? (int)(aspect * 1000.0f + 0.5f) : 0);
+}
+
+bool plat_pip_active(void) { return SDL_AtomicGet(&g_pip_on) != 0; }
+bool plat_pip_dismissed(void) { return SDL_AtomicSet(&g_pip_gone, 0) != 0; }
+
+JNIEXPORT jboolean JNICALL Java_io_github_mmc_filemanager_FmActivity_nativePipWanted(JNIEnv *e, jclass c) {
+  FM_UNUSED(e);
+  FM_UNUSED(c);
+  return SDL_AtomicGet(&g_pip_want) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jfloat JNICALL Java_io_github_mmc_filemanager_FmActivity_nativePipAspect(JNIEnv *e, jclass c) {
+  FM_UNUSED(e);
+  FM_UNUSED(c);
+  return SDL_AtomicGet(&g_pip_aspect1000) / 1000.0f;
+}
+
+JNIEXPORT void JNICALL Java_io_github_mmc_filemanager_FmActivity_nativePipMode(JNIEnv *e, jclass c, jboolean on) {
+  FM_UNUSED(e);
+  FM_UNUSED(c);
+  SDL_AtomicSet(&g_pip_on, on ? 1 : 0);
+  app_wake();                          /* draw for the new window at once */
+}
+
+JNIEXPORT void JNICALL Java_io_github_mmc_filemanager_FmActivity_nativePipDismissed(JNIEnv *e, jclass c) {
+  FM_UNUSED(e);
+  FM_UNUSED(c);
+  SDL_AtomicSet(&g_pip_on, 0);
+  SDL_AtomicSet(&g_pip_gone, 1);
+  app_wake();
+}
+
 /* ---- SDL's HIDDeviceManager natives -------------------------------------- */
 
 /* SDL is built without HIDAPI (no game controllers in a file manager, and it

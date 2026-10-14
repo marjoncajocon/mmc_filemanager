@@ -41,6 +41,7 @@ void online_open(const char *source);
 void online_close(void);
 bool online_is_open(void);
 void online_frame(FmRect area);
+bool online_was_drawn(void);          /* the screen was on this frame (the inline video floats when not) */
 /* Downloads still running (the app asks before quitting). */
 int  online_downloads_active(void);
 

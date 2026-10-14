@@ -873,6 +873,9 @@ int plat_cpu_count(void) {
 #ifndef FM_ANDROID
 int plat_ime_inset(void) { return 0; }     /* fplat_android.c on Android */
 float plat_refresh_hz(void) { return 0; } /* fplat_android.c on Android */
+void plat_pip_set(bool want, float aspect) { FM_UNUSED(want); FM_UNUSED(aspect); }
+bool plat_pip_active(void) { return false; }
+bool plat_pip_dismissed(void) { return false; }
 #endif
 
 /* Linux/BSD/macOS: square corners for now (needs per-platform window work). */

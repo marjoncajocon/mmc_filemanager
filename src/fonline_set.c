@@ -202,6 +202,11 @@ static float layout(FmRect *r, u32 base, bool draw) {
     sw = rect_cut_top(r, DP(ui.touch_mode ? 50 : 42));
     if (draw && ui_switch(ui_idn(base, 61), sw, "Keep the playing video at the top while scrolling", &conf.online_sticky))
       online_conf_dirty();
+#ifdef FM_ANDROID
+    sw = rect_cut_top(r, DP(ui.touch_mode ? 50 : 42));
+    if (draw && ui_switch(ui_idn(base, 62), sw, "Picture in picture when leaving the app", &conf.video_pip))
+      online_conf_dirty();
+#endif
     rect_cut_top(r, DP(14));
   }
   return r->y - y0;

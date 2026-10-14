@@ -684,9 +684,10 @@ static void draw_grid(FmRect view, bool loading_first) {
   /* the result playing inline: pinned at the top once its card scrolled above the list
   ** (an overlay: the list keeps its place, so it docks and undocks where the card meets the edge) */
   int pk = -1;
-  if (video_inline_active())
+  if (video_inline_active() || video_float_active())
     for (int i = 0; i < S.n && pk < 0; i++)
       if (video_inline_is(&S.items[i])) pk = i;
+  if (pk >= 0 && video_float_active() && !loading_first) video_float_dock();   /* its card is here: it goes in */
   FmRect dock = { 0, 0, 0, 0 };
   S.inline_docked = false;
   if (pk >= 0 && conf.online_sticky && !loading_first) {
@@ -1310,8 +1311,7 @@ static void draw_src_chips(FmRect r) {
 
 static void go_back(void) {
   if (ui.focus == ui_id("on.search")) { ui_focus(0); return; }
-  if (video_inline_active()) { video_inline_stop(); return; }   /* Back stops the video first */
-  online_close();
+  online_close();                      /* a video playing in a result floats on */
 }
 
 /* Downloads button: a ring shows the progress, a dot the count. */
@@ -1731,7 +1731,7 @@ void online_open(const char *source) {
 }
 
 void online_close(void) {
-  video_inline_stop();
+  video_inline_float();                /* it goes on over the other screens */
   S.open = false;
   S.detail_open = S.tray_open = false;
   if (S.prep) { drop_task(S.prep); S.prep = NULL; }
@@ -1777,9 +1777,18 @@ void online_pump(void) {
   }
 }
 
+static bool g_drawn;                   /* online_frame ran since online_was_drawn last asked */
+
+bool online_was_drawn(void) {
+  bool d = g_drawn;
+  g_drawn = false;
+  return d;
+}
+
 void online_frame(FmRect area) {
   menu_results();
   if (!S.open) return;
+  g_drawn = true;
   theme_draw_bg(area);
   bool narrow = area.w / ui.scale < 760;
   FmRect r = area;
@@ -1803,11 +1812,11 @@ void online_frame(FmRect area) {
   draw_body(r);
   draw_top(top, narrow);
   if (!S.open) return;
-  /* the result playing inline left the list (a new search): its video ends */
+  /* the result playing inline left the list (a new search): its video floats on */
   if (video_inline_active() && !S.inline_seen) {
     bool listed = false;
     for (int i = 0; i < S.n && !listed; i++) listed = video_inline_is(&S.items[i]);
-    if (!listed) video_inline_stop();
+    if (!listed) video_inline_float();
   }
   /* one overlay at a time: preparing, then details, then the tray */
   if (S.prep_open) draw_prep();
