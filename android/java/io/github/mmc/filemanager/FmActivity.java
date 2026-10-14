@@ -132,26 +132,72 @@ public class FmActivity extends SDLActivity {
     private boolean mInPip, mStopped;
     private long mPipEnd;                                 /* when the window last went (uptime ms) */
 
+    private boolean mAutoPip;                             /* Android 12+: the system enters PiP on the home gesture */
+
     @Override
     protected void onUserLeaveHint() {
         super.onUserLeaveHint();
-        enterPipIfPlaying();
+        if (!mAutoPip) enterPip(false);
     }
 
-    private void enterPipIfPlaying() {
+    private static android.app.PictureInPictureParams.Builder pipParams(float a) {
+        android.app.PictureInPictureParams.Builder b = new android.app.PictureInPictureParams.Builder();
+        if (a > 0) {
+            a = Math.max(1 / 2.39f, Math.min(2.39f, a));              /* the system's limits */
+            b.setAspectRatio(new android.util.Rational(Math.round(a * 1000), 1000));
+        }
+        return b;
+    }
+
+    /* force: the player's PiP button (no "is it playing" check). */
+    private void enterPip(boolean force) {
         try {
-            if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return;
-            if (!nativePipWanted()) return;
-            android.app.PictureInPictureParams.Builder b = new android.app.PictureInPictureParams.Builder();
-            float a = nativePipAspect();
-            if (a > 0) {
-                a = Math.max(1 / 2.39f, Math.min(2.39f, a));          /* the system's limits */
-                b.setAspectRatio(new android.util.Rational(Math.round(a * 1000), 1000));
-            }
-            enterPictureInPictureMode(b.build());
+            if (!fmPipAvailable()) return;
+            if (!force && !nativePipWanted()) return;
+            enterPictureInPictureMode(pipParams(nativePipAspect()).build());
         } catch (Exception | UnsatisfiedLinkError e) {
             /* not allowed here: the video goes on as sound */
         }
+    }
+
+    /* Called from C: the phone has PiP and it is allowed for this app
+       (Settings > Apps > Picture-in-picture can switch it off). */
+    public boolean fmPipAvailable() {
+        try {
+            if (!getPackageManager().hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return false;
+            android.app.AppOpsManager ops = (android.app.AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
+            if (ops == null) return true;
+            @SuppressWarnings("deprecation")
+            int mode = ops.checkOpNoThrow("android:picture_in_picture", android.os.Process.myUid(), getPackageName());
+            return mode == android.app.AppOpsManager.MODE_ALLOWED;
+        } catch (Exception e) {
+            return true;                                  /* unknown: let the system decide */
+        }
+    }
+
+    /* Called from C (the player's PiP button): false when this phone cannot. */
+    public boolean fmEnterPip() {
+        if (!fmPipAvailable()) return false;
+        runOnUiThread(new Runnable() { @Override public void run() { enterPip(true); } });
+        return true;
+    }
+
+    /* Called from C when a picture starts or stops playing: on Android 12+
+       the home gesture (no Home button) then shrinks it into PiP by itself. */
+    public void fmPipAuto(final boolean want, final float aspect) {
+        if (Build.VERSION.SDK_INT < 31) return;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    boolean on = want && fmPipAvailable();
+                    setPictureInPictureParams(pipParams(aspect).setAutoEnterEnabled(on).build());
+                    mAutoPip = on;
+                } catch (Exception e) {
+                    mAutoPip = false;                     /* refused: onUserLeaveHint still tries */
+                }
+            }
+        });
     }
 
     @Override

@@ -185,9 +185,43 @@ float plat_refresh_hz(void) { return SDL_AtomicGet(&g_hz100) / 100.0f; }
 static SDL_atomic_t g_pip_want, g_pip_aspect1000, g_pip_on, g_pip_gone;
 
 void plat_pip_set(bool want, float aspect) {
-  SDL_AtomicSet(&g_pip_want, want ? 1 : 0);
-  SDL_AtomicSet(&g_pip_aspect1000, aspect > 0 && aspect < 100 ? (int)(aspect * 1000.0f + 0.5f) : 0);
+  int a = aspect > 0 && aspect < 100 ? (int)(aspect * 1000.0f + 0.5f) : 0;
+  int was = SDL_AtomicSet(&g_pip_want, want ? 1 : 0), was_a = SDL_AtomicSet(&g_pip_aspect1000, a);
+  /* Android 12+: told when it changes, so the home gesture enters PiP by itself */
+  static bool told;
+  if (told && was == (want ? 1 : 0) && (!want || was_a == a)) return;
+  told = true;
+  Jni j;
+  if (jni_begin(&j)) {
+    jmethodID m = method(&j, "fmPipAuto", "(ZF)V");
+    if (m) (*j.env)->CallVoidMethod(j.env, j.act, m, (jboolean)(want ? JNI_TRUE : JNI_FALSE), (jfloat)(a / 1000.0f));
+  }
+  jni_end(&j);
 }
+
+static bool call_bool_void(const char *name) {
+  bool r = false;
+  Jni j;
+  if (jni_begin(&j)) {
+    jmethodID m = method(&j, name, "()Z");
+    if (m) r = (*j.env)->CallBooleanMethod(j.env, j.act, m) != JNI_FALSE;
+  }
+  jni_end(&j);
+  return r;
+}
+
+bool plat_pip_available(void) {
+  static u64 at;
+  static bool ok;
+  u64 now = SDL_GetTicks64();
+  if (!at || now - at > 3000) {         /* the user may switch it in the system settings meanwhile */
+    at = now;
+    ok = call_bool_void("fmPipAvailable");
+  }
+  return ok;
+}
+
+bool plat_pip_enter(void) { return call_bool_void("fmEnterPip"); }
 
 bool plat_pip_active(void) { return SDL_AtomicGet(&g_pip_on) != 0; }
 bool plat_pip_dismissed(void) { return SDL_AtomicSet(&g_pip_gone, 0) != 0; }

@@ -876,6 +876,8 @@ float plat_refresh_hz(void) { return 0; } /* fplat_android.c on Android */
 void plat_pip_set(bool want, float aspect) { FM_UNUSED(want); FM_UNUSED(aspect); }
 bool plat_pip_active(void) { return false; }
 bool plat_pip_dismissed(void) { return false; }
+bool plat_pip_available(void) { return false; }
+bool plat_pip_enter(void) { return false; }
 #endif
 
 /* Linux/BSD/macOS: square corners for now (needs per-platform window work). */

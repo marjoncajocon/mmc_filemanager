@@ -1609,9 +1609,24 @@ static void pip_frame(FmRect area, bool ready) {
   if (ui_key(SDLK_SPACE, 0) && ready) set_paused(!V.paused);
 }
 #else
-static void pip_enter(void) {}
+/* Phones: the system's PiP window (Android; FmActivity), the picture only. */
+static void pip_enter(void) {
+#ifdef FM_ANDROID
+  if (V.open && V.info.has_video && !plat_pip_enter())
+    ui_toast("Picture in picture is off for this app (Android settings, Apps, mmcfm)");
+#endif
+}
 static void pip_exit(void) {}
 #endif
+
+/* The PiP button and menu item: the desktop's small window, Android's own, or none (web). */
+static bool pip_can(void) {
+#if !defined(FM_MOBILE) && !defined(FM_WEB)
+  return true;
+#else
+  return plat_pip_available();
+#endif
+}
 
 bool video_pip_active(void) {
 #if !defined(FM_MOBILE) && !defined(FM_WEB)
@@ -2062,9 +2077,8 @@ static void vid_view_frame(FmRect area) {
     FmMenuItem items[] = {
       { VM_INFO, IC_INFO, "Video info", NULL, ready ? 0 : UI_MI_DISABLED },
       { VM_BG, IC_MUSIC, "Play in background (sound only)", "B", can_bg ? 0 : UI_MI_DISABLED },
-#ifndef FM_MOBILE
-      { VM_PIP, IC_PIP, "Picture in picture (small window)", "P", ready && V.info.has_video ? 0 : UI_MI_DISABLED },
-#endif
+      { VM_PIP, IC_PIP, "Picture in picture (small window)", "P",
+        ready && V.info.has_video && pip_can() ? 0 : UI_MI_DISABLED },
       { VM_QUALITY, IC_SETTINGS, "Quality", NULL, 0 },
       { VM_LYRICS, V.lyrics ? IC_CHECK : IC_MIC, "Lyrics (sing along)", NULL, ready && V.info.has_audio ? 0 : UI_MI_DISABLED },
       { VM_SHARE, IC_SHARE, "Share", NULL, V.stream ? UI_MI_DISABLED : 0 },
@@ -2096,12 +2110,12 @@ static void vid_view_frame(FmRect area) {
     to_background(false);
     return;
   }
-#ifndef FM_MOBILE
-  if (ready && V.info.has_video &&
+  if (ready && V.info.has_video && pip_can() &&
       view_bar_btn(&act, ui_id("vid.pipbtn"), IC_PIP, "Picture in picture (P)", VIEW_BAR_MEDIA, chrome, false)) {
     pip_enter();
     return;
   }
+#ifndef FM_MOBILE
   if (view_bar_btn(&act, ui_id("vid.fs"), IC_FULLSCREEN, "Fullscreen (F)", VIEW_BAR_MEDIA, chrome, V.fullscreen_set))
     toggle_fullscreen();
 #endif
@@ -2448,6 +2462,13 @@ static void inline_render(FmRect r, float rad, int mode) {
     FmRect fb = full_ctl ? FM_RECT(r.x + r.w - bs - DP(4), r.y + r.h - bs - DP(22), bs, bs)
                          : FM_RECT(r.x + DP(4), r.y + DP(4), bs, bs);
     if (ui_icon_btn(ui_idn(base, 3), fb, IC_FULLSCREEN, VIEW_FG, "Full screen")) { inline_to_full(); return; }
+#ifdef FM_ANDROID
+    /* the system's PiP window, next to it (the home gesture also opens it on Android 12+) */
+    if (ready && V.info.has_video && pip_can()) {
+      FmRect pb = full_ctl ? FM_RECT(fb.x - bs - DP(2), fb.y, bs, bs) : FM_RECT(fb.x + bs + DP(2), fb.y, bs, bs);
+      if (ui_icon_btn(ui_idn(base, 7), pb, IC_PIP, VIEW_FG, "Picture in picture")) { pip_enter(); act = true; }
+    }
+#endif
     FmRect cb = { r.x + r.w - bs - DP(4), r.y + DP(4), bs, bs };
     if (ui_icon_btn(ui_idn(base, 4), cb, IC_CLOSE, VIEW_FG, "Stop")) { video_inline_stop(); return; }
   }

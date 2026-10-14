@@ -126,6 +126,10 @@ float plat_refresh_hz(void);
 void plat_pip_set(bool want, float aspect);
 bool plat_pip_active(void);
 bool plat_pip_dismissed(void);
+/* The phone has PiP and allows it for the app; enter it now (the player's
+** button): false when it cannot. */
+bool plat_pip_available(void);
+bool plat_pip_enter(void);
 
 /* Storage permission (Android 11+: all-files access). Desktop: always true. */
 bool plat_storage_granted(void);
