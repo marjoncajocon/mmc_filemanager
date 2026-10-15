@@ -81,6 +81,7 @@ Version: 0.2.0. Licence: MIT (see `LICENSE`, and `LICENSES.md` for third-party c
     1. pl_mpeg (MPEG-1)
     2. FFmpeg 4-8 shared libraries, if found
     3. the OS decoder: Media Foundation on Windows, MediaCodec on Android
+  - **GPU decoding** on Windows 8+: Media Foundation decodes through a Direct3D 11 device (DXVA and hardware decoders); the player's info line then says "Media Foundation GPU". With no usable GPU, a format the GPU cannot output, or a decode error during playback, it goes on with the CPU from the same place. Thumbnails always decode on the CPU.
     4. the built-in portable decoder (WebM with VP9 and Opus) on every target, tcc and web included
   - Picture shapes: Fit, Fill, Stretch, 16:9, 4:3, 21:9, 1:1, 9:16 and Original (key A).
   - Touch lock.
@@ -424,6 +425,7 @@ The tests are offline by default. Network checks are opt-in through the variable
 | `MMCFM_INPUT_TRACE=1` | Logs where presses land. |
 | `MMCFM_CORNERS=region` | Forces the Windows 7/8/10 rounded-corner path on Windows 11. |
 | `MMCFM_VIDEO_BACKEND=soft\|os\|ffmpeg` | Forces one video backend. |
+| `MMCFM_MF_HW=0` | (Windows) Media Foundation decodes on the CPU only (no Direct3D 11 device). |
 | `MMCFM_VIDEO_SAMPLES=DIR` | Self test plays every video in DIR. |
 | `MMCFM_SOFT_BENCH=FILE\|URL[\|...]` | Built-in VP9 decoder speed. |
 | `MMCFM_URL_TEST=URL` | Opens a video URL and decodes frames. |

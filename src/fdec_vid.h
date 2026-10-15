@@ -20,7 +20,9 @@
 #include "fcore.h"
 #include "fdec_img.h"
 
-enum { VID_OPEN_AUDIO_ONLY = 1, VID_OPEN_NO_AUDIO = 2 };
+/* VID_OPEN_NO_HW: decode on the CPU (thumbnails: one frame does not pay
+** for a hardware decoder's start-up and video memory). */
+enum { VID_OPEN_AUDIO_ONLY = 1, VID_OPEN_NO_AUDIO = 2, VID_OPEN_NO_HW = 4 };
 
 typedef struct FmVidInfo {
   bool has_video, has_audio;

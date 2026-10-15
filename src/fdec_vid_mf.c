@@ -22,6 +22,15 @@
 **   - Synchronous ReadSample on the caller's (worker) thread; COM is
 **     initialised per call thread as multithreaded, and MFStartup /
 **     MFShutdown are reference counted by Media Foundation itself.
+**   - GPU decoding (Windows 8+): the reader gets a DXGI device manager over
+**     one shared Direct3D 11 device (d3d11.dll loaded at run time, video
+**     support, multithread protected), so decoders use DXVA and hardware
+**     MFTs. Frames come back in video memory; Lock2D reads them into a
+**     staging copy, and they leave as the same YUV420P planes. Everything
+**     falls back to the CPU: no device (Windows 7, no driver, remote
+**     session), no output type through the GPU, or a decode error before or
+**     during playback (reopened on the CPU at the same time). Thumbnails
+**     (VID_OPEN_NO_HW) and MMCFM_MF_HW=0 stay on the CPU.
 */
 #include "fcore.h"
 
@@ -35,6 +44,8 @@
 #include <mfreadwrite.h>
 #include <mferror.h>
 #include <propvarutil.h>
+#include <d3d11.h>
+#include <d3d10.h>                 /* ID3D10Multithread: works on D3D11 devices, Windows 7+ */
 
 #include "fdec_vid_int.h"
 #include "fnetstream.h"
@@ -51,6 +62,10 @@ typedef HRESULT (WINAPI *MFCreateReaderFn)(LPCWSTR, IMFAttributes *, IMFSourceRe
 typedef HRESULT (WINAPI *MFCreateReaderBsFn)(IMFByteStream *, IMFAttributes *, IMFSourceReader **);
 typedef HRESULT (WINAPI *MFCreateAsyncResultFn)(IUnknown *, IMFAsyncCallback *, IUnknown *, IMFAsyncResult **);
 typedef HRESULT (WINAPI *MFInvokeCallbackFn)(IMFAsyncResult *);
+typedef HRESULT (WINAPI *MFCreateDXGIDeviceManagerFn)(UINT *, IMFDXGIDeviceManager **);
+typedef HRESULT (WINAPI *D3D11CreateDeviceFn)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT,
+                                              const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
+                                              D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
 
 static struct {
   int state;                 /* 0 untried, 1 ok, -1 missing */
@@ -62,6 +77,7 @@ static struct {
   MFCreateReaderBsFn create_reader_bs;     /* streaming through our byte stream */
   MFCreateAsyncResultFn create_async;
   MFInvokeCallbackFn invoke;
+  MFCreateDXGIDeviceManagerFn create_dxgi_manager;   /* Windows 8+ */
 } mf;
 
 static SDL_SpinLock g_mf_lock;
@@ -84,12 +100,96 @@ static bool mf_load(void) {
           (MFCreateReaderBsFn)(void (*)(void))GetProcAddress(rw, "MFCreateSourceReaderFromByteStream");
       mf.create_async = (MFCreateAsyncResultFn)(void (*)(void))GetProcAddress(plat, "MFCreateAsyncResult");
       mf.invoke = (MFInvokeCallbackFn)(void (*)(void))GetProcAddress(plat, "MFInvokeCallback");
+      mf.create_dxgi_manager =
+          (MFCreateDXGIDeviceManagerFn)(void (*)(void))GetProcAddress(plat, "MFCreateDXGIDeviceManager");
     }
     mf.state = (mf.startup && mf.shutdown && mf.create_attributes && mf.create_media_type &&
                 mf.create_reader) ? 1 : -1;
   }
   SDL_AtomicUnlock(&g_mf_lock);
   return mf.state > 0;
+}
+
+/* ---- GPU decoding: one Direct3D 11 device for every reader ------------------ */
+
+static struct {
+  int state;                 /* 0 untried, 1 ok, -1 unavailable */
+  ID3D11Device *dev;
+  IMFDXGIDeviceManager *mgr;
+} g_hw;
+
+static SDL_SpinLock g_hw_lock;
+
+static void hw_release(void) {
+  if (g_hw.mgr) IMFDXGIDeviceManager_Release(g_hw.mgr);
+  if (g_hw.dev) ID3D11Device_Release(g_hw.dev);
+  g_hw.mgr = NULL;
+  g_hw.dev = NULL;
+}
+
+static bool hw_create(void) {
+  if (!mf.create_dxgi_manager) return false;          /* Windows 7 */
+  HMODULE dll = LoadLibraryW(L"d3d11.dll");
+  D3D11CreateDeviceFn create = dll ? (D3D11CreateDeviceFn)(void (*)(void))GetProcAddress(dll, "D3D11CreateDevice") : NULL;
+  if (!create) return false;
+  static const D3D_FEATURE_LEVEL kLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
+                                               D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_9_3 };
+  UINT fl = D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+  HRESULT hr = create(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, fl, kLevels, FM_COUNT(kLevels), D3D11_SDK_VERSION,
+                      &g_hw.dev, NULL, NULL);
+  if (hr == E_INVALIDARG)                             /* no 11_1 (Windows 7 without the platform update) */
+    hr = create(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, fl, kLevels + 1, FM_COUNT(kLevels) - 1, D3D11_SDK_VERSION,
+                &g_hw.dev, NULL, NULL);
+  if (FAILED(hr)) {
+    fm_log("video: no Direct3D 11 video device (0x%08lx), decoding on the CPU", (unsigned long)hr);
+    g_hw.dev = NULL;
+    return false;
+  }
+  /* decoders, the video processor and our Lock2D use it from several threads */
+  ID3D10Multithread *mt = NULL;
+  if (SUCCEEDED(ID3D11Device_QueryInterface(g_hw.dev, &IID_ID3D10Multithread, (void **)&mt))) {
+    ID3D10Multithread_SetMultithreadProtected(mt, TRUE);
+    ID3D10Multithread_Release(mt);
+  }
+  UINT token = 0;
+  if (FAILED(mf.create_dxgi_manager(&token, &g_hw.mgr)) ||
+      FAILED(IMFDXGIDeviceManager_ResetDevice(g_hw.mgr, (IUnknown *)g_hw.dev, token))) {
+    hw_release();
+    return false;
+  }
+  char name[128] = "?";
+  IDXGIDevice *dd = NULL;
+  IDXGIAdapter *ad = NULL;
+  DXGI_ADAPTER_DESC desc;
+  if (SUCCEEDED(ID3D11Device_QueryInterface(g_hw.dev, &IID_IDXGIDevice, (void **)&dd)) &&
+      SUCCEEDED(IDXGIDevice_GetAdapter(dd, &ad)) && SUCCEEDED(IDXGIAdapter_GetDesc(ad, &desc)))
+    WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, sizeof name, NULL, NULL);
+  if (ad) IDXGIAdapter_Release(ad);
+  if (dd) IDXGIDevice_Release(dd);
+  fm_log("video: GPU decoding through Direct3D 11 on %s", name);
+  return true;
+}
+
+/* The shared device manager (a new reference), or NULL: decode on the CPU.
+** A removed device (driver update, TDR) is made again on the next open. */
+static IMFDXGIDeviceManager *hw_manager(void) {
+  IMFDXGIDeviceManager *m = NULL;
+  SDL_AtomicLock(&g_hw_lock);
+  if (g_hw.state > 0 && FAILED(ID3D11Device_GetDeviceRemovedReason(g_hw.dev))) {
+    fm_log("video: the Direct3D 11 device was lost, making a new one");
+    hw_release();
+    g_hw.state = 0;
+  }
+  if (!g_hw.state) {
+    const char *e = getenv("MMCFM_MF_HW");
+    g_hw.state = (e && *e == '0') || !hw_create() ? -1 : 1;
+  }
+  if (g_hw.state > 0) {
+    m = g_hw.mgr;
+    IMFDXGIDeviceManager_AddRef(m);
+  }
+  SDL_AtomicUnlock(&g_hw_lock);
+  return m;
 }
 
 /* IMF2DBuffer gives the real row pitch; declared here so no uuid lib is needed. */
@@ -504,6 +604,10 @@ typedef struct MfVid {
   double hls_start;          /* the time byte 0 of this open plays at */
   LONGLONG t_off;            /* added to timestamps: older TS restarts at 0 */
   bool t_checked;
+  /* GPU decoding: the reader has the DXGI device manager; gpu_err = a
+  ** frame could not be read back (lost device) */
+  bool hw, gpu_err, hw_logged;
+  double last_t;             /* the latest sample handed out (s): resumes there on the CPU */
 } MfVid;
 
 #define NO_STREAM ((DWORD)-1)
@@ -685,12 +789,18 @@ static void mf_close(void *st) {
   fm_free(m);
 }
 
-static IMFSourceReader *make_reader(const wchar_t *url, IMFByteStream *bs, bool advanced) {
+/* gpu: decode through that device manager (only with the advanced
+** processor: the basic one refuses Direct3D) */
+static IMFSourceReader *make_reader(const wchar_t *url, IMFByteStream *bs, bool advanced, IMFDXGIDeviceManager *gpu) {
   IMFAttributes *a = NULL;
   IMFSourceReader *rd = NULL;
-  if (FAILED(mf.create_attributes(&a, 2))) return NULL;
+  if (FAILED(mf.create_attributes(&a, 4))) return NULL;
   IMFAttributes_SetUINT32(a, advanced ? &MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING
                                       : &MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+  if (gpu) {
+    IMFAttributes_SetUnknown(a, &MF_SOURCE_READER_D3D_MANAGER, (IUnknown *)gpu);
+    IMFAttributes_SetUINT32(a, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+  }
   HRESULT hr = bs ? mf.create_reader_bs(bs, a, &rd) : mf.create_reader(url, a, &rd);
   if (FAILED(hr)) {
     if (bs) fm_log("video: Media Foundation refused the stream (0x%08lx)", (unsigned long)hr);
@@ -702,8 +812,34 @@ static IMFSourceReader *make_reader(const wchar_t *url, IMFByteStream *bs, bool 
 
 static bool is_url(const char *p) { return !fm_strnicmp(p, "http://", 7) || !fm_strnicmp(p, "https://", 8); }
 
+/* Whether the video decoder the reader picked runs on the GPU: a hardware
+** MFT, or one that takes Direct3D 11 (DXVA; Microsoft's decoders). */
+static bool decoder_on_gpu(IMFSourceReader *rd) {
+  IMFSourceReaderEx *ex = NULL;
+  bool gpu = false;
+  if (FAILED(IMFSourceReader_QueryInterface(rd, &IID_IMFSourceReaderEx, (void **)&ex))) return false;
+  for (DWORD i = 0; i < 8; i++) {
+    GUID cat;
+    IMFTransform *t = NULL;
+    if (FAILED(IMFSourceReaderEx_GetTransformForStream(ex, MF_SOURCE_READER_FIRST_VIDEO_STREAM, i, &cat, &t))) break;
+    bool dec = IsEqualGUID(&cat, &MFT_CATEGORY_VIDEO_DECODER);
+    IMFAttributes *a = NULL;
+    if (dec && SUCCEEDED(IMFTransform_GetAttributes(t, &a)) && a) {
+      UINT32 len = 0;
+      gpu = SUCCEEDED(IMFAttributes_GetStringLength(a, &MFT_ENUM_HARDWARE_URL_Attribute, &len)) ||
+            attr_u32(a, &MF_SA_D3D11_AWARE, 0);
+    }
+    sr(a);
+    sr(t);
+    if (dec) break;
+  }
+  sr(ex);
+  return gpu;
+}
+
 static void *mf_open(const char *path, int flags, FmVidInfo *info) {
   if (!mf_load()) return NULL;
+  FmVidInfo info0 = *info;                    /* for a second try on the CPU */
   MfVid *m = (MfVid *)fm_calloc(1, sizeof *m);
   HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
   m->com_init = SUCCEEDED(hr);           /* RPC_E_CHANGED_MODE: COM is already up */
@@ -723,8 +859,14 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
     bs = net_bytestream(path, e, sizeof e);
     if (!bs) { fm_log("video: %s: %s", path, e); vid_note_net_error(e); }
   }
-  m->rd = make_reader(url, bs, true);
-  if (!m->rd) m->rd = make_reader(url, bs, false);
+  IMFDXGIDeviceManager *gpu = (flags & (VID_OPEN_NO_HW | VID_OPEN_AUDIO_ONLY)) ? NULL : hw_manager();
+  if (gpu) {
+    m->rd = make_reader(url, bs, true, gpu);
+    m->hw = m->rd != NULL;
+    IMFDXGIDeviceManager_Release(gpu);        /* the reader holds its own */
+  }
+  if (!m->rd) m->rd = make_reader(url, bs, true, NULL);
+  if (!m->rd) m->rd = make_reader(url, bs, false, NULL);
   if (bs && m->rd) m->bs = BS(bs);            /* our reference, for mf_close */
   else if (bs) IMFByteStream_Release(bs);     /* else the reader keeps its own */
   fm_free(url);
@@ -735,6 +877,12 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
   if (!(flags & VID_OPEN_AUDIO_ONLY)) {
     m->vs = MF_SOURCE_READER_FIRST_VIDEO_STREAM;
     if (FAILED(IMFSourceReader_SetStreamSelection(m->rd, m->vs, TRUE)) || !setup_video(m, info)) {
+      if (m->hw) {                            /* no output type through the GPU: all on the CPU */
+        fm_log("video: no output format through the GPU, opening on the CPU");
+        mf_close(m);
+        *info = info0;
+        return mf_open(path, flags | VID_OPEN_NO_HW, info);
+      }
       IMFSourceReader_SetStreamSelection(m->rd, MF_SOURCE_READER_FIRST_VIDEO_STREAM, FALSE);
       m->vs = NO_STREAM;
     }
@@ -778,7 +926,8 @@ static void *mf_open(const char *path, int flags, FmVidInfo *info) {
   PropVariantClear(&pv);
   m->path = fm_strdup(path);
   m->flags = flags;
-  fm_strlcpy(info->backend, "Media Foundation", sizeof info->backend);
+  bool on_gpu = m->hw && info->has_video && decoder_on_gpu(m->rd);
+  fm_strlcpy(info->backend, on_gpu ? "Media Foundation GPU" : "Media Foundation", sizeof info->backend);
   if (info->has_video) codec_name(m->rd, MF_SOURCE_READER_FIRST_VIDEO_STREAM, info->vcodec, sizeof info->vcodec);
   if (info->has_audio) codec_name(m->rd, MF_SOURCE_READER_FIRST_AUDIO_STREAM, info->acodec, sizeof info->acodec);
   if (m->bs) {                               /* open: playback reads only real bytes */
@@ -840,9 +989,29 @@ static bool emit_video(MfVid *m, IMFSample *s, LONGLONG t100, FmVidFrame *vf) {
       SUCCEEDED(IMF2DBuffer_Lock2D(b2, &data, &pitch)))
     locked2d = true;
   else if (FAILED(IMFMediaBuffer_Lock(buf, &data, NULL, &len))) {
+    if (m->hw) m->gpu_err = true;            /* video memory that cannot be read back */
     sr(b2);
     sr(buf);
     return false;
+  }
+  /* a frame in video memory: its texture may have more rows than the frame
+  ** size (decoder alignment), and NV12's chroma follows all of them */
+  int rows = m->fh;
+  IMFDXGIBuffer *gb = NULL;
+  bool vram = SUCCEEDED(IMFMediaBuffer_QueryInterface(buf, &IID_IMFDXGIBuffer, (void **)&gb));
+  if (vram) {
+    ID3D11Texture2D *tex = NULL;
+    if (SUCCEEDED(IMFDXGIBuffer_GetResource(gb, &IID_ID3D11Texture2D, (void **)&tex))) {
+      D3D11_TEXTURE2D_DESC d;
+      ID3D11Texture2D_GetDesc(tex, &d);
+      if ((int)d.Height > rows) rows = (int)d.Height;
+      ID3D11Texture2D_Release(tex);
+    }
+    IMFDXGIBuffer_Release(gb);
+  }
+  if (!m->hw_logged && m->hw) {
+    m->hw_logged = true;
+    fm_log("video: frames arrive in %s memory", vram ? "video" : "system");
   }
   bool bottom_up = false;
   if (!locked2d) {
@@ -869,7 +1038,7 @@ static bool emit_video(MfVid *m, IMFSample *s, LONGLONG t100, FmVidFrame *vf) {
     int cw = w / 2, ch = h / 2, cx = m->dx / 2, cy = m->dy / 2;
     const u8 *Y = data + (size_t)m->dy * pitch + m->dx;
     if (m->pix == PIX_NV12) {
-      const u8 *UV = data + (size_t)pitch * m->fh;
+      const u8 *UV = data + (size_t)pitch * rows;
       copy_rows(m->plane[0], m->pstride[0], Y, pitch, w, h);
       vid_nv12_split(UV + (size_t)cy * pitch + (size_t)cx * 2, pitch, cw, ch, m->plane[1], m->pstride[1],
                      m->plane[2], m->pstride[2]);
@@ -944,6 +1113,63 @@ static bool emit_audio(MfVid *m, IMFSample *s, LONGLONG t100, FmVidPcm *pc) {
   return frames > 0;
 }
 
+/* Opens the file again (flags as m->flags) at t: in place of a seek the
+** source cannot do, or to leave the GPU. Samples before t are dropped. */
+static bool reopen_at(MfVid *m, double t) {
+  FmVidInfo tmp;
+  memset(&tmp, 0, sizeof tmp);
+  char *at = NULL;
+  if (m->hls && m->path) {                    /* HLS: start at t's segment, not at 0 */
+    size_t n0 = strcspn(m->path, "#");
+    at = (char *)fm_alloc(n0 + 32);
+    memcpy(at, m->path, n0);
+    fm_snprintf(at + n0, 32, "#t=%.3f", t > 0 ? t : 0);
+  }
+  MfVid *n = m->path ? (MfVid *)mf_open(at ? at : m->path, m->flags, &tmp) : NULL;
+  fm_free(at);
+  if (!n) return false;
+  IMFSourceReader *old = m->rd;
+  m->rd = n->rd;
+  n->rd = old;
+  NsBS *ob = m->bs;                           /* the old stream closes with the old reader */
+  m->bs = n->bs;
+  n->bs = ob;
+  m->vi = n->vi;
+  m->ai = n->ai;
+  /* the negotiated types: the CPU decoder may report other sizes */
+  m->pix = n->pix;
+  m->fw = n->fw;
+  m->fh = n->fh;
+  m->dx = n->dx;
+  m->dy = n->dy;
+  m->dw = n->dw;
+  m->dh = n->dh;
+  m->def_stride = n->def_stride;
+  m->ach = n->ach;
+  m->arate = n->arate;
+  m->hw = n->hw;
+  m->gpu_err = false;
+  m->hls_start = n->hls_start;
+  m->t_off = n->t_off;                        /* 0 / unchecked, or live packed audio's clock */
+  m->t_checked = n->t_checked;
+  mf_close(n);
+  m->skip_until = t;
+  return true;
+}
+
+/* A GPU decode failed: go on from the same place on the CPU. */
+static bool cpu_fallback(MfVid *m) {
+  if (!m->hw || m->vs == NO_STREAM) return false;
+  fm_log("video: GPU decoding failed at %.2f s, going on with the CPU", m->last_t);
+  m->hw = false;
+  m->flags |= VID_OPEN_NO_HW;
+  /* resume just past what was handed out (the reopen drops t < skip - 0.02) */
+  if (!reopen_at(m, m->last_t > 0 ? m->last_t + 0.025 : 0)) return false;
+  m->vdone = m->vs == NO_STREAM;
+  m->adone = m->as == NO_STREAM;
+  return true;
+}
+
 static int mf_decode(void *st, FmVidFrame *vf, FmVidPcm *pc) {
   MfVid *m = (MfVid *)st;
   for (int guard = 0; guard < 4096; guard++) {
@@ -952,9 +1178,14 @@ static int mf_decode(void *st, FmVidFrame *vf, FmVidPcm *pc) {
     LONGLONG t = 0;
     IMFSample *s = NULL;
     HRESULT hr = IMFSourceReader_ReadSample(m->rd, MF_SOURCE_READER_ANY_STREAM, 0, &idx, &fl, &t, &s);
-    if (FAILED(hr)) { fm_log("video: Media Foundation read failed (0x%08lx)", (unsigned long)hr); return VID_EV_ERROR; }
+    if (FAILED(hr)) {
+      fm_log("video: Media Foundation read failed (0x%08lx)", (unsigned long)hr);
+      if (cpu_fallback(m)) continue;
+      return VID_EV_ERROR;
+    }
     bool is_v = m->vs != NO_STREAM && !m->vdone && idx == m->vi;
     bool is_a = m->as != NO_STREAM && !m->adone && idx == m->ai;
+    if (is_v && (fl & MF_SOURCE_READERF_ERROR) && cpu_fallback(m)) { sr(s); continue; }
     if (fl & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
       if (is_v && !read_video_type(m, NULL)) { sr(s); return VID_EV_ERROR; }
     }
@@ -975,7 +1206,11 @@ static int mf_decode(void *st, FmVidFrame *vf, FmVidPcm *pc) {
     if (is_v) got = emit_video(m, s, t, vf);
     else if (is_a) got = emit_audio(m, s, t, pc);
     sr(s);
-    if (got) return is_v ? VID_EV_VIDEO : VID_EV_AUDIO;
+    if (m->gpu_err && cpu_fallback(m)) continue;
+    if (got) {
+      if ((double)t / 1e7 > m->last_t) m->last_t = (double)t / 1e7;
+      return is_v ? VID_EV_VIDEO : VID_EV_AUDIO;
+    }
   }
   return VID_EV_ERROR;
 }
@@ -993,36 +1228,10 @@ static bool mf_seek(void *st, double t) {
   HRESULT hr = m->can_seek && !m->hls ? IMFSourceReader_SetCurrentPosition(m->rd, &kTimeFormat100ns, &pv) : E_FAIL;
   PropVariantClear(&pv);
   m->skip_until = 0;
-  if (FAILED(hr)) {
-    /* not seekable (MPEG-TS and some streams): start over, then drop
-    ** everything before t; decoding is fast, drawing is skipped */
-    FmVidInfo tmp;
-    memset(&tmp, 0, sizeof tmp);
-    char *at = NULL;
-    if (m->hls && m->path) {                  /* HLS: start at t's segment, not at 0 */
-      size_t n0 = strcspn(m->path, "#");
-      at = (char *)fm_alloc(n0 + 32);
-      memcpy(at, m->path, n0);
-      fm_snprintf(at + n0, 32, "#t=%.3f", t > 0 ? t : 0);
-    }
-    MfVid *n = m->path ? (MfVid *)mf_open(at ? at : m->path, m->flags, &tmp) : NULL;
-    fm_free(at);
-    if (!n) return false;
-    IMFSourceReader *old = m->rd;
-    m->rd = n->rd;
-    n->rd = old;
-    NsBS *ob = m->bs;                         /* the old stream closes with the old reader */
-    m->bs = n->bs;
-    n->bs = ob;
-    m->vi = n->vi;
-    m->ai = n->ai;
-    m->pix = n->pix;
-    m->hls_start = n->hls_start;
-    m->t_off = n->t_off;                      /* 0 / unchecked, or live packed audio's clock */
-    m->t_checked = n->t_checked;
-    mf_close(n);
-    m->skip_until = t;
-  }
+  m->last_t = t;
+  /* not seekable (MPEG-TS and some streams): start over, then drop
+  ** everything before t; decoding is fast, drawing is skipped */
+  if (FAILED(hr) && !reopen_at(m, t)) return false;
   m->vdone = m->vs == NO_STREAM;
   m->adone = m->as == NO_STREAM;
   return true;

@@ -1124,7 +1124,7 @@ void vid_close(FmVid *v) {
 FmErr vid_thumb(const char *path, int max_px, FmImage *out) {
   memset(out, 0, sizeof *out);
   FmErr err;
-  FmVid *v = vid_open(path, VID_OPEN_NO_AUDIO, &err);
+  FmVid *v = vid_open(path, VID_OPEN_NO_AUDIO | VID_OPEN_NO_HW, &err);
   if (!v) return err;
   if (!v->info.has_video) { vid_close(v); return FM_ERR_FORMAT; }
   /* a little into the clip: first frames are often black */
